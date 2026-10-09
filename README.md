@@ -62,7 +62,7 @@ To update later, download the new version over the old one and run `cargo build 
    Monaka VR has for that game. Options are saved as you change them.
 4. Start **SteamVR** and turn on your headset (the window has a **Start SteamVR** button).
 5. Press **Start VR**. Some games are started for you; for the others the window says to start the
-   game first. Put on the headset. Play.
+   game first. Put on the headset. **Alt+tab into the game** (that is important). Play.
 
 ### Game packs
 
