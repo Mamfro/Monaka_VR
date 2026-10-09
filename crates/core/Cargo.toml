@@ -1,0 +1,10 @@
+[package]
+name = "monaka_core"
+description = "Game-independent VR logic: channel records, head and gaze math, transport rules. No unsafe code."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

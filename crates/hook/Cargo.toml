@@ -1,0 +1,26 @@
+[package]
+name = "monaka_hook"
+description = "In-process hooking for the game producers: fault-free memory access, modules, signature-checked inline hooks and vtable hooks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+monaka_core.workspace = true
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Kernel",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+]
+
+[lints]
+workspace = true

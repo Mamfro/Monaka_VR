@@ -1,0 +1,17 @@
+[package]
+name = "monaka_arms"
+description = "First-person arms on the VR controllers: the arm rig over a game's skeleton, and melee by swinging."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+monaka_core.workspace = true
+monaka_channel.workspace = true
+monaka_hook.workspace = true
+monaka_pad.workspace = true
+monaka_producer.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-only"
+# A game pack carries its crate's `repository` as where it comes from (`monaka_core::pack::About`).
+repository = "https://github.com/Mamfro/monaka_vr"
+
+[workspace.dependencies]
+monaka_arms = { path = "crates/arms" }
+monaka_core = { path = "crates/core" }
+monaka_channel = { path = "crates/channel" }
+monaka_openxr = { path = "crates/openxr" }
+monaka_framegen = { path = "crates/framegen" }
+monaka_fsr11 = { path = "crates/fsr11" }
+monaka_gl = { path = "crates/gl" }
+monaka_hook = { path = "crates/hook" }
+monaka_launch = { path = "crates/launch" }
+monaka_pad = { path = "crates/pad" }
+monaka_producer = { path = "crates/producer" }
+monaka_stereo = { path = "crates/stereo" }
+monaka_streamline = { path = "crates/streamline" }
+monaka_warp = { path = "crates/warp" }
+windows = "0.62"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+# Code that runs inside a game must never unwind into the game's frames.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

@@ -1,0 +1,13 @@
+[package]
+name = "monaka_loader"
+description = "Attaches a producer DLL to a running game and starts or stops it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+monaka_launch.workspace = true
+
+[lints]
+workspace = true

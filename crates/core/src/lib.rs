@@ -1,0 +1,36 @@
+//! Game-independent logic shared by the viewer and the in-game producers.
+//!
+//! Everything here is plain data and arithmetic, so it is testable without a GPU, a headset or a
+//! running game. Code that touches Windows, Direct3D or OpenXR lives in the edge crates.
+#![forbid(unsafe_code)]
+
+pub mod aim;
+pub mod alternate;
+pub mod bmp;
+pub mod camera;
+pub mod convention;
+pub mod depth;
+pub mod fence_rules;
+pub mod fingers;
+pub mod half;
+pub mod hud;
+pub mod manifest;
+pub mod mat4d;
+pub mod math;
+pub mod options;
+pub mod pack;
+pub mod pad;
+pub mod pe;
+pub mod png;
+pub mod protocol;
+pub mod reach;
+pub mod scan;
+pub mod sha256;
+pub mod swing;
+pub mod x64;
+
+/// A value on a 16-byte boundary: engine matrix code reads with aligned SSE loads, and an unaligned
+/// matrix faults (measured in Dying Light 2: "reading 0xffffffffffffffff").
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Aligned16<T>(pub T);

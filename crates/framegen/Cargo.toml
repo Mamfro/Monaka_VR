@@ -1,0 +1,29 @@
+[package]
+name = "monaka_framegen"
+description = "AMD FSR frame generation per image stream (the FFX API from a game's own loader), and the D3D12 HUD composer that keeps a HUD out of it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+monaka_core.workspace = true
+monaka_channel.workspace = true
+monaka_hook.workspace = true
+monaka_producer.workspace = true
+monaka_streamline.workspace = true
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+]
+
+[lints]
+workspace = true

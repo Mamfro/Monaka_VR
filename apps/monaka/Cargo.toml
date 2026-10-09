@@ -1,0 +1,41 @@
+[package]
+name = "monaka"
+description = "The monaka window: pick a game, set its options, start VR. Also monaka_play, the same from the command line."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "monaka"
+path = "src/main.rs"
+
+[[bin]]
+name = "monaka_play"
+path = "src/play.rs"
+
+[dependencies]
+monaka_core.workspace = true
+monaka_launch.workspace = true
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_Xps",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[lints]
+workspace = true

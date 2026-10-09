@@ -1,0 +1,163 @@
+//! Motion vectors for alternate-eye stereo, on the GPU: a game's previous frame is the other eye's,
+//! so its motion vectors point at the wrong image for anything that keeps a history per eye (an
+//! upscaler, frame generation). Either the vectors are rebased onto this eye's previous frame by the
+//! camera (`motion_fix.hlsl`: the game's depth and motion vectors in), or the game's own vectors are
+//! chained over two frames (`motion_compose.hlsl`: the previous frame's vectors and this frame's
+//! in), into a texture of our own given instead. Recorded on the game's own command list just
+//! before the consumer runs, reading the game's textures in a shader-readable state and leaving
+//! them so. Measured on The Beast (DLSS, frame generation); used by Kingdom Come: Deliverance II
+//! (FSR).
+
+use monaka_channel::d3d12::barrier;
+use monaka_channel::d3d12::compute::{self, DescriptorHeap, Table, srv_desc, uav_desc};
+use std::ffi::c_void;
+use windows::Win32::Graphics::Direct3D12::*;
+use windows::Win32::Graphics::Dxgi::Common::*;
+use windows::core::s;
+
+const SOURCE: &str = include_str!("motion_fix.hlsl");
+/// The chaining of the game's vectors over two frames ([`MotionFix::composer`]).
+const COMPOSE_SOURCE: &str = include_str!("motion_compose.hlsl");
+/// Descriptor sets in the ring (three each: depth, motion, output), so a set still read by a frame
+/// in flight on the GPU is not rewritten.
+const SETS: u32 = 8;
+const THREADS: u32 = 8;
+
+/// The shader's constants (40 root constants).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Constants {
+    pub game_to_prev: [f32; 16],
+    pub same_to_prev: [f32; 16],
+    pub size: [u32; 2],
+    pub mvec_scale: [f32; 2],
+    pub object_scale: f32,
+    pub pad: [f32; 3],
+}
+
+impl Constants {
+    /// For the chaining shader ([`MotionFix::composer`]): `scale` turns the game's stored vectors
+    /// into render pixels (1 for vectors already in pixels, The Beast's; the render size for vectors
+    /// in screen units, KCD2's FSR ones). The output keeps the game's units.
+    pub fn chaining(scale: [f32; 2]) -> Self {
+        Self { mvec_scale: scale, ..Self::default() }
+    }
+}
+
+/// The state the output is tagged in for DLSS (readable by any shader), as the game's own were.
+pub const READABLE: D3D12_RESOURCE_STATES = D3D12_RESOURCE_STATES(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0 | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE.0);
+
+pub struct MotionFix {
+    device: ID3D12Device,
+    root: ID3D12RootSignature,
+    pipeline: ID3D12PipelineState,
+    heap: DescriptorHeap,
+    output: Option<(ID3D12Resource, u32, u32)>,
+    next: u32,
+}
+
+/// The view of plane 0 of a tagged texture as the shader reads it.
+fn read_format(format: DXGI_FORMAT) -> Option<DXGI_FORMAT> {
+    match format {
+        DXGI_FORMAT_R32G8X24_TYPELESS | DXGI_FORMAT_D32_FLOAT_S8X24_UINT | DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS => Some(DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS),
+        DXGI_FORMAT_R32_TYPELESS | DXGI_FORMAT_D32_FLOAT | DXGI_FORMAT_R32_FLOAT => Some(DXGI_FORMAT_R32_FLOAT),
+        DXGI_FORMAT_R16G16B16A16_TYPELESS | DXGI_FORMAT_R16G16B16A16_FLOAT => Some(DXGI_FORMAT_R16G16B16A16_FLOAT),
+        DXGI_FORMAT_R16G16_TYPELESS | DXGI_FORMAT_R16G16_FLOAT => Some(DXGI_FORMAT_R16G16_FLOAT),
+        DXGI_FORMAT_R32G32_TYPELESS | DXGI_FORMAT_R32G32_FLOAT => Some(DXGI_FORMAT_R32G32_FLOAT),
+        _ => None,
+    }
+}
+
+impl MotionFix {
+    /// The rebase onto this eye's previous frame by the camera (`motion_fix.hlsl`; its first input is
+    /// the depth).
+    pub fn new(device: &ID3D12Device) -> Result<Self, String> {
+        Self::with_shader(device, SOURCE, "motion_fix.hlsl", s!("Fix"))
+    }
+
+    /// The chaining of the game's vectors over two frames (`motion_compose.hlsl`; its first input is
+    /// the previous frame's motion vectors, in [`READABLE`] while recorded).
+    pub fn composer(device: &ID3D12Device) -> Result<Self, String> {
+        Self::with_shader(device, COMPOSE_SOURCE, "motion_compose.hlsl", s!("Compose"))
+    }
+
+    fn with_shader(device: &ID3D12Device, source: &str, name: &str, entry: windows::core::PCSTR) -> Result<Self, String> {
+        // The constants, then one table: the two inputs and the output.
+        let root = compute::root_signature(device, (size_of::<Constants>() / 4) as u32, &[Table { srvs: 2, uavs: 1 }])?;
+        let pipeline = compute::shader_pipeline(device, &root, source, name, entry)?;
+        let heap = DescriptorHeap::new(device, SETS * 3)?;
+        Ok(Self { device: device.clone(), root, pipeline, heap, output: None, next: 0 })
+    }
+
+    /// Our output for motion vectors of this size, made on first use (in [`READABLE`]).
+    pub fn output(&mut self, width: u32, height: u32) -> Result<ID3D12Resource, String> {
+        if let Some((texture, w, h)) = &self.output
+            && (*w, *h) == (width, height)
+        {
+            return Ok(texture.clone());
+        }
+        let heap = D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() };
+        let desc = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Width: width as u64,
+            Height: height,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: DXGI_FORMAT_R16G16B16A16_FLOAT,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            ..Default::default()
+        };
+        let mut texture: Option<ID3D12Resource> = None;
+        // SAFETY: creation with a valid descriptor into a local out-pointer.
+        unsafe { self.device.CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, READABLE, None, &mut texture) }.map_err(|e| format!("output texture: {e}"))?;
+        let texture = texture.ok_or("output texture: none")?;
+        self.output = Some((texture.clone(), width, height));
+        Ok(texture)
+    }
+
+    /// Records the rebase on `list` (the game's native list, before DLSS evaluates): `depth` and
+    /// `motion` are the game's tagged textures (shader-readable, left so); the result goes into
+    /// [`MotionFix::output`] of the motion vectors' size, which ends in [`READABLE`].
+    pub fn record(&mut self, list: &ID3D12GraphicsCommandList, depth: &ID3D12Resource, motion: &ID3D12Resource, constants: &Constants) -> Result<(), String> {
+        // SAFETY: descriptor reads of live resources.
+        let (depth_desc, motion_desc) = unsafe { (depth.GetDesc(), motion.GetDesc()) };
+        let depth_format = read_format(depth_desc.Format).ok_or_else(|| format!("depth format {} not handled", depth_desc.Format.0))?;
+        let motion_format = read_format(motion_desc.Format).ok_or_else(|| format!("motion vector format {} not handled", motion_desc.Format.0))?;
+        let (width, height) = (motion_desc.Width as u32, motion_desc.Height);
+        let output = self.output(width, height)?;
+        let base = (self.next % SETS) * 3;
+        self.next = self.next.wrapping_add(1);
+        let mut constants = *constants;
+        constants.size = [width, height];
+        // SAFETY: views of live resources written into our own heap; commands recorded on a list
+        // being recorded, with our heap, root signature and pipeline (DLSS's evaluate, right after,
+        // sets its own and Streamline puts the game's back).
+        unsafe {
+            self.device.CreateShaderResourceView(depth, Some(&srv_desc(depth_format)), self.heap.cpu(base));
+            self.device.CreateShaderResourceView(motion, Some(&srv_desc(motion_format)), self.heap.cpu(base + 1));
+            self.device.CreateUnorderedAccessView(&output, None, Some(&uav_desc(DXGI_FORMAT_R16G16B16A16_FLOAT)), self.heap.cpu(base + 2));
+            barrier(list, &output, READABLE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            list.SetDescriptorHeaps(&[Some(self.heap.heap().clone())]);
+            list.SetComputeRootSignature(&self.root);
+            list.SetPipelineState(&self.pipeline);
+            list.SetComputeRoot32BitConstants(0, (size_of::<Constants>() / 4) as u32, &constants as *const Constants as *const c_void, 0);
+            list.SetComputeRootDescriptorTable(1, self.heap.gpu(base));
+            list.Dispatch(width.div_ceil(THREADS), height.div_ceil(THREADS), 1);
+            barrier(list, &output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, READABLE);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_shader_compiles_and_its_constants_fit() {
+        compute::compile(SOURCE, "motion_fix.hlsl", s!("Fix")).expect("motion_fix.hlsl compiles");
+        compute::compile(COMPOSE_SOURCE, "motion_compose.hlsl", s!("Compose")).expect("motion_compose.hlsl compiles");
+        assert_eq!(size_of::<Constants>(), 40 * 4);
+    }
+}

@@ -1,0 +1,30 @@
+[package]
+name = "monaka_launch"
+description = "Plays a game in VR in one call: finds or starts it, attaches its producer, runs the viewer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+monaka_core.workspace = true
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Wdk_System_Threading",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[lints]
+workspace = true

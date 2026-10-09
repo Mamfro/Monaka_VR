@@ -1,0 +1,749 @@
+//! Hooks. An inline hook replaces the first instructions of a function with a jump to a relay
+//! near it, which jumps to the detour; the replaced instructions run from a trampoline the detour
+//! calls as the original. The instructions must be described exactly ([`Instruction`]) and are
+//! checked byte for byte before anything is written, so a different game build is refused
+//! instead of corrupted. A vtable hook swaps one method pointer in an object's vtable; an import
+//! hook swaps one entry of a module's import address table.
+//!
+//! Relays and trampolines are never freed: a thread may still be inside one after a hook is
+//! removed.
+
+use crate::threads::Frozen;
+use crate::{Error, Result, mem};
+use std::marker::PhantomData;
+use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use windows::Win32::System::Diagnostics::Debug::FlushInstructionCache;
+use windows::Win32::System::Memory::{
+    MEM_COMMIT, MEM_FREE, MEM_RESERVE, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS, PAGE_READWRITE,
+    VirtualAlloc, VirtualProtect, VirtualQuery,
+};
+use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+use windows::Win32::System::Threading::GetCurrentProcess;
+
+/// One instruction of a hooked prologue, exactly as it must appear in the game.
+#[derive(Clone, Copy, Debug)]
+pub struct Instruction {
+    bytes: &'static [u8],
+    /// Offset of a 32-bit displacement relative to the end of the instruction, if any.
+    rip_displacement: Option<usize>,
+}
+
+impl Instruction {
+    /// An instruction that runs the same anywhere.
+    pub const fn plain(bytes: &'static [u8]) -> Self {
+        Self { bytes, rip_displacement: None }
+    }
+
+    /// An instruction with a rip-relative 32-bit displacement at byte `offset`. The displacement
+    /// bytes are part of the signature; the trampoline gets a corrected copy.
+    pub const fn rip_relative(bytes: &'static [u8], offset: usize) -> Self {
+        Self { bytes, rip_displacement: Some(offset) }
+    }
+}
+
+use crate::arch::{RELAY_SIZE, absolute_jump, relative32};
+const TRAMPOLINE_OFFSET: usize = 32;
+const BLOCK_SIZE: usize = 4096;
+
+/// Commits a block of executable memory within a rel32 jump of `target`.
+fn allocate_near(target: usize) -> Option<usize> {
+    let mut info = SYSTEM_INFO::default();
+    // SAFETY: fills a local.
+    unsafe { GetSystemInfo(&mut info) };
+    let granularity = info.dwAllocationGranularity.max(0x10000) as usize;
+    let reach = 0x7000_0000usize;
+    let origin = target & !(granularity - 1);
+    for step in 1..(reach / granularity) {
+        for candidate in [origin.checked_sub(step * granularity), origin.checked_add(step * granularity)].into_iter().flatten() {
+            let mut region = MEMORY_BASIC_INFORMATION::default();
+            // SAFETY: queries an address; no memory is touched.
+            let queried = unsafe { VirtualQuery(Some(candidate as *const _), &mut region, size_of::<MEMORY_BASIC_INFORMATION>()) };
+            if queried == 0 || region.State != MEM_FREE {
+                continue;
+            }
+            // SAFETY: reserves and commits fresh pages at a free address.
+            let block = unsafe { VirtualAlloc(Some(candidate as *const _), BLOCK_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE) };
+            if !block.is_null() {
+                return Some(block as usize);
+            }
+        }
+    }
+    None
+}
+
+/// Writes code over memory that may be read-only, then restores its protection. Allocates
+/// nothing (it runs while other threads are frozen).
+///
+/// # Safety
+/// `address..address+bytes.len()` must be memory this process may change, and no thread may be
+/// executing the bytes being replaced.
+unsafe fn overwrite(address: usize, bytes: &[u8]) -> windows::core::Result<()> {
+    let mut previous = PAGE_PROTECTION_FLAGS::default();
+    // SAFETY: the caller guarantees the range; protection is restored right after the copy.
+    unsafe {
+        VirtualProtect(address as *const _, bytes.len(), PAGE_EXECUTE_READWRITE, &mut previous)?;
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), address as *mut u8, bytes.len());
+        let mut ignored = PAGE_PROTECTION_FLAGS::default();
+        let _ = VirtualProtect(address as *const _, bytes.len(), previous, &mut ignored);
+        let _ = FlushInstructionCache(GetCurrentProcess(), Some(address as *const _), bytes.len());
+    }
+    Ok(())
+}
+
+struct InlineHook {
+    name: String,
+    target: usize,
+    original: Vec<u8>,
+    patch: Vec<u8>,
+    enabled: bool,
+}
+
+impl InlineHook {
+    /// Checks the target against an exactly described prologue, then builds the hook.
+    fn described(name: &str, target: usize, prologue: &[Instruction], detour: usize) -> Result<(Self, usize)> {
+        let mut length = 0;
+        let mut used = 0;
+        while length < 5 {
+            let Some(instruction) = prologue.get(used) else {
+                return Err(Error::Refused(format!("{name}: the described prologue is shorter than a jump")));
+            };
+            length += instruction.bytes.len();
+            used += 1;
+        }
+        let expected: Vec<u8> = prologue[..used].iter().flat_map(|i| i.bytes.iter().copied()).collect();
+        let mut actual = vec![0u8; length];
+        if !mem::read_bytes(target, &mut actual) || actual != expected {
+            return Err(Error::Signature(name.to_owned()));
+        }
+        let parts: Vec<(&[u8], Option<usize>)> = prologue[..used].iter().map(|i| (i.bytes, i.rip_displacement)).collect();
+        Self::prepare(name, target, &parts, detour)
+    }
+
+    /// Decodes the target's own first instructions ([`crate::decode`]), then builds the hook.
+    fn decoded(name: &str, target: usize, detour: usize) -> Result<(Self, usize)> {
+        let mut bytes = [0u8; 32];
+        if !mem::read_bytes(target, &mut bytes) {
+            return Err(Error::Refused(format!("{name}: code unreadable")));
+        }
+        let decoded = crate::decode::prologue(&bytes, 5).ok_or_else(|| Error::Signature(format!("{name} (prologue not decodable)")))?;
+        let mut at = 0;
+        let parts: Vec<(&[u8], Option<usize>)> = decoded
+            .iter()
+            .map(|d| {
+                let part = (&bytes[at..at + d.length], d.rip_displacement);
+                at += d.length;
+                part
+            })
+            .collect();
+        Self::prepare(name, target, &parts, detour)
+    }
+
+    /// Builds the relay and trampoline for instructions known to be the target's first ones;
+    /// writes nothing at the target.
+    fn prepare(name: &str, target: usize, parts: &[(&[u8], Option<usize>)], detour: usize) -> Result<(Self, usize)> {
+        let actual: Vec<u8> = parts.iter().flat_map(|(bytes, _)| bytes.iter().copied()).collect();
+        let length = actual.len();
+        let block = allocate_near(target).ok_or_else(|| Error::NoNearMemory(name.to_owned()))?;
+
+        let mut trampoline = Vec::with_capacity(length + RELAY_SIZE);
+        let mut source = target;
+        for &(bytes, rip_displacement) in parts {
+            let start = trampoline.len();
+            trampoline.extend_from_slice(bytes);
+            if let Some(offset) = rip_displacement {
+                let at = offset..offset + 4;
+                let displacement = i32::from_le_bytes(bytes[at.clone()].try_into().expect("4 bytes")) as isize;
+                let absolute = (source + bytes.len()).wrapping_add_signed(displacement);
+                let moved = relative32(block + TRAMPOLINE_OFFSET + start + bytes.len(), absolute).ok_or_else(|| Error::NoNearMemory(name.to_owned()))?;
+                trampoline[start + at.start..start + at.end].copy_from_slice(&moved.to_le_bytes());
+            }
+            source += bytes.len();
+        }
+        trampoline.extend_from_slice(&absolute_jump(target + length));
+
+        let mut patch = vec![0x90u8; length];
+        let relative = relative32(target + 5, block).ok_or_else(|| Error::NoNearMemory(name.to_owned()))?;
+        patch[0] = 0xe9;
+        patch[1..5].copy_from_slice(&relative.to_le_bytes());
+
+        // SAFETY: the block is fresh RWX memory of BLOCK_SIZE bytes that nothing else uses yet.
+        unsafe {
+            std::ptr::copy_nonoverlapping(absolute_jump(detour).as_ptr(), block as *mut u8, RELAY_SIZE);
+            std::ptr::copy_nonoverlapping(trampoline.as_ptr(), (block + TRAMPOLINE_OFFSET) as *mut u8, trampoline.len());
+            let _ = FlushInstructionCache(GetCurrentProcess(), Some(block as *const _), BLOCK_SIZE);
+        }
+        let hook = Self { name: name.to_owned(), target, original: actual, patch, enabled: false };
+        Ok((hook, block + TRAMPOLINE_OFFSET))
+    }
+
+    /// Bytes a thread must not be stopped inside while this hook is written or removed.
+    fn unsafe_range(&self) -> Range<usize> {
+        self.target + 1..self.target + self.original.len()
+    }
+
+    /// # Safety
+    /// Other threads must be frozen and outside [`Self::unsafe_range`].
+    unsafe fn set(&mut self, enabled: bool) -> windows::core::Result<()> {
+        if self.enabled != enabled {
+            let bytes = if enabled { &self.patch } else { &self.original };
+            // SAFETY: the target is the verified prologue in a loaded module; the caller froze
+            // the other threads outside it.
+            unsafe { overwrite(self.target, bytes)? };
+            self.enabled = enabled;
+        }
+        Ok(())
+    }
+}
+
+struct VtableHook {
+    name: String,
+    slot: usize,
+    original: usize,
+    detour: usize,
+    enabled: bool,
+}
+
+impl VtableHook {
+    fn set(&mut self, enabled: bool) -> Result<()> {
+        if self.enabled == enabled {
+            return Ok(());
+        }
+        let current = mem::read::<usize>(self.slot).ok_or_else(|| Error::Refused(format!("{}: slot unreadable", self.name)))?;
+        let (from, to) = if enabled { (self.original, self.detour) } else { (self.detour, self.original) };
+        if current != from {
+            // Someone else replaced the pointer since: putting ours back or removing theirs would
+            // break their chain, so the slot is left alone.
+            let place = crate::module::Module::describe;
+            return Err(Error::Refused(format!(
+                "{}: slot changed by someone else (now {}, was {}, ours {})",
+                self.name,
+                place(current),
+                place(self.original),
+                place(self.detour)
+            )));
+        }
+        let mut previous = PAGE_PROTECTION_FLAGS::default();
+        // SAFETY: the slot is an aligned function pointer in a loaded module (a vtable or an
+        // import table); it is swapped with one atomic store, so a concurrent call sees either.
+        unsafe {
+            VirtualProtect(self.slot as *const _, 8, PAGE_READWRITE, &mut previous)
+                .map_err(|e| Error::Os(format!("{}: unprotect slot", self.name), e))?;
+            (*(self.slot as *const AtomicUsize)).store(to, Ordering::SeqCst);
+            let mut ignored = PAGE_PROTECTION_FLAGS::default();
+            let _ = VirtualProtect(self.slot as *const _, 8, previous, &mut ignored);
+        }
+        self.enabled = enabled;
+        Ok(())
+    }
+}
+
+/// Where [`Hooks::method`] put its hook.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Placement {
+    /// In the method's code.
+    Code,
+    /// In the vtable slot, because the code's prologue did not decode (why).
+    Vtable(String),
+}
+
+/// Method indices of the COM interfaces the producers hook (vtable slot numbers).
+pub mod slot {
+    /// `IDXGISwapChain::Present`.
+    pub const SWAPCHAIN_PRESENT: usize = 8;
+    /// `IDXGISwapChain::ResizeBuffers`.
+    pub const SWAPCHAIN_RESIZE_BUFFERS: usize = 13;
+    /// `ID3D11DeviceContext::DrawIndexed`.
+    pub const CONTEXT_DRAW_INDEXED: usize = 12;
+    /// `ID3D11DeviceContext::Draw`.
+    pub const CONTEXT_DRAW: usize = 13;
+    /// `ID3D11DeviceContext::DrawIndexedInstanced`.
+    pub const CONTEXT_DRAW_INDEXED_INSTANCED: usize = 20;
+    /// `ID3D11DeviceContext::DrawInstanced`.
+    pub const CONTEXT_DRAW_INSTANCED: usize = 21;
+    /// `ID3D11DeviceContext::OMSetRenderTargets`.
+    pub const CONTEXT_OM_SET_RENDER_TARGETS: usize = 33;
+}
+
+/// A set of hooks prepared one by one and switched on or off together.
+#[derive(Default)]
+pub struct Hooks {
+    inline: Vec<InlineHook>,
+    vtable: Vec<VtableHook>,
+}
+
+fn function_address<F: Copy>(function: F) -> usize {
+    assert_eq!(size_of::<F>(), size_of::<usize>(), "hooks take function pointers only");
+    // SAFETY: F is a pointer-sized function pointer type.
+    unsafe { std::mem::transmute_copy(&function) }
+}
+
+impl Hooks {
+    /// Prepares an inline hook at `target` and points `original` at the trampoline the detour
+    /// calls. Nothing changes in the game until [`Hooks::enable`].
+    ///
+    /// # Safety
+    /// `target` must be the start of a function of type `F` in a loaded module, and `prologue`
+    /// its first instructions with every rip-relative displacement marked. `F` must be a
+    /// function pointer type.
+    pub unsafe fn inline<F: Copy>(
+        &mut self,
+        original: &Original<F>,
+        name: &str,
+        target: usize,
+        prologue: &[Instruction],
+        detour: F,
+    ) -> Result<()> {
+        let (hook, trampoline) = InlineHook::described(name, target, prologue, function_address(detour))?;
+        self.inline.push(hook);
+        // SAFETY: the trampoline runs the target's own instructions, so it has type F.
+        unsafe { original.set(trampoline) };
+        Ok(())
+    }
+
+    /// Like [`Hooks::inline`] for code whose bytes are not known in advance (a system DLL that
+    /// differs between Windows builds): its first instructions are decoded, and a prologue the
+    /// decoder does not fully understand is refused ([`Error::Signature`]).
+    ///
+    /// # Safety
+    /// `target` must be the start of a function of type `F`, a function pointer type.
+    pub unsafe fn inline_decoded<F: Copy>(&mut self, original: &Original<F>, name: &str, target: usize, detour: F) -> Result<()> {
+        let (hook, trampoline) = InlineHook::decoded(name, target, function_address(detour))?;
+        self.inline.push(hook);
+        // SAFETY: the trampoline runs the target's own instructions, so it has type F.
+        unsafe { original.set(trampoline) };
+        Ok(())
+    }
+
+    /// Like [`Hooks::inline_decoded`] for a function another program may have hooked first (the
+    /// Steam overlay hooks XInput in every game): when it starts with their jump (`e9` rel32, or
+    /// `ff 25 00000000` and an absolute address), that jump moves into our trampoline, so their
+    /// hook still runs after ours. Code that is neither is decoded, and refused with its first
+    /// bytes in the error when it does not decode.
+    ///
+    /// # Safety
+    /// `target` must be the start of a function of type `F`, a function pointer type.
+    pub unsafe fn inline_chained<F: Copy>(&mut self, original: &Original<F>, name: &str, target: usize, detour: F) -> Result<()> {
+        let mut first = [0u8; 16];
+        if !mem::read_bytes(target, &mut first) {
+            return Err(Error::Refused(format!("{name}: code unreadable")));
+        }
+        let leak = |bytes: &[u8]| -> &'static [u8] { Box::leak(bytes.to_vec().into_boxed_slice()) };
+        let jump = match first {
+            [0xe9, ..] => Some(Instruction::rip_relative(leak(&first[..5]), 1)),
+            // An absolute jump and its address run the same anywhere, as one piece.
+            _ => crate::arch::absolute_jump_at(&first).map(|length| Instruction::plain(leak(&first[..length]))),
+        };
+        // SAFETY: the caller's guarantee; a jump prologue is exactly the bytes just read.
+        unsafe {
+            match jump {
+                Some(jump) => self.inline(original, name, target, &[jump], detour),
+                None => self.inline_decoded(original, name, target, detour).map_err(|e| match e {
+                    Error::Signature(why) => Error::Signature(format!("{why}; code {first:02x?}")),
+                    other => other,
+                }),
+            }
+        }
+    }
+
+    /// Hooks method `index` of a COM-style object in its code, falling back to the object's
+    /// vtable slot when the prologue does not decode. Direct3D rewrites some of the D3D11
+    /// immediate context's vtable entries while a game runs (the draws), which silently undoes a
+    /// vtable hook, so the code is preferred. Returns where the hook went.
+    ///
+    /// # Safety
+    /// `object` must be a live COM-style object whose method `index` has type `F`, a function
+    /// pointer type.
+    pub unsafe fn method<F: Copy>(
+        &mut self,
+        original: &Original<F>,
+        name: &str,
+        object: *mut core::ffi::c_void,
+        index: usize,
+        detour: F,
+    ) -> Result<Placement> {
+        let target = mem::read::<usize>(object as usize)
+            .and_then(|table| mem::read::<usize>(table + index * size_of::<usize>()))
+            .ok_or_else(|| Error::Refused(format!("{name}: vtable unreadable")))?;
+        // SAFETY: `target` is the object's own method of type F (the caller's guarantee).
+        match unsafe { self.inline_decoded(original, name, target, detour) } {
+            Ok(()) => Ok(Placement::Code),
+            Err(Error::Signature(why)) => {
+                // SAFETY: as above.
+                unsafe { self.vtable(original, name, object, index, detour) }?;
+                Ok(Placement::Vtable(why))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// [`Hooks::method`] with its vtable fallback reported through `note` (a producer's log line),
+    /// for callers that only need to know.
+    ///
+    /// # Safety
+    /// As [`Hooks::method`].
+    pub unsafe fn method_noted<F: Copy>(&mut self, original: &Original<F>, name: &str, object: *mut core::ffi::c_void, index: usize, detour: F, note: impl FnOnce(&str)) -> Result<()> {
+        // SAFETY: the caller's guarantee.
+        if let Placement::Vtable(why) = unsafe { self.method(original, name, object, index, detour) }? {
+            note(&why);
+        }
+        Ok(())
+    }
+
+    /// Prepares a hook of method `index` of `object`'s vtable and points `original` at the
+    /// method it replaces.
+    ///
+    /// # Safety
+    /// `object` must be a live COM-style object whose method `index` has type `F`, a function
+    /// pointer type.
+    pub unsafe fn vtable<F: Copy>(
+        &mut self,
+        original: &Original<F>,
+        name: &str,
+        object: *mut core::ffi::c_void,
+        index: usize,
+        detour: F,
+    ) -> Result<()> {
+        let unreadable = || Error::Refused(format!("{name}: vtable unreadable"));
+        let table = mem::read::<usize>(object as usize).ok_or_else(unreadable)?;
+        let slot = table + index * size_of::<usize>();
+        let method = mem::read::<usize>(slot).ok_or_else(unreadable)?;
+        if self.vtable.iter().any(|hook| hook.slot == slot) {
+            return Err(Error::Refused(format!("{name}: vtable slot already hooked")));
+        }
+        self.vtable.push(VtableHook { name: name.to_owned(), slot, original: method, detour: function_address(detour), enabled: false });
+        // SAFETY: the slot held the object's own method of type F.
+        unsafe { original.set(method) };
+        Ok(())
+    }
+
+    /// Prepares a hook of `module`'s import of `function` from `dll`: the module's own import
+    /// address table entry is swapped, so only its calls are redirected and no code is patched.
+    /// The robust way to hook a system function whose code differs between Windows builds (an
+    /// OpenGL game's `SwapBuffers`, for example).
+    ///
+    /// # Safety
+    /// The imported function must have type `F`, a function pointer type.
+    pub unsafe fn import<F: Copy>(
+        &mut self,
+        original: &Original<F>,
+        name: &str,
+        module: &crate::module::Module,
+        dll: &str,
+        function: &str,
+        detour: F,
+    ) -> Result<()> {
+        let slot = module.import_slot(dll, function).ok_or_else(|| Error::Refused(format!("{name}: {dll}!{function} is not imported")))?;
+        // SAFETY: the caller's guarantee.
+        unsafe { self.import_at(original, name, slot, detour) }
+    }
+
+    /// Like [`Hooks::import`] for an export the module imports by number.
+    ///
+    /// # Safety
+    /// As [`Hooks::import`]: export `ordinal` of `dll` must have type `F`.
+    pub unsafe fn import_ordinal<F: Copy>(
+        &mut self,
+        original: &Original<F>,
+        name: &str,
+        module: &crate::module::Module,
+        dll: &str,
+        ordinal: u16,
+        detour: F,
+    ) -> Result<()> {
+        let slot = module.import_ordinal_slot(dll, ordinal).ok_or_else(|| Error::Refused(format!("{name}: {dll}!#{ordinal} is not imported")))?;
+        // SAFETY: the caller's guarantee.
+        unsafe { self.import_at(original, name, slot, detour) }
+    }
+
+    /// Prepares a hook of a function pointer the game keeps in its data at `slot` (one it looked up
+    /// at run time and calls through): the pointer is swapped, as an import slot is, and no code is
+    /// patched. Refused while the slot is still empty.
+    ///
+    /// # Safety
+    /// `slot` must hold a function of type `F`, called through the slot, for as long as the hook is in.
+    pub unsafe fn pointer<F: Copy>(&mut self, original: &Original<F>, name: &str, slot: usize, detour: F) -> Result<()> {
+        if mem::read::<usize>(slot).is_none_or(|current| current == 0) {
+            return Err(Error::Refused(format!("{name}: no function in the slot yet")));
+        }
+        // SAFETY: the caller's guarantee.
+        unsafe { self.import_at(original, name, slot, detour) }
+    }
+
+    /// Prepares a hook of import slot `slot`, which holds a function of type `F`.
+    unsafe fn import_at<F: Copy>(&mut self, original: &Original<F>, name: &str, slot: usize, detour: F) -> Result<()> {
+        let current = mem::read::<usize>(slot).ok_or_else(|| Error::Refused(format!("{name}: import slot unreadable")))?;
+        if self.vtable.iter().any(|hook| hook.slot == slot) {
+            return Err(Error::Refused(format!("{name}: import slot already hooked")));
+        }
+        self.vtable.push(VtableHook { name: name.to_owned(), slot, original: current, detour: function_address(detour), enabled: false });
+        // SAFETY: the slot held the imported function, of type F.
+        unsafe { original.set(current) };
+        Ok(())
+    }
+
+    pub fn enable(&mut self) -> Result<()> {
+        self.switch(true)
+    }
+
+    /// Removes every hook. Hooks whose slot someone else has since replaced are left in place and
+    /// reported in the error.
+    pub fn disable(&mut self) -> Result<()> {
+        self.switch(false)
+    }
+
+    fn switch(&mut self, enabled: bool) -> Result<()> {
+        let ranges: Vec<_> = self.inline.iter().map(InlineHook::unsafe_range).collect();
+        let mut attempt = 0;
+        // Threads are frozen only to patch code: a game's anti-tamper can take suspended threads
+        // for a debugger (Deathloop's Denuvo closed the game after a freeze with nothing to patch,
+        // 2026-10-07). Slot swaps below are single atomic stores and need no freeze.
+        while !self.inline.is_empty() {
+            let frozen = Frozen::others();
+            if !frozen.any_inside(&ranges) {
+                let mut failed = None;
+                for (index, hook) in self.inline.iter_mut().enumerate() {
+                    // SAFETY: every other thread is frozen outside the patched bytes.
+                    if let Err(e) = unsafe { hook.set(enabled) } {
+                        failed = Some((index, e));
+                        break;
+                    }
+                }
+                drop(frozen);
+                if let Some((index, e)) = failed {
+                    return Err(Error::Os(format!("{}: write", self.inline[index].name), e));
+                }
+                break;
+            }
+            drop(frozen);
+            attempt += 1;
+            if attempt == 200 {
+                return Err(Error::Busy("inline hooks".to_owned()));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let mut refused = Vec::new();
+        for hook in &mut self.vtable {
+            if let Err(e) = hook.set(enabled) {
+                refused.push(e.to_string());
+            }
+        }
+        if refused.is_empty() { Ok(()) } else { Err(Error::Refused(refused.join("; "))) }
+    }
+}
+
+/// The original of a hooked function, as the detour calls it: set once before the hook is
+/// enabled, read on every call.
+pub struct Original<F> {
+    address: AtomicUsize,
+    _function: PhantomData<F>,
+}
+
+// SAFETY: holds only an address.
+unsafe impl<F> Sync for Original<F> {}
+
+impl<F: Copy> Original<F> {
+    pub const fn new() -> Self {
+        Self { address: AtomicUsize::new(0), _function: PhantomData }
+    }
+
+    /// # Safety
+    /// `address` must be a function of type `F` (a function pointer type) for as long as the
+    /// hook can run.
+    pub unsafe fn set(&self, address: usize) {
+        assert_eq!(size_of::<F>(), size_of::<usize>(), "Original holds function pointers only");
+        self.address.store(address, Ordering::Release);
+    }
+
+    pub fn is_set(&self) -> bool {
+        self.address.load(Ordering::Acquire) != 0
+    }
+
+    /// The original function. Detours run only after [`Original::set`], so it is always set there.
+    pub fn get(&self) -> F {
+        let address = self.address.load(Ordering::Acquire);
+        debug_assert_ne!(address, 0, "original read before it was set");
+        // SAFETY: `set` stored a function of type F, and F is pointer-sized.
+        unsafe { std::mem::transmute_copy(&address) }
+    }
+}
+
+impl<F: Copy> Default for Original<F> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// x86-64 machine code; the 32-bit tests are in `arch/x86.rs`.
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+
+    type Unary = unsafe extern "system" fn(u64) -> u64;
+
+    /// Executable memory holding `code`, as a function.
+    fn code(code: &[u8]) -> usize {
+        // SAFETY: a fresh RWX page receives the test's machine code.
+        unsafe {
+            let page = VirtualAlloc(None, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE) as usize;
+            assert_ne!(page, 0);
+            std::ptr::copy_nonoverlapping(code.as_ptr(), page as *mut u8, code.len());
+            page
+        }
+    }
+
+    static PLAIN: Original<Unary> = Original::new();
+    unsafe extern "system" fn times_ten(x: u64) -> u64 {
+        // SAFETY: the original has the same signature.
+        unsafe { PLAIN.get()(x) * 10 }
+    }
+
+    #[test]
+    fn inline_hook_runs_the_detour_and_restores() {
+        // mov rax, rcx; add rax, 1; ret
+        let target = code(&[0x48, 0x89, 0xc8, 0x48, 0x83, 0xc0, 0x01, 0xc3]);
+        let function: Unary = unsafe { std::mem::transmute(target) };
+        let prologue = [Instruction::plain(&[0x48, 0x89, 0xc8]), Instruction::plain(&[0x48, 0x83, 0xc0, 0x01])];
+        let mut hooks = Hooks::default();
+        let wrong = [Instruction::plain(&[0x48, 0x89, 0xc9]), prologue[1]];
+        assert!(matches!(unsafe { hooks.inline(&PLAIN, "wrong", target, &wrong, times_ten) }, Err(Error::Signature(_))));
+        unsafe { hooks.inline(&PLAIN, "plain", target, &prologue, times_ten) }.unwrap();
+        assert_eq!(unsafe { function(4) }, 5);
+        hooks.enable().unwrap();
+        assert_eq!(unsafe { function(4) }, 50);
+        hooks.disable().unwrap();
+        assert_eq!(unsafe { function(4) }, 5);
+    }
+
+    static RELATIVE: Original<Unary> = Original::new();
+    unsafe extern "system" fn plus_hundred(x: u64) -> u64 {
+        // SAFETY: the original has the same signature.
+        unsafe { RELATIVE.get()(x) + 100 }
+    }
+
+    #[test]
+    fn rip_relative_prologue_is_relocated() {
+        // mov rax, [rip+8]; add rax, rcx; ret; int3 x4; dq 7  -> returns x + 7
+        let mut bytes = vec![0x48, 0x8b, 0x05, 0x08, 0, 0, 0, 0x48, 0x01, 0xc8, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc];
+        bytes.extend_from_slice(&7u64.to_le_bytes());
+        let target = code(&bytes);
+        let function: Unary = unsafe { std::mem::transmute(target) };
+        let prologue = [Instruction::rip_relative(&[0x48, 0x8b, 0x05, 0x08, 0, 0, 0], 3)];
+        let mut hooks = Hooks::default();
+        unsafe { hooks.inline(&RELATIVE, "relative", target, &prologue, plus_hundred) }.unwrap();
+        hooks.enable().unwrap();
+        assert_eq!(unsafe { function(1) }, 108);
+        hooks.disable().unwrap();
+        assert_eq!(unsafe { function(1) }, 8);
+    }
+
+    type Tick = unsafe extern "system" fn() -> u64;
+    static TICK: Original<Tick> = Original::new();
+    unsafe extern "system" fn fixed_tick() -> u64 {
+        42
+    }
+
+    #[test]
+    fn import_hook_redirects_only_this_module() {
+        use windows::Win32::System::SystemInformation::GetTickCount64;
+        let module = crate::module::Module::containing(fixed_tick as Tick as usize).unwrap();
+        let mut hooks = Hooks::default();
+        let missing = unsafe { hooks.import(&TICK, "missing", &module, "kernel32.dll", "NoSuchFunction", fixed_tick as Tick) };
+        assert!(missing.is_err());
+        unsafe { hooks.import(&TICK, "tick", &module, "kernel32.dll", "GetTickCount64", fixed_tick as Tick) }.unwrap();
+        assert!(unsafe { TICK.get()() } > 1000, "the original is the real function");
+        hooks.enable().unwrap();
+        assert_eq!(unsafe { GetTickCount64() }, 42);
+        hooks.disable().unwrap();
+        assert_ne!(unsafe { GetTickCount64() }, 42);
+    }
+
+    static DECODED: Original<Unary> = Original::new();
+    static CHAINED: Original<Unary> = Original::new();
+    static CHAINED_ABSOLUTE: Original<Unary> = Original::new();
+
+    #[test]
+    fn chained_hooks_keep_the_earlier_hook() {
+        // The "earlier hook": doubles its argument. The hooked function starts with a jump to it.
+        let earlier = code(&[0x48, 0x8d, 0x04, 0x09, 0xc3]); // lea rax, [rcx+rcx]; ret
+        let mut relative = vec![0xe9, 0, 0, 0, 0, 0xcc, 0xcc, 0xcc];
+        let target = code(&relative);
+        let rel = (earlier as i64 - (target as i64 + 5)) as i32;
+        relative[1..5].copy_from_slice(&rel.to_le_bytes());
+        unsafe { std::ptr::copy_nonoverlapping(relative.as_ptr(), target as *mut u8, relative.len()) };
+        let function: Unary = unsafe { std::mem::transmute(target) };
+        assert_eq!(unsafe { function(7) }, 14);
+        let mut hooks = Hooks::default();
+        unsafe { hooks.inline_chained(&CHAINED, "relative", target, plus_one_thousand_chained) }.unwrap();
+        hooks.enable().unwrap();
+        assert_eq!(unsafe { function(7) }, 1014, "ours, then theirs");
+        hooks.disable().unwrap();
+        assert_eq!(unsafe { function(7) }, 14);
+
+        let mut absolute = vec![0xff, 0x25, 0, 0, 0, 0];
+        absolute.extend_from_slice(&(earlier as u64).to_le_bytes());
+        let target = code(&absolute);
+        let function: Unary = unsafe { std::mem::transmute(target) };
+        let mut hooks = Hooks::default();
+        unsafe { hooks.inline_chained(&CHAINED_ABSOLUTE, "absolute", target, plus_one_thousand_absolute) }.unwrap();
+        hooks.enable().unwrap();
+        assert_eq!(unsafe { function(7) }, 1014);
+        hooks.disable().unwrap();
+        assert_eq!(unsafe { function(7) }, 14);
+
+        let unknown = code(&[0xe8, 0, 0, 0, 0, 0xc3]);
+        let refused = unsafe { Hooks::default().inline_chained(&CHAINED, "unknown", unknown, plus_one_thousand_chained) };
+        assert!(matches!(&refused, Err(Error::Signature(why)) if why.contains("e8")), "{refused:?}");
+    }
+
+    unsafe extern "system" fn plus_one_thousand_chained(x: u64) -> u64 {
+        unsafe { CHAINED.get()(x) + 1000 }
+    }
+
+    unsafe extern "system" fn plus_one_thousand_absolute(x: u64) -> u64 {
+        unsafe { CHAINED_ABSOLUTE.get()(x) + 1000 }
+    }
+    unsafe extern "system" fn plus_one_thousand(x: u64) -> u64 {
+        // SAFETY: the original has the same signature.
+        unsafe { DECODED.get()(x) + 1000 }
+    }
+
+    #[test]
+    fn decoded_inline_hook_on_unknown_code() {
+        // push rbx; sub rsp,0x20; mov rax,rcx; add rsp,0x20; pop rbx; ret  -> returns x
+        let target = code(&[0x40, 0x53, 0x48, 0x83, 0xec, 0x20, 0x48, 0x89, 0xc8, 0x48, 0x83, 0xc4, 0x20, 0x5b, 0xc3]);
+        let function: Unary = unsafe { std::mem::transmute(target) };
+        let mut hooks = Hooks::default();
+        unsafe { hooks.inline_decoded(&DECODED, "decoded", target, plus_one_thousand) }.unwrap();
+        hooks.enable().unwrap();
+        assert_eq!(unsafe { function(7) }, 1007);
+        hooks.disable().unwrap();
+        assert_eq!(unsafe { function(7) }, 7);
+        let call = code(&[0xe8, 0, 0, 0, 0, 0xc3]);
+        assert!(matches!(unsafe { Hooks::default().inline_decoded(&DECODED, "call", call, plus_one_thousand) }, Err(Error::Signature(_))));
+    }
+
+    static METHOD: Original<Unary> = Original::new();
+    unsafe extern "system" fn doubled(x: u64) -> u64 {
+        // SAFETY: the original has the same signature.
+        unsafe { METHOD.get()(x) * 2 }
+    }
+    unsafe extern "system" fn identity(x: u64) -> u64 {
+        x
+    }
+
+    #[test]
+    fn vtable_hook_swaps_one_method() {
+        let identity_address = function_address(identity as Unary);
+        let table: Box<[usize; 2]> = Box::new([0, identity_address]);
+        let object: Box<usize> = Box::new(table.as_ptr() as usize);
+        let object = &*object as *const usize as *mut core::ffi::c_void;
+        let mut hooks = Hooks::default();
+        unsafe { hooks.vtable(&METHOD, "method", object, 1, doubled) }.unwrap();
+        hooks.enable().unwrap();
+        let method: Unary = unsafe { std::mem::transmute(table[1]) };
+        assert_eq!(unsafe { method(21) }, 42);
+        hooks.disable().unwrap();
+        assert_eq!(table[1], identity_address);
+    }
+}
