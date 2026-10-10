@@ -15,6 +15,7 @@
 //! - [`present`]: DXGI's Present hooked for a game whose swapchain is out of reach.
 //! - [`queue12`]: the game's D3D12 direct queue, caught at `ExecuteCommandLists`, for a game whose
 //!   engine keeps it out of reach.
+//! - [`swapchain_queue`]: the D3D12 queue a swapchain presents on, read from the swapchain itself.
 //!
 //! Depth-based stereo from a single centre render is `monaka_warp`, with its math in
 //! `monaka_core::depth`.
@@ -28,3 +29,4 @@ pub mod pairs11;
 pub mod pairs12;
 pub mod present;
 pub mod queue12;
+pub mod swapchain_queue;

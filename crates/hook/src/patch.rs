@@ -496,8 +496,8 @@ impl Hooks {
         let ranges: Vec<_> = self.inline.iter().map(InlineHook::unsafe_range).collect();
         let mut attempt = 0;
         // Threads are frozen only to patch code: a game's anti-tamper can take suspended threads
-        // for a debugger (Deathloop's Denuvo closed the game after a freeze with nothing to patch,
-        // 2026-10-07). Slot swaps below are single atomic stores and need no freeze.
+        // for a debugger (Deathloop's Denuvo closes the game after a freeze). Slot swaps below are
+        // single atomic stores and need no freeze.
         while !self.inline.is_empty() {
             let frozen = Frozen::others();
             if !frozen.any_inside(&ranges) {

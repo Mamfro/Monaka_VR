@@ -294,8 +294,6 @@ impl Manifest {
         }
     }
 
-    /// Checks the table is well formed: every default offered and in range, the launch options
-    /// only where the launcher may start the game. The reason when it is not.
     /// The option that turns switch `id` off now, and its rule: `raw` gives an option's value as
     /// set (`None`: its default), as the window's settings or the producer's options file hold it.
     pub fn turned_off(&self, id: &str, raw: impl Fn(&str) -> Option<String>) -> Option<(&Opt, TurnsOff)> {
@@ -309,6 +307,8 @@ impl Manifest {
         })
     }
 
+    /// Checks the table is well formed: every default offered and in range, the launch options
+    /// only where the launcher may start the game. The reason when it is not.
     pub fn check(&self) -> Result<(), String> {
         if !self.producer.starts_with("monaka_") {
             return Err(format!("{}: producer {} is not monaka_*", self.id, self.producer));
@@ -643,7 +643,7 @@ pub const WORLD_HUD: Opt = opt("world_hud", "Dynamic HUD", "Puts HUD pieces on y
 /// The HUD's size, 1 being its size on a monitor (`default_number` for the game's own).
 pub const HUD_SIZE: Opt = opt("hud_scale", "HUD size", "1 is the size on a monitor.", Kind::Number { min: 0.1, max: 1.0, step: 0.01, default: 0.5 }).on(Shown::Hud);
 
-/// Runs on a game build other than the one Monaka was measured on (`monaka_producer::require_build`
+/// Runs on a game build other than the one Monaka was built for (`monaka_producer::require_build`
 /// lets a mismatch through, logged): each hook still checks the exact code it patches and is left
 /// out where that moved, but plain offsets are not checked, so features may misbehave or the game
 /// may crash.
@@ -670,8 +670,6 @@ pub const fn dpad_hold(directions: &'static [&'static str]) -> Opt {
     .viewer_args("1", directions)
 }
 
-/// A layout test: the controllers at hand act like Quest's or Index's in the viewer (what those lack
-/// hidden, the left grip standing in for their d-pad layer). Never for play.
 /// The held d-pad menus ([`dpad_hold`]) by reaching over a shoulder too (the viewer's
 /// `--menu-reach`): the left hand opens the d-pad-left menu, the right hand the d-pad-right one, a
 /// stick flick picks. `help` says what the game's menus are.
@@ -701,6 +699,8 @@ pub const MENU_REACH_DEPTH: Opt = opt(
 .only_when("dpad_hold", "1")
 .viewer_args("*", &["--menu-reach-depth"]);
 
+/// A layout test: the controllers at hand act like Quest's or Index's in the viewer (what those lack
+/// hidden, the left grip standing in for their d-pad layer). Never for play.
 pub const CONTROLLER_PROXY: Opt = opt(
     "controller_proxy",
     "Controller test",

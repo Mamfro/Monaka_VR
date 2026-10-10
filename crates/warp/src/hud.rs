@@ -7,7 +7,7 @@ use crate::{ConstantBuffer, Result, SavedCompute, compute_shader, shader_view, u
 use monaka_channel::d3d;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM};
-use windows::core::s;
+use windows::core::{Interface, s};
 
 pub const HUD_SOURCE: &str = include_str!("hud.hlsl");
 
@@ -80,6 +80,13 @@ impl HudLayer {
             context.ClearRenderTargetView(&targets[1].view, &[1.0, 1.0, 1.0, 1.0]);
         }
         Ok([targets[0].view.clone(), targets[1].view.clone()])
+    }
+
+    /// The frame's layer as drawn onto black (for checks: what the game drew into it), once begun.
+    pub fn drawn_on_black(&self) -> Option<ID3D11Texture2D> {
+        let srv = &self.targets.as_ref()?[0].srv;
+        // SAFETY: COM call on our own view.
+        unsafe { srv.GetResource() }.ok()?.cast::<ID3D11Texture2D>().ok()
     }
 
     /// `base` with the HUD laid over it at `rect` (x, y, width, height in `base` pixels), into an

@@ -1,7 +1,6 @@
 //! Shows a game's stereo pairs in the headset and sends the head pose back to the game.
 //!
-//! Port of the GPU mode of `openxr_preview.cpp`, with the same command line, so it can stand in
-//! for `dlvr_xr_preview.exe`:
+//! Command line:
 //!
 //! ```text
 //! monaka_viewer --gpu-map <channel> --loader <openxr_loader.dll> [--runtime <manifest.json>]
@@ -120,7 +119,8 @@ fn parse_args() -> Result<Args, String> {
             }
             // A launcher without a console stops the viewer by setting this event.
             "--stop-event" => console::watch_stop_event(&value)?,
-            // Eye tracking is not ported; accepted so existing launch scripts keep working.
+            // Eye tracking is not implemented; the flag is accepted and ignored for launch scripts
+            // that pass it.
             "--gaze-log" => {}
             _ => return Err(format!("unknown argument {flag}")),
         }
@@ -285,7 +285,6 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
     }
 
     // Controllers: where each one points, for the game's hand aim. Created before the session
-    // (the action set must outlive it).
     // (the action set must outlive it). Optional: without them the viewer still shows the game.
     let hand_paths = [instance.path("/user/hand/left")?, instance.path("/user/hand/right")?];
     let actions = instance.action_set("monaka", "Monaka VR").map_err(|e| println!("No controller input: {e}")).ok();

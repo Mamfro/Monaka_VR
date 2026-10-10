@@ -106,6 +106,41 @@ impl AlternatePublisher {
         report: impl Fn(&mut HeadPose),
     ) -> Step {
         let Some(eye) = self.schedule.shown_eye(n) else { return Step::Waiting };
+        if !self.copy_eye(device, context, eye, source) {
+            return self.failed();
+        }
+        if eye == 0 {
+            self.left_ready = true;
+            return Step::Left;
+        }
+        if !std::mem::take(&mut self.left_ready) {
+            return Step::Unpaired;
+        }
+        let slots = self.schedule.pair_slots(n);
+        let mut eyes = [self.ring[slots[0]], self.ring[slots[1]]];
+        eyes.iter_mut().filter(|e| e.valid != 0).for_each(&report);
+        self.send(device, context, head, eyes)
+    }
+
+    /// At present `n`: `image` as both eyes of a pair without head poses, which the viewer shows on
+    /// its flat screen (a frame with no 3D view: a movie, a loading screen). Sent at the presents
+    /// that end a pair, so flat frames keep the pairs' pace.
+    pub fn publish_flat(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, image: &ID3D11Texture2D, n: u64, head: &HeadSource) -> Step {
+        let Some(eye) = self.schedule.shown_eye(n) else { return Step::Waiting };
+        // A left eye copied before this is not paired with a flat frame.
+        self.left_ready = false;
+        if eye == 0 {
+            return Step::Waiting;
+        }
+        if !(self.copy_eye(device, context, 0, image) && self.copy_eye(device, context, 1, image)) {
+            return self.failed();
+        }
+        self.send(device, context, head, [HeadPose::EMPTY; 2])
+    }
+
+    /// Copies `source` as eye `eye`, into a copy made at its size (both made again when the size
+    /// changes).
+    fn copy_eye(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, eye: usize, source: &ID3D11Texture2D) -> bool {
         let desc = d3d::texture_desc(source);
         if self.size != (desc.Width, desc.Height) {
             self.eyes = [None, None];
@@ -114,33 +149,28 @@ impl AlternatePublisher {
         }
         if self.eyes[eye].is_none() {
             if desc.SampleDesc.Count != 1 {
-                return self.failed();
+                return false;
             }
             match d3d::create_texture(device, &d3d::private_copy_desc(&desc)) {
                 Ok(texture) => self.eyes[eye] = Some(texture),
-                Err(_) => return self.failed(),
+                Err(_) => return false,
             }
         }
-        let Some(target) = &self.eyes[eye] else { return self.failed() };
-        // SAFETY: copies the back buffer into a same-shaped texture on its own device.
+        let Some(target) = &self.eyes[eye] else { return false };
+        // SAFETY: copies the image into a same-shaped texture on its own device.
         unsafe { context.CopyResource(target, source) };
-        if eye == 0 {
-            self.left_ready = true;
-            return Step::Left;
-        }
-        if !std::mem::take(&mut self.left_ready) {
-            return Step::Unpaired;
-        }
+        true
+    }
 
-        let Some(writer) = self.writer.get(device, desc.Width, desc.Height).ready(|note| log!("{note}")) else {
+    /// Publishes the two eye copies with `eyes`, the poses they were rendered from (none: flat).
+    fn send(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, head: &HeadSource, eyes: [HeadPose; 2]) -> Step {
+        let (width, height) = self.size;
+        let Some(writer) = self.writer.get(device, width, height).ready(|note| log!("{note}")) else {
             self.failures += 1;
             return Step::Failed;
         };
         // The pose record goes out first under the sequence this pair will get, so a viewer that
         // sees the images always finds their poses.
-        let slots = self.schedule.pair_slots(n);
-        let mut eyes = [self.ring[slots[0]], self.ring[slots[1]]];
-        eyes.iter_mut().filter(|e| e.valid != 0).for_each(&report);
         head.write_pair(writer.next_sequence(), eyes);
         let (Some(left), Some(right)) = (&self.eyes[0], &self.eyes[1]) else { return self.failed() };
         match writer.publish(context, [left, right], monaka_channel::tick()) {

@@ -1,5 +1,5 @@
 //! The alternate-eye present loop, for any game that draws one eye per frame: the part of a
-//! producer's `stereo.rs` that had been copied from game to game (Dishonored to Control). The game
+//! producer's `stereo.rs` that is the same from game to game. The game
 //! keeps what only it knows, writing the eye camera where its engine reads it; this drives the
 //! rest around DXGI's `Present`:
 //!
@@ -49,9 +49,9 @@ pub struct Pending {
 pub enum Publisher {
     /// The keyed-mutex channel, copies on the swapchain's D3D11 device.
     D3D11(AlternatePublisher),
-    /// The fence channel, copies on the game's direct queue (`queue`, looked up at each present:
-    /// the game may make it after the hooks go in).
-    D3D12 { publisher: AlternatePublisher12, queue: fn() -> Option<ID3D12CommandQueue> },
+    /// The fence channel, copies on the game's direct queue (`queue`, looked up at each present
+    /// for the swapchain presenting: the game may make it after the hooks go in).
+    D3D12 { publisher: AlternatePublisher12, queue: fn(&IDXGISwapChain3) -> Option<ID3D12CommandQueue> },
 }
 
 /// What a game gives the driver at start.
@@ -359,14 +359,13 @@ impl Driver {
         };
         let step = match &mut state.publisher {
             Publisher::D3D11(publisher) => Some(publisher.before_present(chain, n, &self.head, report)),
-            Publisher::D3D12 { publisher, queue } => match (chain.cast::<IDXGISwapChain3>().ok(), queue()) {
-                (Some(swap), Some(queue)) => Some(publisher.before_present(&swap, &queue, n, &self.head, report)),
-                (_, None) => {
+            Publisher::D3D12 { publisher, queue } => chain.cast::<IDXGISwapChain3>().ok().and_then(|swap| match queue(&swap) {
+                Some(queue) => Some(publisher.before_present(&swap, &queue, n, &self.head, report)),
+                None => {
                     log_first!(3, "present {n}: the game's command queue is not known");
                     None
                 }
-                _ => None,
-            },
+            }),
         };
         match step {
             Some(Step::Unpaired) => {
@@ -465,7 +464,7 @@ mod tests {
     #[test]
     fn the_default_report_runs_while_the_state_is_held() {
         // The publisher calls the report inside the state lock: the report must not take it again
-        // (it once did, and the first published pair froze the game).
+        // (that deadlocks the present thread at the first published pair, freezing the game).
         let driver = Driver::new();
         use monaka_core::manifest::{Launch, Manifest, Status};
         let manifest = Manifest {

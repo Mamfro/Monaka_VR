@@ -113,8 +113,8 @@ impl EyeStream {
 }
 
 /// Real frames kept per eye, in a ring: frame generation reads the previous frame from the texture
-/// it was given (measured in DL2: with one texture rewritten each frame, the "generated" frame was
-/// the newest one), so the last two must stay as they were while the next is written.
+/// it was given (with one texture rewritten each frame, the "generated" frame is the newest one),
+/// so the last two must stay as they were while the next is written.
 pub const SLOTS: usize = 3;
 
 static EYES_SKIPPED: AtomicU64 = AtomicU64::new(0);

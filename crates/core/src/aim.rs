@@ -1,8 +1,8 @@
 //! Head aim: the character's own look angles follow the head, so it looks, aims and attacks where
 //! the head points, while mouse or stick turning still works.
 //!
-//! Learned on Dying Light 2: re-pitching the camera the game builds moves the view and crosshair
-//! but not the arms or attacks. Those read the character's look angles, which are steered each
+//! Re-pitching the camera the game builds moves the view and crosshair but not the arms or
+//! attacks. Those read the character's look angles, which are steered each
 //! update toward look *targets* that input adds into (DL2: `PlayerDI_PH` +0xb98 yaw, +0xb9c pitch,
 //! degrees, yaw turning right). Writing the targets sticks; writing the current angles does not.
 //!
@@ -70,8 +70,8 @@ impl HeadAim {
         }
         // The head's yaw comes within a half turn; past it, the same look one turn off. Kept
         // nearest the yaw already written, so a player standing turned round in the room does not
-        // send the targets a full turn off: the game turned the character all the way round to
-        // them (Dying Light 1, 2026-10-06).
+        // send the targets a full turn off: the game would turn the character all the way round
+        // to them.
         let head_yaw = match self.yaw_share / c.yaw_per_radian {
             last if last.is_finite() => last + (head_yaw - last + PI).rem_euclid(TAU) - PI,
             _ => head_yaw,
@@ -88,10 +88,9 @@ impl HeadAim {
     }
 
     /// The game wrote the pitch target itself since the last update (a cutscene steering the look):
-    /// none of the head's pitch is in it. Counted in anyway, the game's own pitch drifted a share
-    /// further every update until it looked implausible and the whole share was dropped, the yaw's
-    /// too: a frame drawn without the head's turn every seventh update (Dying Light 1 conversation,
-    /// 2026-10-07).
+    /// none of the head's pitch is in it. Counted in anyway, the game's own pitch would drift a
+    /// share further every update until it looked implausible and the whole share was dropped, the
+    /// yaw's too, drawing frames without the head's turn.
     pub fn pitch_replaced(&mut self) {
         self.pitch_share = 0.0;
     }

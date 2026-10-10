@@ -1,20 +1,20 @@
-//! A D3D11 game's HUD and menus placed in front of each eye. The rule (measured in Dying Light,
+//! A D3D11 game's HUD and menus placed in front of each eye. The rule (as Dying Light draws,
 //! whose producer has its own copy): the finished 3D image reaches the back buffer as one
 //! unblended full-screen triangle, and every later draw to the back buffer
 //! in that frame is HUD or menu. Those draws get a viewport shrunk toward where straight ahead
 //! lands in the eye's image and moved toward the nose, so the HUD floats readable in front of the
 //! world instead of filling the periphery at infinity. Each draw's scissor rectangle moves with
-//! its viewport (the HUD's text boxes are clipped by one; left in place they hid the text). Frames without such a scene copy (menus,
+//! its viewport (the HUD's text boxes are clipped by one; left in place they hide the text). Frames without such a scene copy (menus,
 //! loading) are left alone. A game whose 3D image reaches the back buffer some other way (a copy
 //! or a compute pass) is installed with `scene_copy` off: every back-buffer draw is HUD.
 //!
 //! Draws are followed on every context: the immediate one and the deferred ones a game records
 //! its frame on from worker threads (Dishonored 2 records the scene copy and its HUD on a deferred
-//! context; its immediate context draws only two invisible quads there, measured 2026-10-06).
+//! context; its immediate context draws only two invisible quads there).
 //! Deferred contexts record in any order and ahead of the present, so with `scene_copy` the copy
 //! is recognised by its shape (an unblended triangle, never moved) and, once one has been seen,
 //! every other back-buffer draw is HUD: draws before the copy in a frame are covered by it.
-//! (Tracking the copy per context placed nothing in Dishonored 2, 2026-10-06.) Each context's bound target is kept in a small
+//! (Tracking the copy per context does not work: in Dishonored 2 it places nothing.) Each context's bound target is kept in a small
 //! lock-free table, so the scene's draws cost one scan of it. The methods are hooked in their
 //! code, found on an immediate and a deferred context of our own (Direct3D rewrites the immediate
 //! context's vtable while a game runs, which would undo a vtable hook). The game crate says where

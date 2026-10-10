@@ -1,7 +1,8 @@
 //! Depth reprojection on the GPU (D3D11): rendered frames redrawn from another camera, with a
 //! second frame filling what the first could not see ([`Reprojector`], for alternate-eye rendering
 //! with depth); a game's HUD as its own layer laid over each eye ([`HudLayer`]); and motion vectors
-//! for temporal upscaling from depth and two cameras of one eye ([`MotionPass`]). The math is in
+//! for temporal upscaling from depth and two cameras of one eye ([`MotionPass`]); a flat frame
+//! resampled to the eye size ([`Scaler`]). The math is in
 //! [`monaka_core::depth`]. On D3D12 a game brings its own runner.
 //!
 //! Runs on the game's own immediate context: the compute bindings it changes are saved and put
@@ -19,9 +20,11 @@ use windows::core::PCSTR;
 mod hud;
 mod motion;
 mod reproject;
+mod scale;
 pub use hud::{HUD_SOURCE, HudLayer};
 pub use motion::{EyeView, MOTION_SOURCE, MotionPass, ObjectMotion};
 pub use reproject::{Frame, REPROJECT_SOURCE, Reprojector, View};
+pub use scale::{SCALE_SOURCE, Scaler, fit};
 
 #[derive(Debug)]
 pub enum Error {

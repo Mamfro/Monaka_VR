@@ -12,8 +12,8 @@
 //! yaw, and pitch kept level), each build the camera's real angles are compared with body plus
 //! aim and the difference (less the counts still in flight) is queued as mouse counts. The view is
 //! body plus head whatever the game made of the counts, so the world stays locked: a game may turn
-//! a little more per count on fast turns (mouse acceleration or smoothing; Dishonored 2 headset
-//! 2026-10-06), which slipped the world by degrees while the share was predicted from the counts.
+//! a little more per count on fast turns (mouse acceleration or smoothing; Dishonored 2 does), which
+//! would slip the world by degrees if the share were predicted from the counts.
 //!
 //! What aims: the head; or with a pointer ([`MouseAim::pointer`]) one controller all the time, the
 //! view staying the head's (the viewer's ring on that controller shows where it points); or with
@@ -52,12 +52,12 @@ const NO_TURN: f32 = 0.5;
 const RETRY_BUILDS: u32 = 100;
 /// Degrees per count believed: anything else is a failed measurement (the player moved the mouse).
 const PLAUSIBLE_SCALE: std::ops::RangeInclusive<f32> = 0.005..=1.0;
-/// The two axes' scales within this factor of each other (every good calibration: 0.10 to 0.19
-/// degrees per count on both; a probe the player's own turning ran into measured 0.53 and 0.004).
+/// The two axes' scales within this factor of each other (a good calibration gives about the same
+/// on both; a probe the player's own turning runs into gives scales far apart).
 const PLAUSIBLE_RATIO: f32 = 3.0;
 /// The aim does not follow: the game turned the player by itself this often within this long.
 /// (An aim that stays far off is no sign: at every start the game reads the mouse for a while
-/// without turning, 2026-10-06.)
+/// without turning.)
 const STORM_RESYNCS: usize = 3;
 const STORM_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
 /// How old a stick read may be.

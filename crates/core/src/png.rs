@@ -1,7 +1,6 @@
 //! PNG files without a codec: the image goes into the zlib stream as stored (uncompressed)
-//! deflate blocks, which every PNG reader takes. For the harness and probe frames, which the
-//! PowerShell scripts used to convert from BMP; larger than compressed PNGs, no slower to make
-//! than a BMP, and viewable everywhere.
+//! deflate blocks, which every PNG reader takes. For the harness and probe frames: larger than
+//! compressed PNGs, no slower to make than a BMP, and viewable everywhere.
 
 /// CRC-32 (IEEE, as PNG chunks use), from scratch.
 fn crc32(bytes: &[u8]) -> u32 {

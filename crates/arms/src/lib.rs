@@ -9,7 +9,7 @@
 //! arm and forearm reaches its hand from a shoulder under the player's real head
 //! ([`monaka_core::reach`]). The off hand rides a weapon the game holds two-handed, else follows its
 //! own controller. The rest of the body goes with the head, as animated (moving the whole skeleton
-//! with the hand moved the body with it). [`melee`] turns swings into attacks. Climbing and
+//! with the hand would move the body with it). [`melee`] turns swings into attacks. Climbing and
 //! hanging, the arms go back to the game's animation ([`traverse`]). [`roomscale`] walks the
 //! character after the player's real steps.
 
@@ -42,13 +42,14 @@ pub trait Skeleton {
     fn world(&self, element: i32) -> Option<Mat34>;
     fn set_world(&self, element: i32, matrix: &Mat34);
     /// Whether the element is a bone (helpers and mesh parts follow their bones and are never
-    /// written: moving them left the arms where the game put them).
+    /// written: moving them leaves the arms where the game put them).
     fn is_bone(&self, element: i32) -> bool;
 }
 
 /// Every element's world matrix of a skeleton at one moment. An element the skeleton cannot give
-/// as finite numbers is kept as NaN and never written: after a Dying Light 2 cutscene an outfit's
-/// glove bone stayed so for good, and refusing the whole skeleton for it left the arms to the game.
+/// as finite numbers is kept as NaN and never written: Dying Light 2 can leave an outfit's glove
+/// bone so for good after a cutscene, and refusing the whole skeleton for it would leave the arms
+/// to the game.
 pub struct Snapshot {
     pub skeleton: usize,
     pub worlds: Vec<Mat34>,
@@ -81,7 +82,7 @@ impl Drop for Snapshot {
 enum Part {
     Body,
     /// A clavicle: carried with the body under the real head, unsquashed, so the shoulder joins the
-    /// moved upper arm (left squashed, the skin between them stretched across the view).
+    /// moved upper arm (left squashed, the skin between them stretches across the view).
     Clavicle(usize),
     UpperArm(usize),
     Forearm(usize),
@@ -135,9 +136,9 @@ pub fn declare_mirror(flip: [f32; 9]) {
 }
 /// A measurement of [`FLIP`] and how many updates in a row gave it: it is kept after [`FLIP_AGREEING`].
 static FLIP_VOTE: Mutex<([f32; 9], u32)> = Mutex::new(([0.0; 9], 0));
-/// Updates in a row whose every posed-alike pair gives the same mirroring before it is kept: one
-/// update, mid-animation, gave a quarter turn, and the left wrist sat tilted up all session
-/// (Dying Light 1, 2026-10-06).
+/// Updates in a row whose every posed-alike pair gives the same mirroring before it is kept: a
+/// single update mid-animation can give a quarter turn, which would leave the left wrist tilted up
+/// for good.
 const FLIP_AGREEING: u32 = 10;
 /// Each axis of a pair must line up with its mirrored twin this well (cosine; 25 degrees).
 const MIRROR_FIT: f32 = 0.9;
@@ -222,10 +223,9 @@ fn mirror_flip(right: &[f32; 9], left: &[f32; 9]) -> Option<[f32; 9]> {
 /// The right wrist (`r_hand`) in the palm's frame (origin in the palm, -Z where the hand points,
 /// +Y up): the game's own hold of a gun at the hip, which points along its camera as the palm
 /// points along the controller's aim. (Pointing along the grip pose's own -Z, the straightened
-/// index finger, made the player bend the wrist up to aim level.) Measured in Dying Light 1
-/// 2026-10-06 (`probe_hands`, pistol drawn): the wrist's animated frame against the camera, placed
-/// so the weapon holder (`r_handholder`, the gun's grip) is the palm's centre, 8 cm ahead of the
-/// wrist.
+/// index finger, makes the player bend the wrist up to aim level.) Dying Light 1's hold with the
+/// pistol drawn: the wrist's animated frame against the camera, placed so the weapon holder
+/// (`r_handholder`, the gun's grip) is the palm's centre, 8 cm ahead of the wrist.
 const RIGHT_WRIST_IN_PALM: Mat34 = [
     -0.0780, -0.1988, 0.9769, 0.044, //
     -0.0174, 0.9800, 0.1981, -0.001, //
@@ -247,8 +247,8 @@ impl BoneAxes {
     const IDENTITY: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
     pub const DYING_LIGHT_1: Self = Self { wrist: Self::IDENTITY, holder: Self::IDENTITY };
     /// Dying Light 2 and The Beast: the right wrist half turned about its own x (along the
-    /// forearm), measured 2026-10-06 from the idle melee hold (without it the hands were upside
-    /// down; The Beast's matches within about a degree). The gun holder: not yet measured.
+    /// forearm), from the idle melee hold (without it the hands are upside down; The Beast's
+    /// matches within about a degree). The gun holder is not calibrated for these games.
     pub const DYING_LIGHT_2: Self = Self { wrist: [1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, -1.0], holder: Self::IDENTITY };
 }
 
@@ -303,14 +303,14 @@ fn orthonormal(m: &Mat34) -> Mat34 {
 
 /// A gun's holder (`r_handholder`, where the gun hangs) in the palm's frame: in the palm, turned
 /// half round about up, so the gun points where the palm does. Dying Light holds every gun at the
-/// hip that way against its camera (measured 2026-10-06, `probe_hands`: a long gun within 1.3
-/// degrees, the pistol within 1.4), but each gun with its own wrist: pinning the wrist (as for
-/// melee) left the pistol pointing up and right of the long guns' line.
+/// hip that way against its camera (a long gun within 1.3 degrees, the pistol within 1.4), but
+/// each gun with its own wrist: pinning the wrist (as for melee) leaves the pistol pointing up and
+/// right of the long guns' line.
 const GUN_HOLDER_IN_PALM: Mat34 = [-1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0];
 
 /// A sword's blade in the palm's frame (x right, y up, -z where the hand aims): a hilt held in the
 /// fist runs out of its top, along the controller's grip, half a right angle above the aim (along
-/// the aim it went forward like a rifle, headset 2026-10-08). The one direction both a game's
+/// the aim it would point forward like a rifle). The one direction both a game's
 /// weapon lock and its swing reading take for the blade.
 pub const MELEE_BLADE: Vec3 = [0.0, std::f32::consts::FRAC_1_SQRT_2, -std::f32::consts::FRAC_1_SQRT_2];
 /// The turn about the palm's x that takes the aim (-z) to [`MELEE_BLADE`] (and the palm's up to the
@@ -341,7 +341,7 @@ pub fn is_gun(weapon: usize) -> bool {
 
 /// The game holds what is in the aim hand with both hands when the other wrist sits this close to
 /// it (metres, its weapon holder, as animated): a rifle's front hand is about 0.25 m from the grip,
-/// a free hand at rest 0.8 m away (`probe_hands`, 2026-10-06). The two thresholds and the hold
+/// a free hand at rest 0.8 m away. The two thresholds and the hold
 /// time keep a hand passing by, or an animation's moment, from flipping it.
 const TWO_HANDED_WITHIN: f32 = 0.40;
 const ONE_HANDED_BEYOND: f32 = 0.55;
@@ -352,8 +352,7 @@ static ONE_HANDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 
 /// Declares that the game holds nothing two-handed (Dishonored: a weapon or power per hand), so the
 /// off hand always follows its own controller: with the rule on, a left wrist passing within 0.4 m
-/// of the right hand's sword handed the left arm the right controller's move (Death of the
-/// Outsider, 2026-10-07).
+/// of the right hand's sword would hand the left arm the right controller's move.
 pub fn declare_one_handed() {
     ONE_HANDED.store(true, Relaxed);
 }
@@ -423,8 +422,8 @@ pub struct Pose {
     pub gun: bool,
     /// A melee weapon locked to the aim controller: its holder (`r_handholder`) in the palm's frame
     /// (the game's own bone axes). The hand goes around it as the game animates the grip, and the
-    /// game's guards no longer turn the weapon in the hand (Kingdom Come II re-gripped the sword at
-    /// every guard change, 2026-10-08). None: the wrist is pinned and the game holds the weapon.
+    /// game's guards no longer turn the weapon in the hand (Kingdom Come II re-grips the sword at
+    /// every guard change). None: the wrist is pinned and the game holds the weapon.
     pub melee_holder: Option<Mat34>,
     /// The game's bone axes against DL1's.
     pub bones: BoneAxes,
@@ -444,11 +443,11 @@ pub struct Placed {
 /// palm; carried with the body when that controller is not tracked. Every bone is written: setting
 /// one marks its children for recomputation, and the ones the game set itself must lose its own
 /// adjustments (Dying Light 1 squashes the whole rig toward the camera for the flat screen; left to
-/// the game, the body stayed flattened front to back). Err (with why) when there is no aim
+/// the game, the body stays flattened front to back). Err (with why) when there is no aim
 /// controller or no arm to move.
 pub fn follow(skeleton: &dyn Skeleton, before: &Snapshot, pose: &Pose) -> Result<Placed, &'static str> {
     // Poses that are not a tracked hand or head (not finite, no rotation, kilometres out) are
-    // taken as untracked: placed on them, the bones went wherever they said.
+    // taken as untracked: placed on them, the bones would go wherever they said.
     let palms = pose.palms.map(|p| p.filter(plausible_hand));
     let Some(hand) = palms.get(pose.aim_side).copied().flatten() else { return Err("no controller") };
     let (aim_side, off_side) = (pose.aim_side.min(1), 1 - pose.aim_side.min(1));
@@ -457,17 +456,15 @@ pub fn follow(skeleton: &dyn Skeleton, before: &Snapshot, pose: &Pose) -> Result
     }
     // The arms as the game animated them. A game that did not animate them again since the last
     // move (paused, or calling twice in one frame) hands back what was written: moved again, the
-    // move piled up every call until the wrists were 10^13 m out and the arms flickered, garbage
-    // left to the game (Dying Light 1 paused in a cutscene, 2026-10-06). Then the bones are put
-    // back exactly as written, nothing solved: solving on through a pause from the last animation
-    // ended, every time, in an arm that could not reach its hand and the game reading a null 4 ms
-    // later (gamedll+0xb19ca3, a nearest-of-a-list search that finds nothing for a position not
-    // finite or far out; pause then quit, Ctrl+C or alt-tab, 2026-10-06).
+    // move would pile up every call until the wrists were far out and the arms flickered. Then the
+    // bones are put back exactly as written, nothing solved: solving on through a pause from the
+    // last animation ends in an arm that cannot reach its hand, and Dying Light 1 then reads a null
+    // in a nearest-of-a-list search that finds nothing for a position not finite or far out.
     let Ok(mut memory) = MEMORY.lock() else { return Err("lock") };
     let Memory { skeleton: remembered, animated, written, palm: last_palm } = &mut *memory;
-    // Within a sway of it counts too: holding a rifle, the game's own small motion (its sway) went
-    // on in the pause menu, on top of the bones as written; taken for an animation, the arms were
-    // moved again every call and flew off along the look (Dying Light 1, 2026-10-07).
+    // Within a sway of it counts too: holding a rifle, the game's own small motion (its sway) goes
+    // on in the pause menu, on top of the bones as written; taken for an animation, the arms would
+    // be moved again every call and fly off along the look.
     let same = *remembered == before.skeleton && written.len() == before.worlds.len() && written.iter().any(|w| w[0].is_finite());
     let apart = same.then(|| written_apart(written, &before.worlds));
     let ours = apart.is_some_and(|(turn, shift)| turn <= SWAY_TURN && shift <= SWAY_SHIFT);
@@ -543,9 +540,8 @@ pub fn follow(skeleton: &dyn Skeleton, before: &Snapshot, pose: &Pose) -> Result
         Some((holder, in_palm, _)) => (world(holder), in_palm),
         None => (world(aim.joints[2]), wrist_in_palm(aim_side, flip.as_ref(), &pose.bones.wrist).ok_or("no wrist calibration")?),
     };
-    // From the rigid part of what the game animated: a scaled wrist inverted as if rigid made the
-    // move scale whatever it moved (both hands came out 2.5 to 4.8 times their size, bare-handed,
-    // 2026-10-06).
+    // From the rigid part of what the game animated: a scaled wrist inverted as if rigid would make
+    // the move scale whatever it moved (the hands several times their size).
     note_scaled("aim wrist", pinned);
     let aim_move = compose(&compose(&palm, &in_palm), &rigid_inverse(&orthonormal(pinned)));
     if !aim_move.iter().all(|v| v.is_finite()) {
@@ -629,12 +625,11 @@ pub fn follow(skeleton: &dyn Skeleton, before: &Snapshot, pose: &Pose) -> Result
     }
     // Every bone from the snapshot. Elements that are not bones stay: the helpers (`r_handholder`,
     // which the weapon hangs on, ...) follow their moved bones, and moving the helper `hspine1`
-    // (the root Dying Light 1 squashes) or the mesh parts (`player_6_handr_fpp`, ...) left the arms
-    // where the game put them, out of view, with only the weapon at the controller (PC captures
-    // 2026-10-06; bones only drew hand and weapon).
+    // (the root Dying Light 1 squashes) or the mesh parts (`player_6_handr_fpp`, ...) leaves the
+    // arms where the game put them, out of view, with only the weapon at the controller.
     // Climbing, every bone goes where the game animated it in the world, blended: the hands stay
-    // on the ledge. (Carried under the head, the arms turned with the player's sight while the
-    // game, left alone on a ledge, did not turn the character: the hands came off it.)
+    // on the ledge. (Carried under the head, the arms would turn with the player's sight while the
+    // game, left alone on a ledge, does not turn the character: the hands would come off it.)
     let in_place = translation([0.0; 3]);
     let pivot = position(&game);
     let body_move = blend(&in_place, &carry, rig, pivot);
@@ -749,12 +744,10 @@ fn note_scaled(what: &str, m: &Mat34) {
     }
 }
 
-/// Counts the calls that found the arms not animated again since they were moved (paused, or a
-/// second call in one frame); logs the first few.
 /// Records a bone written after [`follow`] placed `skeleton` (a finger put on finger tracking), so
 /// a game that hands back the same pose is still known to hand back the rig's own: unrecorded, a
-/// paused game's arms no longer matched what [`follow`] wrote, were taken as animated and moved
-/// again every call, and the bones flew (Dying Light 1 paused with finger tracking, 2026-10-07).
+/// paused game's arms would no longer match what [`follow`] wrote, be taken as animated and moved
+/// again every call, and the bones would fly.
 pub fn note_written(skeleton: usize, element: i32, matrix: &Mat34) {
     let Ok(mut memory) = MEMORY.lock() else { return };
     if memory.skeleton == skeleton
@@ -796,10 +789,9 @@ fn note_swayed(turn: f32, shift: f32) {
     }
 }
 
-/// Research: arms handed back mostly as written, a few bones not: the game changed only those
+/// Diagnostic: arms handed back mostly as written, a few bones not: the game changed only those
 /// since the last move (paused, something of its own still at work), which defeats the check for
-/// arms not animated again. Logs which bones and how far (bones flew in the pause menu holding a
-/// rifle, not a pistol: 2026-10-07).
+/// arms not animated again. Logs which bones and how far.
 fn note_mostly_ours(skeleton: &dyn Skeleton, written: &[Mat34], handed: &[Mat34]) {
     static LOGGED: AtomicU64 = AtomicU64::new(0);
     let finite = written.iter().filter(|w| w[0].is_finite()).count();
@@ -821,6 +813,8 @@ fn note_mostly_ours(skeleton: &dyn Skeleton, written: &[Mat34], handed: &[Mat34]
     log!("hand rig: the arms came back as written but for {} of {finite} bones: {}", changed.len(), shown.join(", "));
 }
 
+/// Counts the calls that found the arms not animated again since they were moved (paused, or a
+/// second call in one frame); logs the first few.
 fn note_reanimation_missed() {
     static MISSED: AtomicU64 = AtomicU64::new(0);
     let n = MISSED.fetch_add(1, Relaxed) + 1;
@@ -832,8 +826,8 @@ fn note_reanimation_missed() {
 /// `weight` of the way from one rigid move to another (0 `from`, 1 `to`): the matrices mixed and
 /// made rigid again about `pivot`, which goes where the mix takes it. Linear in what it does to a
 /// point, so an elbow both arm bones move alike stays joined, but for that last rounding, which
-/// grows with the distance from `pivot`: made rigid about the world's origin, 460 m off in Dying
-/// Light 1's map, it threw the arms 15 to 90 m on every climb's blend (2026-10-06).
+/// grows with the distance from `pivot`: made rigid about the world's origin, hundreds of metres
+/// off in a game's map, it would throw the arms tens of metres on every climb's blend.
 fn blend(from: &Mat34, to: &Mat34, weight: f32, pivot: [f32; 3]) -> Mat34 {
     if weight >= 1.0 {
         return *to;

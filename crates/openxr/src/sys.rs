@@ -735,7 +735,7 @@ mod tests {
     use super::*;
     use core::mem::{offset_of, size_of};
 
-    // Measured from the C headers with MSVC x64 (sizeof/offsetof).
+    // The C headers' sizes and offsets with MSVC x64 (sizeof/offsetof).
     #[test]
     fn layouts_match_c() {
         assert_eq!(size_of::<Posef>(), 28);

@@ -4,7 +4,7 @@
 //! A producer is a DLL named `monaka_NAME.dll` or `monaka_NAME-VERSION.dll`; it names the game
 //! executable it belongs to in its exported `MONAKA_HOST` (see `monaka_producer::producer!`; several,
 //! `;`-separated, for one engine's games), so a new game needs nothing here. The C++ producers,
-//! which predate that, are known by name. Before a start, any other producer copy still running in
+//! which do not export it, are known by name. Before a start, any other producer copy still running in
 //! the game is stopped, so two versions never hook at once. A copy is never unloaded: it stays
 //! loaded and inert after its stop.
 

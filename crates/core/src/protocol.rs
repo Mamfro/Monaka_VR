@@ -277,9 +277,9 @@ impl KeyedHeader {
 }
 
 pub const FENCE_MAGIC: u32 = 0x4656_4c44;
-/// 2: per-slot sequences, five slots (the reader takes the newest finished pair, not only the
-/// newest: a GPU running behind left the newest always unfinished, 4 to 10 pairs a second shown
-/// of 75 published in The Beast, 2026-10-06).
+/// 2: per-slot sequences, five slots. The reader takes the newest finished pair, not only the
+/// newest: with a GPU running frames behind, the newest pair is still unfinished whenever the
+/// reader looks, and most pairs would never be shown.
 pub const FENCE_VERSION: u32 = 2;
 pub const FENCE_SLOTS: usize = 5;
 pub const NO_SLOT: u32 = u32::MAX;
@@ -414,7 +414,7 @@ mod tests {
     use super::*;
     use core::mem::{align_of, offset_of, size_of};
 
-    // Values measured from the C++ headers with MSVC x64 (sizeof/offsetof).
+    // The C++ headers' sizes and offsets under MSVC x64 (sizeof/offsetof).
     #[test]
     fn eye_gaze_matches_cpp() {
         assert_eq!(size_of::<EyeGaze>(), 48);

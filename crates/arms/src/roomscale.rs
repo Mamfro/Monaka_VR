@@ -11,7 +11,7 @@
 //! in tracking space, is how far the head has moved that the character has followed, and the
 //! tracking origin is shifted back by it ([`shift_origin`], for the eyes and the arms alike), so
 //! the view does not move twice. Blocked by a wall, the character stays and the anchor with it:
-//! the head can then lean past the character, as before.
+//! the head can then lean past the character, as without following.
 //!
 //! Off while the game moves the body itself (the game says why) or the player climbs, and when no
 //! head is tracked. A recentre (the head's position jumping) moves the anchor with it, so the

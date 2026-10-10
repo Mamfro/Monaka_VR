@@ -3,8 +3,7 @@
 //! types, for producers that hook those calls in the renderer's import table (Dying Light 2, The
 //! Beast).
 //!
-//! Layouts measured on Streamline 2.9 (Dying Light 2) and 2.8 (The Beast, checked by
-//! plausibility): every structure starts with a 32-byte header (next, GUID, version); a
+//! The layouts of Streamline 2.9 (Dying Light 2) and 2.8 (The Beast): every structure starts with a 32-byte header (next, GUID, version); a
 //! ViewportHandle's id at +32; a Resource's type +32 (a byte), native object +40, state +64; a
 //! ResourceTag (64 bytes): resource +32, buffer type +40. Reads go through [`monaka_hook::mem`], so a
 //! bad pointer reads as nothing rather than faulting.
@@ -172,7 +171,7 @@ pub mod constants {
     pub const CAMERA_MOTION_INCLUDED: usize = 445;
     pub const MOTION_VECTORS_3D: usize = 446;
     pub const RESET: usize = 447;
-    /// `sl::Constants` is 456 bytes in the versions measured; copies are this generous, and
+    /// `sl::Constants` is 456 bytes in Streamline 2.8 and 2.9; copies are this generous, and
     /// Streamline reads only as far as the structure's own version says.
     pub const BYTES: usize = 1024;
 }

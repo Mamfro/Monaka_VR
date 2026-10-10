@@ -1,6 +1,6 @@
 //! What the character aims with, and steering its look toward it: the parts of head aim and hand
 //! aim the Dying Light producers share. A producer finds its player character and the moment its
-//! camera is built; this picks the direction ([`AimSettings::direction`]) and writes the look
+//! camera is built; this picks the direction ([`AimSettings::aim_at`]) and writes the look
 //! targets ([`LookSteer`]), and neutralises vertical look input while it does ([`neutral_pitch`]).
 //!
 //! Head aim: the character's look targets follow the head, so it looks, aims and attacks where the
@@ -242,8 +242,8 @@ impl LookSteer {
 /// The game's input-action converter got `value` for the action at `binding` (its id at +0, flags
 /// at +0x10, 0x10 meaning inverted). When the id is a vertical look action (`is_pitch`), the value
 /// that means "no input" (0, or 1 when inverted); otherwise `None`. While head aim steers, the head
-/// alone pitches the character, so mouse and stick pitch are neutralised this way (the Dying Light
-/// converters, measured in all three).
+/// alone pitches the character, so mouse and stick pitch are neutralised this way (all three Dying
+/// Light games lay their converters' bindings out so).
 pub fn neutral_pitch(binding: usize, is_pitch: impl Fn(u32) -> bool) -> Option<f32> {
     let action = mem::read::<u32>(binding)?;
     is_pitch(action).then(|| if mem::read::<u8>(binding + 0x10).is_some_and(|f| f & 0x10 != 0) { 1.0 } else { 0.0 })
@@ -255,12 +255,10 @@ static HEAD_UPDATES: AtomicU64 = AtomicU64::new(0);
 static SOURCE: AtomicU64 = AtomicU64::new(0);
 static SWITCHES: AtomicU64 = AtomicU64::new(0);
 
-/// Counts which direction aimed this update and, with hand aim on, logs the first switches between
-/// the controller and the head.
 /// The point a weapon held in `palm` points at ([`converged`], where the viewer's reticle sits), as
 /// the game's camera sees it (tracking space, from the camera): the camera is where room-scale
 /// following has walked the character ([`crate::roomscale::anchor`]), not at the tracking origin.
-/// Aimed at from the origin, shots missed the reticle by up to the distance walked (2026-10-09).
+/// Aimed at from the origin, shots would miss the reticle by up to the distance walked.
 pub fn weapon_point(palm: &HandPose) -> Vec3 {
     from_camera(converged(palm.position, palm.orientation), crate::roomscale::anchor())
 }
@@ -270,6 +268,8 @@ fn from_camera(point: Vec3, anchor: [f32; 2]) -> Vec3 {
     [point[0] - anchor[0], point[1], point[2] - anchor[1]]
 }
 
+/// Counts which direction aimed this update and, with hand aim on, logs the first switches between
+/// the controller and the head.
 pub fn note_source(by_hand: bool, hand_aim: bool) {
     (if by_hand { &HAND_UPDATES } else { &HEAD_UPDATES }).fetch_add(1, Relaxed);
     let now = if by_hand { 2 } else { 1 };

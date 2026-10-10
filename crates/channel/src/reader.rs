@@ -59,8 +59,6 @@ impl AnyReader {
         Ok(if fence { AnyReader::Fence(FenceReader::open(name, device)?) } else { AnyReader::Keyed(KeyedReader::open(name, device)?) })
     }
 
-    /// Copies the newest pair into `eyes` on `context` if it is newer than `seen`. `Ok(None)`:
-    /// nothing new yet.
     /// A fence reader's empty reads so far: the header locked by the producer, and no finished
     /// pair newer than the one shown (for diagnostics).
     pub fn misses(&self) -> Option<(u64, u64)> {
@@ -70,6 +68,8 @@ impl AnyReader {
         }
     }
 
+    /// Copies the newest pair into `eyes` on `context` if it is newer than `seen`. `Ok(None)`:
+    /// nothing new yet.
     pub fn read(&mut self, context: &ID3D11DeviceContext, eyes: [&ID3D11Texture2D; 2], seen: u64) -> Result<Option<Pair>> {
         match self {
             AnyReader::Keyed(r) => r.read(context, eyes, seen),

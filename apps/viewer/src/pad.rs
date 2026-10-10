@@ -174,7 +174,7 @@ pub fn default_bindings(profile: &str) -> Vec<(&'static str, String)> {
 /// Bindings beyond [`default_bindings`] that a profile may refuse (an input path not known for
 /// sure): alternatives tried in order, each added to the defaults, before the defaults alone.
 /// The Steam Frame's left grip clicks the left stick: games sprint on that click (Dying Light), and
-/// the Frame's stick is hard to press in mid-push (2026-10-06). SteamVR names the grip `grip` in
+/// the Frame's stick is hard to press in mid-push. SteamVR names the grip `grip` in
 /// the Frame's own profile; OpenXR profiles mostly call it `squeeze`.
 pub fn extra_bindings(profile: &str) -> Vec<Vec<(&'static str, String)>> {
     match profile.rsplit('/').next().unwrap_or_default() {

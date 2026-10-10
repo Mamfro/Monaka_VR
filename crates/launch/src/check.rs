@@ -1,8 +1,6 @@
 //! PC checks without a headset, from the same game table and option files as a play session
 //! (`monaka_play harness|capture|probe`): the producer attached to the running game with a
-//! stand-in for the viewer, then stopped, and its log shown. What the `Harness-*.ps1`,
-//! `Capture-*.ps1` and `Probe-*.ps1` scripts each did with their own copy of the run folder,
-//! the options and the game's names.
+//! stand-in for the viewer, then stopped, and its log shown.
 //!
 //! - **Harness**: `examples\harness.exe` (`crates\channel\examples\harness.rs`) plays a timed
 //!   script of head and controller poses, fingers and gamepad in place of the viewer, saving the

@@ -1,6 +1,6 @@
 //! The HUD around frame generation (D3D12). Frame generation must not interpolate the HUD (it
 //! would move with the world), and the game's own HUD-less frame is black while its DLSS frame
-//! generation is held off (same-frame stereo; measured 2026-10-05). Its UI layer is real, though,
+//! generation is held off (in same-frame stereo). Its UI layer is real, though,
 //! and premultiplied: frame = world * (1 - alpha) + ui. So [`HudComposer::unblend`] recovers the
 //! world from the frame and the layer, frame generation interpolates that, and
 //! [`HudComposer::compose`] lays the newest real frame's layer over the generated frame. The shaders

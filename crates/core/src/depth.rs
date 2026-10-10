@@ -13,7 +13,7 @@ pub struct DepthMapping {
 
 impl DepthMapping {
     /// From a row-major right-handed projection (clip w = -z) and its near distance: depth
-    /// d = -P[10] + P[11] / distance, so nearness = near * (d + P[10]) / P[11]. Covers standard
+    /// `d = -P[10] + P[11] / distance`, so `nearness = near * (d + P[10]) / P[11]`. Covers standard
     /// depth (0 at near, 1 at far) and reverse-Z infinite (d = near / distance).
     pub fn from_projection(p: &Mat44, near: f32) -> Option<Self> {
         let perspective = (p[14] + 1.0).abs() < 1e-3 && p[15].abs() < 1e-3;

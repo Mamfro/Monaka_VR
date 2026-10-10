@@ -1,6 +1,6 @@
 //! Climbing, hanging from a ledge, a ladder: the game's own animation raises the hands to the
 //! eyes, where the arms never go while walking or fighting (both wrists stay 0.17 m or more below
-//! the camera, `probe_hands` in Dying Light 1, 2026-10-06). Hanging holds on with both hands or
+//! the camera in Dying Light 1). Hanging holds on with both hands or
 //! with one, the other reaching back. The arms then go back to the game's animation, carried
 //! under the real head, blended over [`BLEND_MS`]; swings do not attack and a producer leaves the
 //! character's look to the game ([`traversing`]): turning on a ledge (to change hands, to jump
@@ -21,8 +21,8 @@ const STAY_Y: f32 = -0.12;
 /// Whether a wrist (camera space) is where only a climb puts it: up at the eyes (a climb pulls
 /// one hand down at a time), or behind them. Hanging turned away from the ledge, the hand still
 /// on it sits 0.55-0.71 m out to its side and 0.13-0.45 m behind the eyes, the other reaching
-/// ahead low; turning between the poses swings it up to 0.72 m behind (Dying Light 1,
-/// 2026-10-06). Walking and fighting, no wrist goes further back than 0.03 m.
+/// ahead low; turning between the poses swings it up to 0.72 m behind (Dying Light 1). Walking
+/// and fighting, no wrist goes further back than 0.03 m.
 fn holds_on(wrist: &[f32; 3]) -> bool {
     let [x, y, z] = *wrist;
     y > STAY_Y || z > 0.3 || (x.abs() > 0.45 && z > 0.05)
@@ -40,7 +40,7 @@ static HOLD_OFF_UNTIL: AtomicU64 = AtomicU64::new(0);
 
 /// The character is fighting, not climbing, for the next `ms`: the arms stay on the controllers
 /// whatever the game's animation does with the hands (Kingdom Come raises them to the eyes for a
-/// guard over the head and for its attacks, 2026-10-08). A producer renews it while the fight goes
+/// guard over the head and for its attacks). A producer renews it while the fight goes
 /// on; the arms already with the game come back once the hands come down.
 pub fn hold_off(ms: u64) {
     HOLD_OFF_UNTIL.fetch_max(monaka_channel::tick() + ms, Relaxed);
@@ -146,8 +146,8 @@ pub fn update(wrists: [[f32; 3]; 2], game: &Mat34) -> f32 {
 }
 
 /// Which way the wall is from the camera during the latest climb (world x and z, unit): toward
-/// where both hands hold on, smoothed. Where the player looked on grabbing was no guide: half the
-/// grabs were looking along the wall, the hands taking hold beside the head (2026-10-06).
+/// where both hands hold on, smoothed. Where the player looks on grabbing is no guide: the player
+/// often grabs looking along the wall, the hands taking hold beside the head.
 static WALL: Mutex<Option<[f32; 2]>> = Mutex::new(None);
 /// How much of each update's reading goes into [`WALL`].
 const WALL_SMOOTHING: f32 = 0.2;

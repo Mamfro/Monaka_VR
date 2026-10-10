@@ -1,4 +1,4 @@
-//! SHA-256, for checking that a game module is the exact build its offsets were measured on.
+//! SHA-256, for checking that a game module is the exact build its offsets belong to.
 
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01,

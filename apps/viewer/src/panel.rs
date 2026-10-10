@@ -83,7 +83,7 @@ pub struct HandPanel<'s> {
 }
 
 impl<'s> HandPanel<'s> {
-    /// The piece `piece` of the game channel `channel` on `side` of the right hand, shown in
+    /// The piece `piece` of the game channel `channel` on `side` of `hand`, shown in
     /// swapchains of `format` (the eyes' own).
     pub fn new(channel: &ChannelName, format: u32, piece: &'static str, hand: usize, side: Side, width: f32, beside: bool) -> Self {
         // The channel's texels are RGBA8 and are copied as they are.
@@ -145,9 +145,8 @@ impl<'s> HandPanel<'s> {
         }
     }
 
-    /// The panel on its hand, `grips` being the hands' grip spaces, once one has arrived;
-    /// `grip_orientations` (by hand) and `head_orientation` are the grips' and the head's in one
-    /// space, this frame.
+    /// The panel on its hand, once one has arrived; `grips` (by hand) and `head` are the grips'
+    /// and the head's poses in `local`, this frame.
     pub fn layer<'a>(&'a self, local: &'a Space<'a>, grips: &[HandPose; 2], head: Option<&HeadPose>, nearest: f32, main_width: f32) -> Option<Layer<'a>> {
         let grip = &grips[self.hand];
         if grip.valid == 0 {
@@ -213,7 +212,7 @@ fn conjugate([x, y, z, w]: Quat) -> Quat {
     [-x, -y, -z, w]
 }
 
-/// The rotation `a` then... no: `a * b`, applying `b` first, then `a` (Hamilton product).
+/// `a * b`: the rotation applying `b` first, then `a` (Hamilton product).
 fn multiply(a: Quat, b: Quat) -> Quat {
     [
         a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],

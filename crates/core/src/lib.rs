@@ -30,7 +30,7 @@ pub mod swing;
 pub mod x64;
 
 /// A value on a 16-byte boundary: engine matrix code reads with aligned SSE loads, and an unaligned
-/// matrix faults (measured in Dying Light 2: "reading 0xffffffffffffffff").
+/// matrix faults (in Dying Light 2, an access violation reading 0xffffffffffffffff).
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Aligned16<T>(pub T);

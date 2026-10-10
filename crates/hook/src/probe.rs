@@ -1,6 +1,5 @@
 //! Finding things in a running game: what class an object is, which of its fields hold a value
-//! the game is known to be using, and who called a hooked function. The DL2 head-aim fields were
-//! found this way (the player camera's controller class, then floats equal to the known pitch).
+//! the game is known to be using, and who called a hooked function.
 
 use crate::mem;
 use windows::Win32::System::Diagnostics::Debug::RtlCaptureStackBackTrace;

@@ -1,5 +1,5 @@
 // Motion vectors rebased onto the same eye's previous frame (alternate-eye stereo: the game's
-// previous frame is the other eye's). Measured on The Beast: the game's vectors, in pixels, times
+// previous frame is the other eye's). In The Beast the game's vectors, in pixels, times
 // mvecScale are the UV motion from now to the previous frame (y down), and for a still scene they
 // equal the camera's motion through clipToPrevClip exactly. So per pixel:
 //   camera part toward the game's previous  = through GameToPrev (the game's clipToPrevClip)

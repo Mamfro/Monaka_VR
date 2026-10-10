@@ -118,9 +118,9 @@ pub struct EyeFrame<'a> {
 }
 
 /// A texture made on the game's D3D11 device and opened on the D3D12 device. (The other way
-/// round, D3D11 opens only render-target-only RGBA8, RGB10A2 and RGBA16F textures; measured
-/// 2026-10-06. Made on D3D11, every format here opens, as render target, unordered access and
-/// simultaneous access on D3D12.)
+/// round, D3D11 opens only render-target-only RGBA8, RGB10A2 and RGBA16F textures. Made on
+/// D3D11, every format here opens, as render target, unordered access and simultaneous access on
+/// D3D12.)
 struct Shared {
     d12: ID3D12Resource,
     d11: ID3D11Texture2D,

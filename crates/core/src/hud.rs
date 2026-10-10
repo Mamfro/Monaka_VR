@@ -160,8 +160,8 @@ mod tests {
         assert!((left.shift_pixels(3840.0) - 17.28).abs() < 1e-2 && (right.shift_pixels(3840.0) + 17.28).abs() < 1e-2);
         assert!((left.rect(base, base.aspect(), 0.5).x - 977.28).abs() < 1e-2);
         assert!((right.rect(base, base.aspect(), 0.5).x - 942.72).abs() < 1e-2);
-        // Dying Light 1's old rule of thumb, 0.024 clip units per metre, was this at a 106
-        // degree field (tangent 1.33 each side) and 64 mm.
+        // At a 106 degree field (tangent 1.33 each side) and 64 mm this is 0.024 clip units over
+        // the distance in metres, Dying Light 1's rule of thumb.
         let wide = Placement::new(Frustum { left: -1.3333, right: 1.3333, up: 1.0, down: -1.0 }, 0, 0.064, 2.0);
         assert!((wide.clip_centre()[0] - 0.012).abs() < 1e-4);
     }

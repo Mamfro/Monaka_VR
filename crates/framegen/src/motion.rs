@@ -5,8 +5,8 @@
 //! chained over two frames (`motion_compose.hlsl`: the previous frame's vectors and this frame's
 //! in), into a texture of our own given instead. Recorded on the game's own command list just
 //! before the consumer runs, reading the game's textures in a shader-readable state and leaving
-//! them so. Measured on The Beast (DLSS, frame generation); used by Kingdom Come: Deliverance II
-//! (FSR).
+//! them so. The vector conventions are The Beast's (DLSS, frame generation); Kingdom Come:
+//! Deliverance II (FSR) uses the chaining.
 
 use monaka_channel::d3d12::barrier;
 use monaka_channel::d3d12::compute::{self, DescriptorHeap, Table, srv_desc, uav_desc};

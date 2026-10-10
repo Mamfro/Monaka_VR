@@ -6,7 +6,7 @@
 // p1 + Previous(p1) in the one before that: this eye's previous frame. The output keeps the
 // game's units. Everything that moves is
 // carried as the game itself measured it, the weapon and arms that move with the head included
-// (a rebase that takes the world as still moved them by the eyes' parallax).
+// (a rebase that takes the world as still moves them by the eyes' parallax).
 
 cbuffer Constants : register(b0)
 {

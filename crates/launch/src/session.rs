@@ -112,7 +112,7 @@ fn random() -> u128 {
     RandomState::new().hash_one(std::process::id()) as u128
 }
 
-/// A unique version stamp for a run (`20261006T112233fffffff-1a2b3c4d`, sortable like the
+/// A unique version stamp for a run (`YYYYMMDDThhmmssfffffff-xxxxxxxx`, sortable like the
 /// PowerShell launchers' folders).
 pub(crate) fn version() -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
@@ -128,7 +128,7 @@ pub(crate) fn version() -> String {
     )
 }
 
-/// The calendar date of a day count since 1970-01-01 (Howard Hinnant's algorithm).
+/// The calendar date of a day count since the Unix epoch (Howard Hinnant's algorithm).
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -178,7 +178,7 @@ fn session(game: &Game, values: &Values, paths: &Paths, console: Console, stop: 
 
     report(Event::State(State::WaitingForGame));
     let Some(pid) = find_game(game, values, stop, report)? else { return Ok(()) };
-    // An unreadable command line is let through, as the PowerShell launcher did.
+    // An unreadable command line is let through: only arguments it is seen to hold are refused.
     if let Some(line) = system::command_line(pid).map(|l| l.to_ascii_lowercase())
         && let Some((_, why)) = game.refused_arguments.iter().find(|(argument, _)| line.contains(&argument.to_ascii_lowercase()))
     {

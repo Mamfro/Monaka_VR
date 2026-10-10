@@ -385,7 +385,7 @@ macro_rules! producer {
     };
 }
 
-/// Checks a game module is the exact build this producer's offsets were measured on.
+/// Checks a game module is the exact build this producer's offsets belong to.
 pub fn require_build(name: &str, sha256: &str) -> Result<Module, Rejection> {
     let module = Module::find(name).ok_or_else(|| Rejection::not_ready(format!("{name} is not loaded")))?;
     let mismatch = match module.file_sha256() {
@@ -401,7 +401,7 @@ pub fn require_build(name: &str, sha256: &str) -> Result<Module, Rejection> {
 }
 
 /// The game module for a producer that finds everything it needs in the code itself (rather than
-/// at offsets measured on one build): any build runs, its fingerprint logged, because finding
+/// at offsets fixed for one build): any build runs, its fingerprint logged, because finding
 /// anything ambiguous refuses the start.
 pub fn discovered_build(name: &str) -> Result<Module, Rejection> {
     let module = Module::find(name).ok_or_else(|| Rejection::not_ready(format!("{name} is not loaded")))?;

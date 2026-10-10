@@ -1,5 +1,5 @@
 //! Light or dark, as Windows' app mode says (Settings > Personalisation > Colours), switching live
-//! when it changes. Light is the system colours, as the window always had. Plain Win32 controls only
+//! when it changes. Light is the system colours. Plain Win32 controls only
 //! partly darken, so each kind gets its own fix:
 //!
 //! - the title bar: DWM's immersive dark mode;

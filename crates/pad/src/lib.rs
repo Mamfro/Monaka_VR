@@ -9,8 +9,8 @@
 //! unplugs when the viewer stops). They are caught at both ends ([`install`]), because callers
 //! reach XInput two ways: through the XInput DLLs' own code (libraries that look the functions up
 //! themselves, as SDL does), and through the game modules' import tables, which the Steam overlay
-//! points at its own XInput hooks, so those calls never reach the DLLs' code (measured in Dying
-//! Light 2026-10-06: the engine's reads went engine, overlay, XInput, driver). A read that passes
+//! points at its own XInput hooks, so those calls never reach the DLLs' code (in Dying Light
+//! the engine's reads go engine, overlay, XInput, driver). A read that passes
 //! both is merged once.
 
 pub mod gameinput;
@@ -440,7 +440,7 @@ static ANNOUNCER: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 /// For games that look for pads only when a device comes: each time the VR pad goes live (the
 /// viewer's controllers start sending), tells the game's windows a device came. Dishonored: Death
 /// of the Outsider rescans its XInput pads on `WM_DEVICECHANGE` alone, so with no real pad plugged
-/// in or out it never asked about the VR one (2026-10-07); a rescan before the VR pad is live would
+/// in or out it never asks about the VR one; a rescan before the VR pad is live would
 /// find pad 0 absent. Call after the pad hooks are on.
 pub fn announce() {
     let watcher = std::thread::spawn(|| {
@@ -459,7 +459,7 @@ pub fn announce() {
 
 /// Tells the game's windows a device came with `WM_DEVICECHANGE`: posts "device nodes changed" and
 /// sends a HID interface arrival. The arrival carries a pointer, so Windows refuses to post it
-/// (the first try posted both and reached no window, 2026-10-07): it is sent, and waited for.
+/// (a posted arrival reaches no window): it is sent, and waited for.
 fn post_arrival() {
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -600,8 +600,7 @@ unsafe fn read(original: &Original<GetStateFn>, user: u32, state: *mut XInputSta
     }
     // The jitter changes with time, not per read: a library may read the pad many times in one
     // frame (SDL re-reads it for every event the game takes), and a pad that changes on every
-    // read hands the game a new event each time, forever (measured: the game stalled at 1.2
-    // million events in 12 s).
+    // read hands the game a new event each time, forever, and the game stalls in its event loop.
     let merged = merge(real, vr);
     let mut pad = dither(merged, vr, (monaka_channel::tick() / DITHER_MS) % 2 == 1);
     // The undithered stick to the producer; taken, a centred one to the game.

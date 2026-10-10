@@ -22,8 +22,8 @@ pub struct SwingRules {
     /// The least time from one swing's start to the next's (seconds).
     pub min_gap: f64,
     /// A tip moving up steeper than this (the up share of its direction) is winding up, not
-    /// striking: it starts no swing, and the strike it turns into still can (measured 2026-10-06:
-    /// half the attacks went off on the axe's way up, the chop after it then too soon to count).
+    /// striking: it starts no swing, and the strike it turns into still can. Counted, a wind-up
+    /// would fire the attack on the weapon's way up, leaving the chop after it too soon to count.
     pub max_rise: f32,
     /// A sharp weapon's swings must cut: the tip moving along the edge by at least this share of
     /// its motion. The flat faces the controller's sides (a sword in a hammer grip: the blade in
@@ -35,7 +35,7 @@ pub struct SwingRules {
 
 impl SwingRules {
     /// A one-handed weapon: a club's or a machete's sweet spot half a metre out.
-    /// Seated chops peaked from 2 m/s up, idle hand moves under 2 (2026-10-06).
+    /// The start speed sits between idle hand moves (under 2 m/s) and seated chops (2 m/s and up).
     pub const WEAPON: Self = Self { reach: 0.5, blade: [0.0, 0.0, -1.0], start_speed: 2.2, settle_speed: 0.9, min_gap: 0.3, max_rise: 0.5, cut: None };
     /// A sword or a knife: a weapon's swing that also cuts, the tip moving along the edge for at
     /// least about 45 degrees' worth of its direction (cos 45 = 0.7).
