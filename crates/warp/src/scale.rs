@@ -49,7 +49,15 @@ impl Scaler {
 
     /// `source` (an RGBA8, BGRA8 or R10G10B10A2 image, any binding: a back buffer) resampled to
     /// `width` x `height` with its aspect kept, black around it, into an RGBA8 image kept here.
-    pub fn run(&mut self, context: &ID3D11DeviceContext, source: &ID3D11Texture2D, (width, height): (u32, u32)) -> Result<&ID3D11Texture2D> {
+    pub fn run(&mut self, context: &ID3D11DeviceContext, source: &ID3D11Texture2D, size: (u32, u32)) -> Result<&ID3D11Texture2D> {
+        let desc = d3d::texture_desc(source);
+        self.run_into(context, source, size, fit((desc.Width, desc.Height), size))
+    }
+
+    /// `source` resampled into `rect` (x, y, width, height in output pixels) of a `width` x
+    /// `height` output, black around it: an image drawn stretched to another shape put back in
+    /// its own.
+    pub fn run_into(&mut self, context: &ID3D11DeviceContext, source: &ID3D11Texture2D, (width, height): (u32, u32), rect: [f32; 4]) -> Result<&ID3D11Texture2D> {
         let desc = d3d::texture_desc(source);
         if desc.SampleDesc.Count != 1 {
             return Err(crate::Error::Unsupported("multisampled image"));
@@ -64,7 +72,7 @@ impl Scaler {
             self.output = Some(uav_texture(&self.device, width, height, DXGI_FORMAT_R8G8B8A8_UNORM)?);
         }
         let (output, uav) = self.output.as_ref().expect("made above");
-        let constants = Constants { width, height, source_width: desc.Width, source_height: desc.Height, rect: fit((desc.Width, desc.Height), (width, height)) };
+        let constants = Constants { width, height, source_width: desc.Width, source_height: desc.Height, rect };
         let saved = SavedCompute::take(context);
         self.constants.update(context, &constants);
         self.constants.bind(context);
