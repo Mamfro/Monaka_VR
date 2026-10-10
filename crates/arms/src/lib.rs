@@ -357,6 +357,16 @@ pub fn declare_one_handed() {
     ONE_HANDED.store(true, Relaxed);
 }
 
+/// Set by [`hands_apart`]: what is held now keeps each hand on its own controller.
+static HANDS_APART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Says, each update, whether what the game holds now is held apart, each hand on its own
+/// controller however close the game animates the hands (Dying Light 1's bow: the bow in the left
+/// hand, the string in the right, the left wrist near the right hand as a rifle's would be).
+pub fn hands_apart(apart: bool) {
+    HANDS_APART.store(apart, Relaxed);
+}
+
 /// Whether the off hand rides a two-handed weapon (as of the latest update), and since when.
 static TWO_HANDED: Mutex<(bool, u64)> = Mutex::new((false, 0));
 
@@ -374,6 +384,13 @@ fn two_handed(distance: f32) -> bool {
     }
     let Ok(mut state) = TWO_HANDED.lock() else { return false };
     let now = monaka_channel::tick();
+    if HANDS_APART.load(Relaxed) {
+        if state.0 {
+            *state = (false, now);
+            note_two_handed(false, distance);
+        }
+        return false;
+    }
     let wants = if state.0 { distance < ONE_HANDED_BEYOND } else { distance < TWO_HANDED_WITHIN };
     if wants == state.0 {
         state.1 = now;

@@ -297,7 +297,8 @@ fn find_steam_files(files: &SteamFiles) -> Option<std::path::PathBuf> {
 /// hand's own aim where the game has one (`left_hand_aims`); a sword gets none (`weapon_ring`).
 fn reticles(game: &Manifest, values: &Values) -> Vec<String> {
     let aim = values.text(game, "aim");
-    let hand = if aim == aims::CONTROLLER { values.text(game, "aim_hand") } else { "right".to_owned() };
+    // A game without an aiming-hand choice aims with the right.
+    let hand = if aim == aims::CONTROLLER && values.text(game, "aim_hand") == "left" { "left" } else { "right" }.to_owned();
     let mut rings: Vec<&str> = Vec::new();
     if aim == aims::CONTROLLER || (aim == aims::HAND_RIG && game.weapon_ring) {
         rings.push(&hand);
@@ -396,6 +397,14 @@ mod tests {
         assert!(args(&["aim=head"]).is_empty() && args(&["aim=off"]).is_empty());
         // A choice's viewer arguments.
         assert_eq!(args(&["aim=head", "mode=deep"]), ["--panel-nearest", "0.5"]);
+    }
+
+    #[test]
+    fn a_pointing_aim_without_a_hand_choice_rings_the_right_hand() {
+        const NO_HAND: Manifest = Manifest { options: &[aim(&[AIM_POINT, AIM_MOUSE], aims::CONTROLLER)], left_hand_aims: false, ..GAME };
+        let mut values = Values::default();
+        values.set_checked(&NO_HAND, "aim", "controller").unwrap();
+        assert_eq!(plan(&values, &NO_HAND, None).viewer_args, ["--reticle", "right"]);
     }
 
     #[test]
