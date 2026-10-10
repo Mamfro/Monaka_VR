@@ -9,7 +9,7 @@ use monaka_core::protocol::{HandPose, LEFT_HAND, RIGHT_HAND};
 use monaka_core::swing::{Swing, SwingRules};
 use monaka_producer::log;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::*};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::*};
 use std::time::Instant;
 
 /// How long a swing holds the trigger by default: several game updates, so the game sees the press
@@ -180,9 +180,49 @@ struct Hands {
     /// The latest sample fed per side (a pose is read every update, but changes once a present).
     last: [Option<HandPose>; 2],
     started: Option<Instant>,
+    /// A weapon's swing under way that has not attacked yet, with its start's speed and direction:
+    /// it attacks once the reach check says the weapon is about to reach something
+    /// ([`set_reach_check`]).
+    armed: [Option<(f32, [f32; 3])>; 2],
 }
 
-static HANDS: Mutex<Hands> = Mutex::new(Hands { swings: [Swing::new(), Swing::new()], last: [None, None], started: None });
+static HANDS: Mutex<Hands> = Mutex::new(Hands { swings: [Swing::new(), Swing::new()], last: [None, None], started: None, armed: [None; 2] });
+
+/// The producer's reach check (a `fn() -> bool`), 0 for none.
+static REACH_CHECK: AtomicUsize = AtomicUsize::new(0);
+/// Weapon swings that settled without reaching anything, so attacked nothing.
+static AIR_SWINGS: AtomicU64 = AtomicU64::new(0);
+
+/// Has a weapon's swing attack only when the weapon is about to reach something it can hit:
+/// `check` says whether it is now (the producer looks a moment ahead, for the attack to start in
+/// time). A swing then arms the attack and presses it at that moment; a swing that settles first
+/// (a wind-up, a swing at the air) attacks nothing, so it costs no stamina and leaves no attack
+/// recovery for the next swing to fall into. Swings any way still count, backhands included. Fists
+/// and games without a check press at the swing's start.
+pub fn set_reach_check(check: fn() -> bool) {
+    REACH_CHECK.store(check as usize, Relaxed);
+}
+
+fn reach_check() -> Option<fn() -> bool> {
+    let at = REACH_CHECK.load(Relaxed);
+    // SAFETY: stored from an `fn() -> bool` by `set_reach_check`.
+    (at != 0).then(|| unsafe { std::mem::transmute::<usize, fn() -> bool>(at) })
+}
+
+/// Presses the attack for a swing, and notes it.
+fn attack(held: Held, side: usize, speed: f32, direction: [f32; 3]) {
+    monaka_pad::press(Gamepad { right_trigger: 255, ..Gamepad::default() }, PRESS.load(Relaxed));
+    LAST_SWING.store(monaka_channel::tick(), Relaxed);
+    let n = SWINGS.fetch_add(1, Relaxed) + 1;
+    if n <= 8
+        && let Ok(mut watch) = WATCH.lock()
+    {
+        *watch = Some(Watch { swing: n, updates: 0, low: [f32::MAX; 3], high: [f32::MIN; 3] });
+    }
+    if n <= 200 {
+        log!("melee: swing {n} ({held:?}, {} hand) at {speed:.1} m/s toward {direction:.2?}", side_name(side));
+    }
+}
 
 /// One arms update: notes what is held and feeds the controllers (`palms`, by side, in tracking
 /// space) to their swing detectors.
@@ -203,6 +243,7 @@ pub fn update(held: Held, palms: [Option<HandPose>; 2], settings: &Settings) {
     // Climbing or hanging: the game drives the arms, and a swing would only press the trigger.
     if crate::traverse::traversing() {
         hands.swings.iter_mut().for_each(Swing::reset);
+        hands.armed = [None; 2];
         return;
     }
     let time = hands.started.get_or_insert_with(Instant::now).elapsed().as_secs_f64();
@@ -217,11 +258,13 @@ pub fn update(held: Held, palms: [Option<HandPose>; 2], settings: &Settings) {
             Held::Nothing => SwingRules::FIST.faster(speed),
             _ => {
                 hands.swings[side].reset();
+                hands.armed[side] = None;
                 continue;
             }
         };
         let Some(palm) = palms[side] else {
             hands.swings[side].reset();
+            hands.armed[side] = None;
             continue;
         };
         if hands.last[side] == Some(palm) {
@@ -229,17 +272,23 @@ pub fn update(held: Held, palms: [Option<HandPose>; 2], settings: &Settings) {
         }
         hands.last[side] = Some(palm);
         let step = hands.swings[side].feed(time, palm.position, palm.orientation, &rules);
+        let check = reach_check().filter(|_| matches!(held, Held::Melee | Held::Blade));
         if let Some(started) = step.started {
-            monaka_pad::press(Gamepad { right_trigger: 255, ..Gamepad::default() }, PRESS.load(Relaxed));
-            LAST_SWING.store(monaka_channel::tick(), Relaxed);
-            let n = SWINGS.fetch_add(1, Relaxed) + 1;
-            if n <= 8
-                && let Ok(mut watch) = WATCH.lock()
-            {
-                *watch = Some(Watch { swing: n, updates: 0, low: [f32::MAX; 3], high: [f32::MIN; 3] });
+            match check {
+                Some(_) => hands.armed[side] = Some((started.speed, started.direction)),
+                None => attack(held, side, started.speed, started.direction),
             }
-            if n <= 200 {
-                log!("melee: swing {n} ({held:?}, {} hand) at {:.1} m/s toward {:.2?}", side_name(side), started.speed, started.direction);
+        }
+        if let Some((speed, direction)) = hands.armed[side]
+            && check.is_some_and(|reaches| reaches())
+        {
+            hands.armed[side] = None;
+            attack(held, side, speed, direction);
+        }
+        if step.settled.is_some() && hands.armed[side].take().is_some() {
+            let n = AIR_SWINGS.fetch_add(1, Relaxed) + 1;
+            if n <= 50 {
+                log!("melee: a {} hand swing reached nothing: no attack (air swing {n})", side_name(side));
             }
         }
         if let Some((peak, swung)) = step.settled
@@ -267,6 +316,6 @@ fn side_name(side: usize) -> &'static str {
 
 pub fn report() {
     if ACTIVE.load(Relaxed) {
-        log!("melee: {} swings pressed the attack", SWINGS.load(Relaxed));
+        log!("melee: {} swings pressed the attack, {} reached nothing", SWINGS.load(Relaxed), AIR_SWINGS.load(Relaxed));
     }
 }
