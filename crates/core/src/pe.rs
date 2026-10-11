@@ -182,7 +182,8 @@ pub fn file_export_u32(bytes: &[u8], name: &str) -> Result<Option<u32>> {
 /// Whether `executable` is one of a producer's host names (`MONAKA_HOST`: one executable, or several
 /// `;`-separated), ignoring case.
 pub fn host_listed(hosts: &str, executable: &str) -> bool {
-    hosts.split(';').any(|host| !host.is_empty() && host.eq_ignore_ascii_case(executable))
+    // `*` (`manifest::ANY_EXECUTABLE`): a producer for any game on its engine checks the engine itself.
+    hosts.split(';').any(|host| !host.is_empty() && !executable.is_empty() && (host == crate::manifest::ANY_EXECUTABLE || host.eq_ignore_ascii_case(executable)))
 }
 
 /// The RVA of the named export of an image mapped in memory (read through `image` by RVA), which
@@ -246,6 +247,7 @@ mod tests {
         assert!(host_listed("WolfNewOrder_x64.exe;WolfOldBlood_x64.exe", "WolfOldBlood_x64.exe"));
         assert!(!host_listed("WolfNewOrder_x64.exe;WolfOldBlood_x64.exe", "Wolf"));
         assert!(!host_listed("a.exe;", ""));
+        assert!(host_listed("*", "AnyGame.exe") && !host_listed("*", ""));
     }
 
     #[test]

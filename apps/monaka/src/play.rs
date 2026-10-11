@@ -17,10 +17,12 @@
 //!
 //! For the checks, an `option=value` the game's table does not know goes to the producer as an
 //! extra (`probe_view=1`, `synthetic_yaw=30`, ...); the rest are checked as for a play session.
+//! Monaka's own settings (`controller_smoothing=...`, the window's Monaka tab) are taken on any
+//! line; a play session keeps the saved ones unless the line sets them.
 //! Ctrl+C stops VR; quitting the game ends it.
 
 use monaka_launch::check::{self, Check};
-use monaka_launch::games::{self, Game, Kind, Shown, Values};
+use monaka_launch::games::{self, Game, Kind, MONAKA, Shown, Values};
 use monaka_launch::packs;
 use monaka_launch::session::{self, Console, Event, Stop};
 use monaka_launch::settings::Settings;
@@ -46,6 +48,10 @@ unsafe extern "system" fn on_control(event: u32) -> BOOL {
 }
 
 fn list() {
+    println!("Monaka's own settings, for every game:");
+    for opt in MONAKA.options {
+        println!("    {}={}  {}", opt.id, games::describe(opt), opt.label);
+    }
     for game in games::list() {
         let from = if game.removable() { format!("  [game pack {}]", game.pack().folder().display()) } else { format!("  [local build {}]", game.pack().dll.display()) };
         println!("{} ({}): {}{from}", game.id, game.status.label(), game.name);
@@ -76,6 +82,9 @@ fn usage(why: &str) -> ExitCode {
 /// `option=value` into `values`; for a check, an unknown option becomes an extra for the producer.
 fn take_option(game: &Game, values: &mut Values, arg: &str, lenient: bool) -> Result<(), String> {
     let (id, value) = arg.split_once('=').ok_or_else(|| format!("Expected option=value, got {arg}"))?;
+    if game.option(id).is_none() && MONAKA.option(id).is_some() {
+        return values.set_checked(&MONAKA, id, value);
+    }
     if lenient && game.option(id).is_none() {
         let extra = values.text(game, "extra");
         values.set("extra", format!("{extra} {arg}").trim().to_owned());
@@ -211,6 +220,10 @@ fn add_pack(args: &[String]) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if let Some(what) = staged.too_new() {
+        eprintln!("Not added: {what} was made for a newer Monaka. Update Monaka to use it: {}", concat!(env!("CARGO_PKG_REPOSITORY"), "/releases"));
+        return ExitCode::from(1);
+    }
     let clashes = games::clashes(staged.manifests(), staged.replaces().as_deref());
     if !clashes.is_empty() {
         eprintln!("Not added: {}", clashes.join(" "));
@@ -287,8 +300,10 @@ fn main() -> ExitCode {
     let Some(game) = games::game(first) else {
         return usage(&format!("Unknown game {first}; monaka_play list shows the games."));
     };
-    // Options on the line replace the saved ones; with none, the saved ones (the window's) apply.
-    let mut values = if args.len() > 1 { Default::default() } else { Settings::load().values(game.id) };
+    // Options on the line replace the game's saved ones; with none, the saved ones (the window's)
+    // apply. Monaka's own saved settings apply either way.
+    let settings = Settings::load();
+    let mut values = if args.len() > 1 { settings.monaka.clone() } else { settings.values(game.id) };
     for arg in &args[1..] {
         if let Err(why) = take_option(game, &mut values, arg, false) {
             return usage(&why);

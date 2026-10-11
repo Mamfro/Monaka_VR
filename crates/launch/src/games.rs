@@ -11,7 +11,7 @@
 //! ([`Values::producer_lines`]), so the producer reads the launcher's own ids; the game's
 //! `config.rs` says what each means to it.
 
-pub use monaka_core::manifest::{Kind, Launch, Manifest, Opt, Shown, Status, SteamFiles, TABS, Values, describe, number_text};
+pub use monaka_core::manifest::{Kind, Launch, MONAKA, Manifest, Opt, Shown, Status, SteamFiles, TABS, Values, describe, number_text};
 use crate::Paths;
 use crate::packs::{self, Pack};
 use monaka_core::manifest::aims;
@@ -70,6 +70,22 @@ impl Game {
         self.pack().dll.clone()
     }
 
+    /// The producer DLL for a game process that is `thirty_two_bit` or not. The pack's DLL is
+    /// 64-bit; a pack for 32-bit games carries a 32-bit twin of the same name: in an `x86` folder
+    /// beside it, or for a local build in the i686 target's release folder (`target\release` ->
+    /// `target\i686-pc-windows-msvc\release`).
+    pub fn dll_for(&self, paths: &Paths, thirty_two_bit: bool) -> PathBuf {
+        let dll = self.dll(paths);
+        if !thirty_two_bit {
+            return dll;
+        }
+        let (Some(folder), Some(name)) = (dll.parent(), dll.file_name()) else { return dll };
+        match self.origin {
+            Origin::Local(_) => folder.parent().map_or_else(|| dll.clone(), |target| target.join(r"i686-pc-windows-msvc\release").join(name)),
+            Origin::Pack(_) => folder.join("x86").join(name),
+        }
+    }
+
     /// Where the manifest's licence files are: beside a pack's DLL, or for a local build the
     /// build tree's licence folder.
     pub fn licence_folder(&self, paths: &Paths) -> PathBuf {
@@ -108,6 +124,9 @@ pub struct Catalogue {
     pub games: &'static [Game],
     /// One line per pack or dev list entry left out, saying why.
     pub problems: Vec<String>,
+    /// The packs left out because they were made for a newer Monaka, by what the player knows
+    /// them as.
+    pub too_new: Vec<String>,
 }
 
 /// The games on offer with `paths`: the dev list's local builds in its order, then the packs in
@@ -120,8 +139,8 @@ pub fn catalogue(paths: &Paths) -> Catalogue {
 
 fn catalogue_with(paths: &Paths, read: impl Fn(&Path) -> Result<Pack, String>, scan: impl Fn(&Path) -> packs::Scan) -> Catalogue {
     let mut games: Vec<Game> = Vec::new();
-    let mut problems = Vec::new();
-    let offer = |pack: Pack, local: bool, games: &mut Vec<Game>, problems: &mut Vec<String>| {
+    let (mut problems, mut too_new) = (Vec::new(), Vec::new());
+    let offer = |pack: Pack, local: bool, games: &mut Vec<Game>, problems: &mut Vec<String>, too_new: &mut Vec<String>| {
         let pack: &'static Pack = Box::leak(Box::new(pack));
         let name = if local {
             format!("Local build {}", pack.dll.display())
@@ -129,7 +148,10 @@ fn catalogue_with(paths: &Paths, read: impl Fn(&Path) -> Result<Pack, String>, s
             format!("Game pack {}", pack.folder().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
         };
         if let Some(why) = pack.unusable() {
-            problems.push(format!("{name} ({}): {why}", pack.names()));
+            if pack.needs_newer_monaka() {
+                too_new.push(format!("{} ({name})", pack.label()));
+            }
+            problems.push(format!("{name} ({}): {why}", pack.label()));
             return;
         }
         if let Some((mine, other)) = pack.manifests.iter().find_map(|m| games.iter().find(|g| g.id.eq_ignore_ascii_case(m.id)).map(|g| (m, g))) {
@@ -142,17 +164,18 @@ fn catalogue_with(paths: &Paths, read: impl Fn(&Path) -> Result<Pack, String>, s
     if let Some(list) = &paths.dev_games {
         for dll in dev_list(list, &paths.binaries) {
             match read(&dll) {
-                Ok(pack) => offer(pack, true, &mut games, &mut problems),
+                Ok(pack) => offer(pack, true, &mut games, &mut problems, &mut too_new),
                 Err(why) => problems.push(format!("Dev list {}: {why}", list.display())),
             }
         }
     }
     let scan = scan(&paths.packs);
     problems.extend(scan.problems);
+    too_new.extend(scan.too_new);
     for pack in scan.packs {
-        offer(pack, false, &mut games, &mut problems);
+        offer(pack, false, &mut games, &mut problems, &mut too_new);
     }
-    Catalogue { games: Box::leak(games.into_boxed_slice()), problems }
+    Catalogue { games: Box::leak(games.into_boxed_slice()), problems, too_new }
 }
 
 /// The DLLs a dev list names: one per line, a file name beside the launcher or a full path;
@@ -265,23 +288,34 @@ pub fn plan_with(values: &Values, game: &Manifest, eye: Option<(u32, u32)>, find
     }
     lines.extend(found);
     plan.viewer_args = reticles(game, &values);
+    for owner in [game, &MONAKA] {
+        plan.viewer_args.extend(viewer_args(owner, &values));
+    }
     for opt in game.options {
-        if let Some((value, args)) = opt.viewer
-            && values.applies(game, opt)
-        {
-            let current = values.text(game, opt.id);
-            if value == "*" && current != opt.default_text() {
-                plan.viewer_args.extend(args.iter().map(|a| (*a).to_owned()).chain([current]));
-            } else if current == value {
-                plan.viewer_args.extend(args.iter().map(|a| (*a).to_owned()));
-            }
-        }
         if let (Some(note), Some((w, h))) = (opt.eye_size_note, eye) {
             plan.hints.push(note.replace("{size}", &format!("{w}x{h}")));
         }
     }
     plan.files.push((game.options_file.to_owned(), lines.join("\n")));
     plan
+}
+
+/// The viewer arguments `owner`'s options ask for with `values` (a game's, or Monaka's own).
+fn viewer_args(owner: &Manifest, values: &Values) -> Vec<String> {
+    let mut out = Vec::new();
+    for opt in owner.options {
+        if let Some((value, args)) = opt.viewer
+            && values.applies(owner, opt)
+        {
+            let current = values.text(owner, opt.id);
+            if value == "*" && current != opt.default_text() {
+                out.extend(args.iter().map(|a| (*a).to_owned()).chain([current]));
+            } else if current == value {
+                out.extend(args.iter().map(|a| (*a).to_owned()));
+            }
+        }
+    }
+    out
 }
 
 /// The folder in some Steam library that holds `files`.
@@ -397,6 +431,11 @@ mod tests {
         assert!(args(&["aim=head"]).is_empty() && args(&["aim=off"]).is_empty());
         // A choice's viewer arguments.
         assert_eq!(args(&["aim=head", "mode=deep"]), ["--panel-nearest", "0.5"]);
+        // Monaka's own settings reach the viewer in every game's run, at any value but the default.
+        let mut smoother = parsed(&["aim=head"]);
+        smoother.set_checked(&MONAKA, "controller_smoothing", "6").unwrap();
+        assert_eq!(plan(&smoother, &GAME, None).viewer_args, ["--controller-smoothing", "6"]);
+        assert!(!plan(&smoother, &GAME, None).files[0].1.contains("smoothing"), "not the producer's");
     }
 
     #[test]
@@ -450,7 +489,7 @@ mod tests {
         let pack_dir = paths.packs.join("monaka_t");
         std::fs::create_dir_all(&pack_dir).unwrap();
         std::fs::write(pack_dir.join("monaka_t.dll"), "pack").unwrap();
-        let scan_one = |_: &Path| packs::Scan { packs: vec![fake(&pack_dir.join("monaka_t.dll")).unwrap()], problems: Vec::new() };
+        let scan_one = |_: &Path| packs::Scan { packs: vec![fake(&pack_dir.join("monaka_t.dll")).unwrap()], ..Default::default() };
         let both = catalogue_with(&paths, fake, scan_one);
         assert_eq!(both.games.len(), 1);
         assert!(both.problems.iter().any(|p| p.contains("already offered by a local build")), "{:?}", both.problems);

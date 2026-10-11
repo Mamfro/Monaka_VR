@@ -15,6 +15,7 @@
 
 pub mod aim;
 pub mod controllers;
+pub mod finger_rig;
 pub mod fingers;
 pub mod melee;
 pub mod mouse_aim;

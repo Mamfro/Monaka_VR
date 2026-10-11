@@ -68,7 +68,9 @@ pub fn run(game: &Game, values: &Values, paths: &Paths, check: &Check, delay_sec
     }
     // The game, or when it is not running another on the same producer (one Wolfenstein DLL serves
     // two games): with both Kingdom Comes running, a check of one is not refused for the other.
-    let own: Vec<(&Game, system::Process)> = system::game_processes(game.executables, game.steam_app).into_iter().map(|p| (game, p)).collect();
+    let runs_as = game.runs_as(values);
+    let executables: Vec<&str> = runs_as.iter().map(String::as_str).collect();
+    let own: Vec<(&Game, system::Process)> = system::game_processes(&executables, game.steam_app).into_iter().map(|p| (game, p)).collect();
     let running: Vec<(&Game, system::Process)> = if own.is_empty() {
         games::list()
             .iter()
@@ -86,6 +88,11 @@ pub fn run(game: &Game, values: &Values, paths: &Paths, check: &Check, delay_sec
     }
     let pid = process.pid;
     report(Event::Info(format!("{} ({}, pid {pid})", game.name, process.executable)));
+    // A 32-bit game takes the pack's 32-bit twin.
+    let producer = if system::is_32_bit(pid) == Some(true) { game.dll_for(paths, true) } else { producer };
+    if !producer.exists() {
+        return Err(format!("{} is missing: the game is 32-bit. Build first: cargo build --release --target i686-pc-windows-msvc", producer.display()));
+    }
 
     let version = version();
     let folder = paths.runs.join(format!("{}-{}-{version}", game.run_prefix, check.kind()));

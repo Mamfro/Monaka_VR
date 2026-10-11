@@ -35,7 +35,9 @@ pub struct Contract {
 /// before would not survive, `minor` with anything only added.
 ///
 /// - 1.1: the text's `author` and `source` ([`About`]).
-pub const CONTRACT: Contract = Contract { major: 1, minor: 1 };
+/// - 1.2: packs for any game on an engine (`exe` [`crate::manifest::ANY_EXECUTABLE`], the game
+///   picked in [`crate::manifest::GAME_OPTION`]), and 32-bit twins of a pack's DLL for 32-bit games.
+pub const CONTRACT: Contract = Contract { major: 1, minor: 2 };
 
 /// Who made a pack and where it comes from, as the pack itself says (nothing checks it): its
 /// crate's `authors` and `repository`. Empty where the crate names none, or the pack predates 1.1.
@@ -64,11 +66,16 @@ impl Contract {
         Self { major: (packed >> 16) as u16, minor: packed as u16 }
     }
 
+    /// Whether a pack of `pack`'s contract needs a newer Monaka than a host of this one.
+    pub fn needs_newer_host(self, pack: Contract) -> bool {
+        pack.major > self.major || (pack.major == self.major && pack.minor > self.minor)
+    }
+
     /// Whether a host of this contract runs a pack of `pack`'s, or what the player should do.
     pub fn runs(self, pack: Contract) -> Result<(), String> {
         if pack.major < self.major {
             Err(format!("it was made for an older Monaka (pack contract {pack}, this Monaka speaks {self}): get a version of the game pack made for this Monaka"))
-        } else if pack.major > self.major || pack.minor > self.minor {
+        } else if self.needs_newer_host(pack) {
             Err(format!("it was made for a newer Monaka (pack contract {pack}, this Monaka speaks {self}): update Monaka"))
         } else {
             Ok(())
@@ -186,6 +193,7 @@ const fn shown_word(shown: Shown) -> &'static str {
         Shown::Skeleton => "skeleton",
         Shown::Engine => "engine",
         Shown::Game => "game",
+        Shown::Monaka => "monaka",
         Shown::Line => "line",
     }
 }
@@ -673,6 +681,7 @@ fn shown_of(word: &str) -> Result<Shown, String> {
         "skeleton" => Shown::Skeleton,
         "engine" => Shown::Engine,
         "game" => Shown::Game,
+        "monaka" => Shown::Monaka,
         "line" => Shown::Line,
         _ => return Err(format!("unknown tab {word}")),
     })
@@ -736,7 +745,7 @@ mod tests {
     #[test]
     fn a_pack_from_before_1_1_names_nobody() {
         // 1.0 wrote no author or source.
-        let old = text(&[MANUAL], "", "").replace("author \nsource \n", "").replace("monaka-manifest 1.1", "monaka-manifest 1.0");
+        let old = text(&[MANUAL], "", "").replace("author \nsource \n", "").replace(&format!("monaka-manifest {CONTRACT}"), "monaka-manifest 1.0");
         let parsed = parse(&old).unwrap();
         assert_eq!(parsed.contract, Contract { major: 1, minor: 0 });
         assert_eq!(parsed.about, About::default());
@@ -752,6 +761,8 @@ mod tests {
         assert!(host.runs(Contract { major: 2, minor: 4 }).unwrap_err().contains("update Monaka"));
         assert!(host.runs(Contract { major: 3, minor: 0 }).unwrap_err().contains("update Monaka"));
         assert!(host.runs(Contract { major: 1, minor: 9 }).unwrap_err().contains("get a version of the game pack"));
+        assert!(host.needs_newer_host(Contract { major: 2, minor: 4 }) && host.needs_newer_host(Contract { major: 3, minor: 0 }));
+        assert!(!host.needs_newer_host(Contract { major: 2, minor: 3 }) && !host.needs_newer_host(Contract { major: 1, minor: 9 }));
         assert_eq!(Contract::from_packed(host.packed()), host);
         assert_eq!(host.to_string(), "2.3");
     }

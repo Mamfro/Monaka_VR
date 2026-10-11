@@ -17,7 +17,9 @@
 //!   headset stops tracking for [`LOST_FOR`], and a menu open longer than [`OPEN_FOR`].
 //!
 //! Positions are the controllers' grip poses in the viewer's local space (metres, Y up, the head
-//! facing -Z when level), against the head's position and its facing on the floor plane.
+//! facing -Z when level), against the head's position and the body's facing on the floor plane:
+//! the head's, followed over [`BODY_FOLLOW`] ([`Reach::body_facing`]). Turned to look over a
+//! shoulder, the head would put the other hand, hanging at the body's side, behind it.
 
 use monaka_core::math::{self, Quat, Vec3};
 use monaka_core::pad::{Gamepad, button};
@@ -33,6 +35,9 @@ const CLOSE_MARGIN: f32 = 0.10;
 /// headset's cameras lose the controller.
 const BELOW_IN: f32 = 0.35;
 const BELOW_OUT: f32 = 0.45;
+/// The body turns to where the head faces over about this long: a glance over a shoulder hardly
+/// turns it, a turn of the whole body is followed within it.
+const BODY_FOLLOW: Duration = Duration::from_millis(1000);
 /// A hand slower than this (metres per second) rests.
 const REST_SPEED: f32 = 0.5;
 /// Resting in the zone this long opens the menu.
@@ -106,6 +111,8 @@ pub struct Reach {
     /// How far behind the head a hand reaches to open (metres).
     depth: f32,
     hands: [Hand; 2],
+    /// The body's facing (yaw about Y, radians; 0 faces -Z) and when it was last followed.
+    body: Option<(f32, Instant)>,
 }
 
 impl Reach {
@@ -113,7 +120,23 @@ impl Reach {
     /// hand opens d-pad left, the right hand d-pad right, where held. `depth`: how far behind the head
     /// a hand reaches to open its menu (metres; [`DEPTH`] unless the player sets their own).
     pub fn new(pick: Pick, held: u16, depth: f32) -> Self {
-        Self { pick, menus: [held & button::DPAD_LEFT, held & button::DPAD_RIGHT], depth, hands: [Hand::default(); 2] }
+        Self { pick, menus: [held & button::DPAD_LEFT, held & button::DPAD_RIGHT], depth, hands: [Hand::default(); 2], body: None }
+    }
+
+    /// The body's facing this frame: the head's yaw, followed over [`BODY_FOLLOW`].
+    fn body_facing(&mut self, head: Quat, now: Instant) -> Quat {
+        let f = math::forward_axis(head);
+        let head_yaw = if f[0].abs() + f[2].abs() > 1e-4 { (-f[0]).atan2(-f[2]) } else { self.body.map_or(0.0, |(yaw, _)| yaw) };
+        let yaw = match self.body {
+            Some((yaw, then)) => {
+                let share = (now.saturating_duration_since(then).as_secs_f32() / BODY_FOLLOW.as_secs_f32()).min(1.0);
+                let turn = (head_yaw - yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+                yaw + turn * share
+            }
+            None => head_yaw,
+        };
+        self.body = Some((yaw, now));
+        [0.0, (yaw * 0.5).sin(), 0.0, (yaw * 0.5).cos()]
     }
 
     /// Whether any hand opens a menu.
@@ -126,7 +149,8 @@ impl Reach {
     /// stick from it, and returns the buzzes to play.
     pub fn update(&mut self, pad: &mut Gamepad, head: Option<(Quat, Vec3)>, hands: [Option<Vec3>; 2], now: Instant) -> Vec<Buzz> {
         let mut buzz = Vec::new();
-        let Some((facing, eyes)) = head else { return buzz };
+        let Some((head_facing, eyes)) = head else { return buzz };
+        let facing = self.body_facing(head_facing, now);
         let open_hand = (0..2).find(|&h| matches!(self.hands[h].state, State::Open { .. }));
         let depth = self.depth;
         for (h, at) in hands.into_iter().enumerate() {
@@ -363,5 +387,27 @@ mod tests {
         };
         assert_eq!(lost(&mut reach, 700), button::DPAD_LEFT, "waits");
         assert_eq!(lost(&mut reach, 1300), 0, "then closes");
+    }
+
+    #[test]
+    fn a_glance_over_a_shoulder_hardly_turns_the_body_but_a_turn_is_followed() {
+        let mut reach = Reach::new(Pick::Same, button::DPAD_LEFT | button::DPAD_RIGHT, DEPTH);
+        let t = Instant::now();
+        let ahead: Quat = [0.0, 0.0, 0.0, 1.0];
+        // The head turned 90 degrees left (to face -X).
+        let half = std::f32::consts::FRAC_PI_4;
+        let left: Quat = [0.0, half.sin(), 0.0, half.cos()];
+        let yaw = |q: Quat| {
+            let f = math::forward_axis(q);
+            (-f[0]).atan2(-f[2]).to_degrees()
+        };
+        reach.body_facing(ahead, t);
+        let glanced = reach.body_facing(left, t + Duration::from_millis(100));
+        assert!(yaw(glanced).abs() < 12.0, "a 100 ms glance: {}", yaw(glanced));
+        let mut turned = glanced;
+        for k in 2..=30 {
+            turned = reach.body_facing(left, t + Duration::from_millis(100 * k));
+        }
+        assert!(yaw(turned) > 80.0, "held for three seconds: {}", yaw(turned));
     }
 }

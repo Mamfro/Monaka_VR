@@ -52,6 +52,16 @@ impl Pack {
         self.manifests.iter().map(|m| m.name).collect::<Vec<_>>().join(", ")
     }
 
+    /// Whether the pack was made for a newer Monaka than this one.
+    pub fn needs_newer_monaka(&self) -> bool {
+        pack::CONTRACT.needs_newer_host(self.contract)
+    }
+
+    /// What the player knows the pack by: its games, or its DLL when its games cannot be read.
+    pub fn label(&self) -> String {
+        if self.manifests.is_empty() { self.dll.file_name().unwrap_or_default().to_string_lossy().into_owned() } else { self.names() }
+    }
+
     /// Why the launcher cannot run it from its folder, if it cannot: another contract, or a game
     /// whose producer is another DLL.
     pub(crate) fn unusable(&self) -> Option<String> {
@@ -80,6 +90,14 @@ fn from_bytes(dll: &Path, bytes: &[u8]) -> Result<Option<Pack>, String> {
     let name = dll.display();
     let Some(packed) = pe::file_export_u32(bytes, "MONAKA_CONTRACT").map_err(|e| format!("{name}: {e}"))? else { return Ok(None) };
     let contract = Contract::from_packed(packed);
+    // A pack for a newer Monaka is a pack this one cannot run, whatever its text holds (it may
+    // write text this Monaka cannot read): the player is asked to update Monaka.
+    if pack::CONTRACT.needs_newer_host(contract) {
+        let text = pe::file_export_text_up_to(bytes, "MONAKA_MANIFEST", MAX_MANIFEST).ok().flatten();
+        let parsed = text.and_then(|t| pack::parse(&t).ok());
+        let (about, manifests) = parsed.map(|p| (p.about, p.manifests)).unwrap_or_default();
+        return Ok(Some(Pack { dll: dll.to_path_buf(), contract, about, manifests }));
+    }
     // A pack of another contract may write text this Monaka cannot read: say which update is
     // needed rather than what failed to parse.
     let wrong_contract = |e: String| match pack::CONTRACT.runs(contract) {
@@ -105,6 +123,8 @@ pub struct Scan {
     pub packs: Vec<Pack>,
     /// One line per folder or DLL that is no usable pack, naming it and why.
     pub problems: Vec<String>,
+    /// The packs among those made for a newer Monaka, by what the player knows them as.
+    pub too_new: Vec<String>,
 }
 
 /// Every pack in `games` (one folder each; hidden and staging folders skipped), by folder name.
@@ -129,7 +149,12 @@ fn scan_with(games: &Path, probe: impl Fn(&Path) -> Result<Option<Pack>, String>
                 Ok(Some(pack)) => {
                     found = true;
                     match pack.unusable() {
-                        Some(why) => scan.problems.push(format!("Game pack {name} ({}): {why}", pack.names())),
+                        Some(why) => {
+                            if pack.needs_newer_monaka() {
+                                scan.too_new.push(format!("{} (game pack {name})", pack.label()));
+                            }
+                            scan.problems.push(format!("Game pack {name} ({}): {why}", pack.label()));
+                        }
                         None => scan.packs.push(pack),
                     }
                 }
@@ -203,9 +228,18 @@ impl Staged {
         credit(&self.packs[0].about)
     }
 
+    /// What of it was made for a newer Monaka (the player is asked to update instead of adding it).
+    pub fn too_new(&self) -> Option<String> {
+        let labels: Vec<String> = self.packs.iter().filter(|p| p.needs_newer_monaka()).map(Pack::label).collect();
+        (!labels.is_empty()).then(|| labels.join(", "))
+    }
+
     /// Moves it into the games folder, replacing an installed copy of the same pack; returns its
-    /// folder.
+    /// folder. A pack made for a newer Monaka is not added.
     pub fn install(self) -> Result<PathBuf, String> {
+        if let Some(what) = self.too_new() {
+            return Err(format!("{what} was made for a newer Monaka: update Monaka"));
+        }
         let target = self.games.join(self.name());
         if target.exists() {
             std::fs::remove_dir_all(&target).map_err(|e| format!("cannot remove the installed {}: {e}", target.display()))?;
@@ -283,7 +317,8 @@ fn stage_with(file: &Path, games: &Path, probe: impl Fn(&Path) -> Result<Option<
         n => return Err(format!("{} holds {n} game packs in different folders; add them one at a time", file.display())),
     };
     for pack in &packs {
-        if let Some(why) = pack.unusable() {
+        // One for a newer Monaka is staged: the player is asked to update ([`Staged::too_new`]).
+        if let Some(why) = pack.unusable().filter(|_| !pack.needs_newer_monaka()) {
             return Err(format!("{} ({}) cannot be used: {why}", pack.dll.file_name().unwrap_or_default().to_string_lossy(), pack.names()));
         }
     }
@@ -395,6 +430,27 @@ mod tests {
         assert!(scan.problems[1].starts_with("Game pack old (Test)") && scan.problems[1].contains("older Monaka"), "{:?}", scan.problems);
         assert!(scan.problems[2].contains("names its producer monaka_t, but the DLL is monaka_x.dll"), "{:?}", scan.problems);
         let _ = std::fs::remove_dir_all(&games);
+    }
+
+    #[test]
+    fn a_pack_for_a_newer_monaka_asks_for_an_update() {
+        let games = temp("newer");
+        let newer = format!("pack {}.{}", pack::CONTRACT.major, pack::CONTRACT.minor + 1);
+        write(&games.join(r"newer\monaka_t.dll"), &newer);
+        write(&games.join(r"old\monaka_t.dll"), "pack 0.9");
+        let scan = scan_with(&games, fake);
+        assert!(scan.packs.is_empty());
+        assert_eq!(scan.too_new, ["Test (game pack newer)"], "only the newer one asks for an update");
+        assert_eq!(scan.problems.len(), 2, "{:?}", scan.problems);
+        // Offered for adding, it is staged so the player can be asked, and never installed.
+        let source = temp("newer-source").join("monaka_t.dll");
+        write(&source, &newer);
+        let staged = stage_with(&source, &games, fake).unwrap();
+        assert_eq!(staged.too_new().as_deref(), Some("Test"));
+        assert!(staged.install().unwrap_err().contains("update Monaka"));
+        assert!(!games.join("monaka_t").exists());
+        let _ = std::fs::remove_dir_all(&games);
+        let _ = std::fs::remove_dir_all(source.parent().unwrap());
     }
 
     #[test]

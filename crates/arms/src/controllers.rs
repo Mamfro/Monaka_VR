@@ -4,6 +4,7 @@
 use monaka_channel::ChannelName;
 use monaka_channel::fingers::FingerChannel;
 use monaka_channel::hands::HandChannel;
+use monaka_channel::reticles::ReticleChannel;
 use monaka_core::protocol::{FingerPose, HandPose, LEFT_HAND, RIGHT_HAND};
 use monaka_producer::log;
 use std::sync::Mutex;
@@ -14,6 +15,8 @@ const MAX_AGE_MS: u64 = 250;
 static CHANNEL: Mutex<Option<HandChannel>> = Mutex::new(None);
 /// The finger block beside it (finger tracking, when the headset offers it).
 static FINGERS: Mutex<Option<FingerChannel>> = Mutex::new(None);
+/// The reticle block beside it (where a hand's reticle points, when not along the palm).
+static RETICLES: Mutex<Option<ReticleChannel>> = Mutex::new(None);
 
 /// Opens the hand block beside `channel`; without it, the controllers are never tracked.
 pub fn open(channel: &ChannelName) {
@@ -25,11 +28,27 @@ pub fn open(channel: &ChannelName) {
         Ok(fingers) => *FINGERS.lock().unwrap_or_else(|e| e.into_inner()) = Some(fingers),
         Err(e) => log!("controllers: finger block unavailable ({e}); fingers as the game animates them"),
     }
+    match ReticleChannel::open(channel) {
+        Ok(reticles) => *RETICLES.lock().unwrap_or_else(|e| e.into_inner()) = Some(reticles),
+        Err(e) => log!("controllers: reticle block unavailable ({e}); the reticles stay on the palms"),
+    }
 }
 
 pub fn close() {
     *CHANNEL.lock().unwrap_or_else(|e| e.into_inner()) = None;
     *FINGERS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    if let Some(mut reticles) = RETICLES.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        reticles.write(LEFT_HAND, None);
+        reticles.write(RIGHT_HAND, None);
+    }
+}
+
+/// Points hand `side`'s reticle along `direction` in its palm's frame (forward -Z), or back along
+/// the palm (`None`): what the hand holds aims another way than the palm (a bow).
+pub fn aim_reticle(side: usize, direction: Option<[f32; 3]>) {
+    if let Some(reticles) = RETICLES.lock().ok().as_mut().and_then(|r| r.as_mut()) {
+        reticles.write(side, direction);
+    }
 }
 
 /// Hand `side`'s tracked fingers, if the viewer tracked them lately (open or clenched with binary

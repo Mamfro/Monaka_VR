@@ -147,8 +147,28 @@ pub fn note_view(origin: &Mat34, head: [f32; 3]) {
             }
         }
     }
+    let axes = ([origin[0], origin[4], origin[8]], [origin[2], origin[6], origin[10]]);
+    // A turn (the stick, the game turning the character) turns the world about the character,
+    // not the head: the head's offset from it is turned back with it, so the head stays where it
+    // is in the world and the turn pivots on it (the character then follows as for a step).
+    if let Some(old) = state.axes {
+        state.anchor = turned_anchor(state.anchor, head, old, axes);
+    }
     state.head = Some(head);
-    state.axes = Some(([origin[0], origin[4], origin[8]], [origin[2], origin[6], origin[10]]));
+    state.axes = Some(axes);
+}
+
+/// The anchor that keeps the head's offset from the character (`head - anchor`, tracking x and z)
+/// pointing the same way in the world when the tracking axes x and z turn from `old` to `new`.
+fn turned_anchor(anchor: [f32; 2], head: [f32; 3], old: ([f32; 3], [f32; 3]), new: ([f32; 3], [f32; 3])) -> [f32; 2] {
+    let offset = [head[0] - anchor[0], head[2] - anchor[1]];
+    let world = [0, 1, 2].map(|k| old.0[k] * offset[0] + old.1[k] * offset[1]);
+    let along = |axis: [f32; 3]| {
+        let length2 = dot(axis, axis);
+        if length2 > 1e-9 { dot(world, axis) / length2 } else { 0.0 }
+    };
+    let turned = [along(new.0), along(new.1)];
+    if turned.iter().all(|c| c.is_finite()) { [head[0] - turned[0], head[2] - turned[1]] } else { anchor }
 }
 
 fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -235,3 +255,24 @@ pub fn stop() {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_turn_keeps_the_head_where_it_is_in_the_world() {
+        // The head 1 m along tracking x from the character; the world turns 90 degrees.
+        let (anchor, head) = ([0.0, 0.0], [1.0, 1.7, 0.0]);
+        let old = ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+        let new = ([0.0, 0.0, -1.0], [1.0, 0.0, 0.0]);
+        let a = turned_anchor(anchor, head, old, new);
+        let world = |anchor: [f32; 2], axes: ([f32; 3], [f32; 3])| {
+            let o = [head[0] - anchor[0], head[2] - anchor[1]];
+            [0, 1, 2].map(|k| axes.0[k] * o[0] + axes.1[k] * o[1])
+        };
+        let (before, after) = (world(anchor, old), world(a, new));
+        assert!((0..3).all(|k| (before[k] - after[k]).abs() < 1e-5), "{before:?} {after:?}");
+        assert_eq!(turned_anchor(anchor, head, old, old), anchor, "no turn, no change");
+    }
+}

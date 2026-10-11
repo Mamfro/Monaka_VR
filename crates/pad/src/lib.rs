@@ -530,6 +530,11 @@ fn vr_pad() -> Option<Gamepad> {
     CHANNEL.lock().ok()?.as_mut()?.read_pad(PAD_MAX_AGE_MS)
 }
 
+/// Whether the viewer keeps the VR pad fresh now (a producer can then tell its game a pad is there).
+pub fn live() -> bool {
+    vr_pad().is_some()
+}
+
 /// What the VR pad and the producer's own presses hold now, merged, for a reader other than
 /// XInput's ([`gameinput`]); `None` while neither holds anything.
 pub(crate) fn virtual_pad() -> Option<Gamepad> {
@@ -550,8 +555,43 @@ struct Counters {
     merged: AtomicU64,
     stood_in: AtomicU64,
     input: AtomicU64,
+    /// Reads where the VR pad's left stick, and the left stick handed to the game, were pushed
+    /// past a quarter of their range.
+    vr_left_stick: AtomicU64,
+    out_left_stick: AtomicU64,
 }
-static COUNTERS: Counters = Counters { checks: AtomicU64::new(0), reported: AtomicU64::new(0), polls: AtomicU64::new(0), merged: AtomicU64::new(0), stood_in: AtomicU64::new(0), input: AtomicU64::new(0) };
+static COUNTERS: Counters = Counters {
+    checks: AtomicU64::new(0),
+    reported: AtomicU64::new(0),
+    polls: AtomicU64::new(0),
+    merged: AtomicU64::new(0),
+    stood_in: AtomicU64::new(0),
+    input: AtomicU64::new(0),
+    vr_left_stick: AtomicU64::new(0),
+    out_left_stick: AtomicU64::new(0),
+};
+
+/// The packet number for a changed pad: past the last one handed out, the real pad's own, and
+/// `floor` ([`packet_floor`]). Games keep the last number they saw and take only a newer state
+/// (The New Order: a state whose number is not above it is dropped), and a real pad they read
+/// before the hooks went in (or before it was switched off) has already shown them its own
+/// numbers, often in the hundreds.
+fn next_packet(last: u32, real: u32, floor: u32) -> u32 {
+    last.wrapping_add(1).max(real.wrapping_add(1)).max(floor).max(1)
+}
+
+/// A number above any packet number a real pad can have reached since the PC started: half the
+/// milliseconds since then (a pad's number goes up once per changed state, at most once a read,
+/// a few milliseconds apart), kept under 2^31 so games that compare numbers as signed differences
+/// see it as newer.
+fn packet_floor() -> u32 {
+    ((monaka_channel::tick() / 2) % (1 << 31)) as u32
+}
+
+/// Whether a left stick is pushed past a quarter of its range.
+fn left_stick_pushed(pad: &Gamepad) -> bool {
+    pad.thumb_lx.unsigned_abs() > 8192 || pad.thumb_ly.unsigned_abs() > 8192
+}
 
 /// The last pad handed out and its packet number (XInput's change counter: games skip a state
 /// whose number they have seen).
@@ -625,7 +665,7 @@ unsafe fn read(original: &Original<GetStateFn>, user: u32, state: *mut XInputSta
         let Ok(mut last) = LAST.lock() else { return result };
         if last.0 != pad || last.1 == 0 {
             last.0 = pad;
-            last.1 = last.1.wrapping_add(1).max(1);
+            last.1 = next_packet(last.1, real_packet, packet_floor());
         }
         last.1
     };
@@ -633,6 +673,12 @@ unsafe fn read(original: &Original<GetStateFn>, user: u32, state: *mut XInputSta
     // SAFETY: as above; written whole.
     unsafe { *state = XInputState { packet, gamepad: pad } };
     (if connected { &COUNTERS.merged } else { &COUNTERS.stood_in }).fetch_add(1, Relaxed);
+    if left_stick_pushed(&vr) {
+        COUNTERS.vr_left_stick.fetch_add(1, Relaxed);
+    }
+    if left_stick_pushed(&pad) {
+        COUNTERS.out_left_stick.fetch_add(1, Relaxed);
+    }
     if vr != Gamepad::default() && COUNTERS.input.fetch_add(1, Relaxed) == 0 {
         log!("controller pad: first VR input handed to the game: {vr:?} (a real pad {})", if connected { "is connected too" } else { "is not connected" });
     }
@@ -701,13 +747,15 @@ fn note_reader() {
 pub fn report() {
     let c = &COUNTERS;
     log!(
-        "controller pad: slot 0 asked about {} times (reported the VR pad {}); {} polls of pad 0; merged with a real pad {}, stood in for one {}, with VR input {}",
+        "controller pad: slot 0 asked about {} times (reported the VR pad {}); {} polls of pad 0; merged with a real pad {}, stood in for one {}, with VR input {}; left stick pushed: VR {}, handed to the game {}",
         c.checks.load(Relaxed),
         c.reported.load(Relaxed),
         c.polls.load(Relaxed),
         c.merged.load(Relaxed),
         c.stood_in.load(Relaxed),
-        c.input.load(Relaxed)
+        c.input.load(Relaxed),
+        c.vr_left_stick.load(Relaxed),
+        c.out_left_stick.load(Relaxed)
     );
     if let Ok(readers) = READERS.lock() {
         for (module, n) in readers.iter() {
@@ -725,5 +773,17 @@ mod tests {
         assert_eq!(size_of::<XInputState>(), 16);
         assert_eq!(size_of::<XInputCapabilities>(), 20);
         assert_eq!(std::mem::offset_of!(XInputCapabilities, vibration), 16);
+    }
+
+    #[test]
+    fn packets_pass_the_real_pads_own_and_the_floor() {
+        assert_eq!(next_packet(0, 0, 0), 1);
+        assert_eq!(next_packet(5, 0, 0), 6, "no real pad: counts on");
+        assert_eq!(next_packet(1, 461, 0), 462, "a real pad already seen at 461: above it");
+        assert_eq!(next_packet(462, 461, 0), 463);
+        assert_eq!(next_packet(0, 0, 900_000), 900_000, "a pad switched off since: above the floor");
+        assert_eq!(next_packet(900_000, 0, 900_000), 900_001);
+        assert_eq!(next_packet(u32::MAX, 0, 0), 1, "wraps, never 0");
+        assert!(packet_floor() < 1 << 31);
     }
 }

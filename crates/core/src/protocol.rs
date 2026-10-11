@@ -174,6 +174,47 @@ pub const RIGHT_HAND: usize = 1;
 pub const FINGERS_MAGIC: u32 = 0x4752_4946;
 pub const FINGERS_VERSION: u32 = 1;
 
+pub const RETICLES_MAGIC: u32 = 0x4c43_5452;
+pub const RETICLES_VERSION: u32 = 1;
+
+/// Where a hand's reticle points instead of the palm's forward, as the producer last said: a
+/// direction in the palm's frame ([`HandPose::palm`]: forward -Z), e.g. along a bow held in it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ReticleAim {
+    pub valid: u32,
+    pub _reserved: u32,
+    pub direction: [f32; 3],
+    pub _pad: f32,
+    /// `GetTickCount64` when the producer wrote it.
+    pub written_tick: u64,
+}
+
+/// The reticle block beside a stereo channel: a producer writes where each hand's reticle points
+/// when it is not along the palm; the viewer reads it. Either side may create it; a producer that
+/// never writes it leaves the reticles on the palms.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ReticleBlock {
+    pub magic: u32,
+    pub version: u32,
+    pub aims: [ReticleAim; 2],
+}
+
+impl ReticleBlock {
+    pub fn fresh() -> Self {
+        Self { magic: RETICLES_MAGIC, version: RETICLES_VERSION, aims: [ReticleAim::default(); 2] }
+    }
+
+    pub fn is_blank(&self) -> bool {
+        self.magic == 0
+    }
+
+    pub fn is_compatible(&self) -> bool {
+        self.magic == RETICLES_MAGIC && self.version == RETICLES_VERSION
+    }
+}
+
 /// One hand's fingers as the viewer last tracked them ([`crate::fingers::bends`]).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -406,6 +447,14 @@ impl ChannelName {
 
     pub fn fingers_lock(&self) -> String {
         format!("{}-fingers-lock", self.0)
+    }
+
+    pub fn reticles(&self) -> String {
+        format!("{}-reticles", self.0)
+    }
+
+    pub fn reticles_lock(&self) -> String {
+        format!("{}-reticles-lock", self.0)
     }
 }
 

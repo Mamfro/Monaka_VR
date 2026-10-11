@@ -6,7 +6,7 @@
 //! monaka_viewer --gpu-map <channel> --loader <openxr_loader.dll> [--runtime <manifest.json>]
 //!             [--seconds N] [--pixel-aspect A] [--screen-width M] [--reticle left|right]... [--reticle-from head|palm]
 //!             [--dpad-hold left,right] [--menu-reach same|other|off] [--menu-reach-depth CM] [--act-like touch|index]
-//!             [--stop-event <name>]
+//!             [--controller-smoothing 0-10] [--stop-event <name>]
 //! monaka_viewer --info --loader <openxr_loader.dll> [--runtime <manifest.json>]
 //! ```
 //!
@@ -14,16 +14,19 @@
 //! the runtime reprojects them. Pairs without poses (menus, maps, loading screens) go on a flat
 //! screen anchored in the room in front of where the head faced. Where each controller points
 //! (its aim pose) and where it sits in the hand (its grip pose) go to the game through the hand
-//! block, for hand aim and for putting the game's hand on the controller.
+//! block, for hand aim and for putting the game's hand on the controller, steadied first
+//! ([`smooth`]).
 #![deny(unsafe_code)]
 
 mod console;
 mod pad;
 mod panel;
 mod reach;
+mod smooth;
 
 use monaka_channel::d3d::{self, create_texture, find_adapter, simple_texture_desc};
 use monaka_channel::fingers::FingerChannel;
+use monaka_channel::reticles::ReticleChannel;
 use monaka_channel::hands::HandChannel;
 use monaka_channel::pose::PoseChannel;
 use monaka_channel::reader::{self, AnyReader};
@@ -66,11 +69,21 @@ struct Args {
     menu_reach_depth: f32,
     /// The controllers act like another kind (`--act-like touch|index`, a layout test).
     proxy: pad::Proxy,
+    /// How hard the controllers' poses are steadied ([`smooth`]; 0 off, 10 strongest).
+    controller_smoothing: f32,
+}
+
+/// The launcher passes `--controller-smoothing` only away from Monaka's default, so that is ours too.
+fn smoothing_default() -> f32 {
+    match monaka_core::manifest::CONTROLLER_SMOOTHING.kind {
+        monaka_core::manifest::Kind::Number { default, .. } => default as f32,
+        _ => 0.0,
+    }
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut args =
-        Args { channel: None, info: false, seconds: 30, pixel_aspect: 1.0, screen_width: 2.4, loader: PathBuf::new(), runtime: None, reticles: [false; 2], reticle_palm: false, panel_nearest: 0.0, dpad_hold: 0, menu_reach: Some(reach::Pick::Same), menu_reach_depth: reach::DEPTH, proxy: pad::Proxy::None };
+        Args { channel: None, info: false, seconds: 30, pixel_aspect: 1.0, screen_width: 2.4, loader: PathBuf::new(), runtime: None, reticles: [false; 2], reticle_palm: false, panel_nearest: 0.0, dpad_hold: 0, menu_reach: Some(reach::Pick::Same), menu_reach_depth: reach::DEPTH, proxy: pad::Proxy::None, controller_smoothing: smoothing_default() };
     let mut words = std::env::args().skip(1);
     while let Some(flag) = words.next() {
         if flag == "--info" {
@@ -97,6 +110,13 @@ fn parse_args() -> Result<Args, String> {
                     return Err("--menu-reach-depth is 5 to 40 (cm)".into());
                 }
                 args.menu_reach_depth = cm as f32 / 100.0;
+            }
+            "--controller-smoothing" => {
+                let strength = number("--controller-smoothing")?;
+                if !(0.0..=10.0).contains(&strength) {
+                    return Err("--controller-smoothing is 0 to 10".into());
+                }
+                args.controller_smoothing = strength as f32;
             }
             // A layout test: the controllers act like Quest's or Index's.
             "--act-like" => args.proxy = pad::Proxy::parse(&value)?,
@@ -203,6 +223,8 @@ const RIGHT_AIM: &str = "/user/hand/right/input/aim/pose";
 const LEFT_GRIP: &str = "/user/hand/left/input/grip/pose";
 const RIGHT_GRIP: &str = "/user/hand/right/input/grip/pose";
 
+/// A reticle direction the producer said is followed for this long after (ms).
+const RETICLE_SAID_MS: u64 = 250;
 /// The hand-aim reticle: this far along the aim ray, this wide (1.2 degrees).
 const RETICLE_DISTANCE: f32 = 10.0;
 const RETICLE_SIZE: f32 = 0.21;
@@ -365,7 +387,13 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
     println!("{}", if fingers_out.is_some() { "Finger tracking on" } else { "No finger tracking (the headset or runtime offers none)" });
     let mut fingers_seen = [false; 2];
     let mut hands_seen = [false; 2];
+    let mut smoother = smooth::Smoother::new(args.controller_smoothing);
+    if controllers.is_some() {
+        println!("Controller smoothing {}", args.controller_smoothing);
+    }
     let mut poses = PoseChannel::open(name).ok();
+    // Where the producer says a reticle points, when not along the palm (a bow at an angle in it).
+    let mut reticle_aims = if args.reticles.contains(&true) { ReticleChannel::open(name).ok() } else { None };
     println!("Forward follows the headset: use its centre/recentre control.");
 
     let format = swapchain_format(&session.swapchain_formats()?, &producer).ok_or("runtime has no image format matching the game's")?;
@@ -494,7 +522,10 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
                     }
                 }
             }
-            let [hands, grips] = located;
+            let [mut hands, mut grips] = located;
+            for hand in 0..2 {
+                (hands[hand], grips[hand]) = smoother.smooth(hand, frame.display_time, hands[hand], grips[hand]);
+            }
             grip_poses = grips;
             for (hand, seen) in hands_seen.iter_mut().enumerate() {
                 let tracked = hands[hand].valid != 0;
@@ -578,10 +609,17 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
                 stats.projected += 1;
                 // In play, where the game's aim ray goes: from the head along the controller, or
                 // where a weapon in the palm points.
-                for (reticle, aimed) in reticles.iter().zip(aiming) {
+                for (side, (reticle, aimed)) in reticles.iter().zip(aiming).enumerate() {
                     let (Some(swapchain), Some((hand, grip)), Some(head)) = (reticle, aimed, &last_head) else { continue };
-                    let position = if args.reticle_palm {
-                        math::converged(if grip.valid != 0 { grip.position } else { hand.position }, hand.orientation)
+                    let palm = if grip.valid != 0 { grip.position } else { hand.position };
+                    let said = reticle_aims.as_mut().and_then(|r| r.read(side, RETICLE_SAID_MS));
+                    let position = if let (true, Some(direction)) = (args.reticle_palm, said) {
+                        // Along the producer's direction in the palm's frame.
+                        let d = math::rotate(hand.orientation, direction);
+                        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-6);
+                        [0, 1, 2].map(|k| palm[k] + d[k] / l * math::WEAPON_CONVERGENCE)
+                    } else if args.reticle_palm {
+                        math::converged(palm, hand.orientation)
                     } else {
                         math::along(head.position, hand.orientation, RETICLE_DISTANCE)
                     };

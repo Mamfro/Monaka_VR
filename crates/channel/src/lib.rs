@@ -20,6 +20,7 @@ pub mod hands;
 pub mod keyed;
 pub mod pose;
 pub mod reader;
+pub mod reticles;
 pub mod shared;
 
 pub use monaka_core::protocol::ChannelName;

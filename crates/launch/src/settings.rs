@@ -1,8 +1,10 @@
 //! The player's choices, kept between runs in `%APPDATA%\monaka\settings.txt`: one `game.option=value`
-//! line per changed option, and `selected=game`. A game's values are kept while it is not on offer
-//! (a pack removed, or not readable after an update), for when it comes back.
+//! line per changed option, `monaka.option=value` for Monaka's own settings (every game's), and
+//! `selected=game`. A game's values are kept while it is not on offer (a pack removed, or not
+//! readable after an update), for when it comes back.
 
 use crate::games::Values;
+use monaka_core::manifest::MONAKA;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -12,6 +14,8 @@ pub struct Settings {
     pub selected: Option<String>,
     /// Chosen values by game id.
     pub values: BTreeMap<String, Values>,
+    /// Monaka's own settings ([`MONAKA`]), the same for every game.
+    pub monaka: Values,
 }
 
 fn file() -> Option<PathBuf> {
@@ -31,9 +35,12 @@ impl Settings {
         std::fs::write(&file, self.text()).map_err(|e| format!("{}: {e}", file.display()))
     }
 
-    /// Values for `game`, empty (all defaults) when none were saved.
+    /// Values for a run of `game`: its own (all defaults when none were saved) and Monaka's own
+    /// settings beside them.
     pub fn values(&self, game: &str) -> Values {
-        self.values.get(game).cloned().unwrap_or_default()
+        let mut values = self.monaka.clone();
+        values.0.extend(self.values.get(game).into_iter().flat_map(|v| v.0.clone()));
+        values
     }
 
     fn parse(text: &str) -> Settings {
@@ -42,6 +49,8 @@ impl Settings {
             let Some((key, value)) = line.split_once('=') else { continue };
             if key.trim() == "selected" {
                 settings.selected = Some(value.trim().to_owned());
+            } else if let Some(option) = key.trim().strip_prefix(MONAKA.id).and_then(|k| k.strip_prefix('.')) {
+                settings.monaka.set(option, value.trim());
             } else if let Some((game, option)) = key.trim().split_once('.')
                 && !game.is_empty()
                 && game.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
@@ -57,7 +66,7 @@ impl Settings {
         if let Some(selected) = &self.selected {
             lines.push(format!("selected={selected}"));
         }
-        for (game, values) in &self.values {
+        for (game, values) in std::iter::once((MONAKA.id, &self.monaka)).chain(self.values.iter().map(|(g, v)| (g.as_str(), v))) {
             for (option, value) in &values.0 {
                 lines.push(format!("{game}.{option}={}", value.replace(['\r', '\n'], " ")));
             }
@@ -72,8 +81,12 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let text = "selected=dl2\ndl2.mode=framegen\ndl1.extra=probe_rig=1 hand_hold=0,0.01,0\na pack.x=1\nremoved_pack.x=1\njunk\n";
+        let text = "selected=dl2\ndl2.mode=framegen\ndl1.extra=probe_rig=1 hand_hold=0,0.01,0\na pack.x=1\nremoved_pack.x=1\nmonaka.controller_smoothing=5\njunk\n";
         let settings = Settings::parse(text);
+        assert_eq!(settings.monaka.0["controller_smoothing"], "5");
+        assert!(!settings.values.contains_key("monaka"));
+        assert_eq!(settings.values("dl1").0["controller_smoothing"], "5", "every game's run gets Monaka's own");
+        assert_eq!(settings.values("unknown").0.len(), 1);
         assert_eq!(settings.selected.as_deref(), Some("dl2"));
         assert_eq!(settings.values("dl1").0["extra"], "probe_rig=1 hand_hold=0,0.01,0");
         assert!(!settings.values.contains_key("a pack"));

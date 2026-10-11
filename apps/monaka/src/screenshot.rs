@@ -16,7 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 pub struct Request {
     pub file: PathBuf,
     pub game: Option<String>,
-    /// The options tab to show (Main, HUD, Skeleton, Engine, Game).
+    /// The options tab to show (Main, HUD, Skeleton, Engine, Game, Monaka).
     pub tab: Option<String>,
     /// `--theme`: dark or light whatever Windows' app mode says.
     pub dark: Option<bool>,

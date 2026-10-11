@@ -90,12 +90,15 @@ pub enum Shown {
     Engine,
     /// What only this game has.
     Game,
+    /// Monaka's own settings ([`MONAKA`]): the same for every game, saved once.
+    Monaka,
     /// On the command line only (`monaka_play`, the `Play-*.ps1` scripts).
     Line,
 }
 
 /// The window's tabs, in order, and their names; a game shows the ones it has options in.
-pub const TABS: [(Shown, &str); 5] = [(Shown::Main, "Main"), (Shown::Hud, "HUD"), (Shown::Skeleton, "Skeleton"), (Shown::Engine, "Engine"), (Shown::Game, "Game")];
+pub const TABS: [(Shown, &str); 6] =
+    [(Shown::Main, "Main"), (Shown::Hud, "HUD"), (Shown::Skeleton, "Skeleton"), (Shown::Engine, "Engine"), (Shown::Game, "Game"), (Shown::Monaka, "Monaka")];
 
 /// One option as the window shows it, the command line takes it (`id=value`) and the producer
 /// reads it (`id=value` in its options file).
@@ -230,6 +233,15 @@ pub const fn line(id: &'static str, label: &'static str, help: &'static str, kin
     Opt { id, label, help, kind, shown: Shown::Line, when: None, producer: true, turns_off: None, needs_eye_size: false, needs_files: None, viewer: None, eye_size_note: None }
 }
 
+/// The `executables` of a pack that serves any game on its engine: the player picks the game with
+/// the [`GAME_OPTION`] option, and the producer checks the engine itself when it starts.
+pub const ANY_EXECUTABLE: &str = "*";
+/// The option that picks the game of an [`ANY_EXECUTABLE`] pack: an executable's file name, or
+/// [`OTHER_GAME`] for the one typed in the [`OTHER_GAME_OPTION`] option.
+pub const GAME_OPTION: &str = "game";
+pub const OTHER_GAME: &str = "other";
+pub const OTHER_GAME_OPTION: &str = "game_other";
+
 /// One game, as its crate declares it.
 #[derive(Debug, PartialEq)]
 pub struct Manifest {
@@ -307,6 +319,23 @@ impl Manifest {
         })
     }
 
+    /// Whether this pack serves any game on its engine ([`ANY_EXECUTABLE`]).
+    pub fn any_game(&self) -> bool {
+        self.executables == [ANY_EXECUTABLE]
+    }
+
+    /// The executables the game runs as with `values`: the manifest's own, or for a pack serving
+    /// any game, the one its [`GAME_OPTION`] picks (none while nothing is picked or typed).
+    pub fn runs_as(&self, values: &Values) -> Vec<String> {
+        if !self.any_game() {
+            return self.executables.iter().map(|e| (*e).to_owned()).collect();
+        }
+        let picked = values.text(self, GAME_OPTION);
+        let picked = if picked == OTHER_GAME { values.text(self, OTHER_GAME_OPTION) } else { picked };
+        let name = picked.trim().rsplit(['\\', '/']).next().unwrap_or("").trim_matches('"').to_owned();
+        (!name.is_empty() && name != OTHER_GAME).then_some(name).into_iter().collect()
+    }
+
     /// Checks the table is well formed: every default offered and in range, the launch options
     /// only where the launcher may start the game. The reason when it is not.
     pub fn check(&self) -> Result<(), String> {
@@ -315,6 +344,17 @@ impl Manifest {
         }
         if self.executables.is_empty() {
             return Err(format!("{}: no executables", self.id));
+        }
+        if self.any_game() && self.option(GAME_OPTION).is_none() {
+            return Err(format!("{}: serves any game but has no {GAME_OPTION} option to pick it", self.id));
+        }
+        if self.id.eq_ignore_ascii_case(MONAKA.id) {
+            return Err(format!("{}: that id belongs to Monaka's own settings", self.id));
+        }
+        for opt in self.options {
+            if opt.shown == Shown::Monaka || MONAKA.option(opt.id).is_some() {
+                return Err(format!("{}.{}: Monaka's own settings are not a game's", self.id, opt.id));
+            }
         }
         for opt in self.options {
             match opt.kind {
@@ -725,6 +765,44 @@ pub const LATENCY: Opt = line("latency", "Eye timing (frames)", "Overrides the g
 /// Used only when the headset reports no eye distance.
 pub const EYE_SEPARATION: Opt = line("eye_separation", "Eye distance (m)", "Used when the headset reports none.", Kind::Number { min: 0.03, max: 0.09, step: 0.001, default: 0.064 });
 
+// ---- Monaka's own settings ----
+//
+// Not a game's: saved once, offered on every game's Monaka tab and applied to every run. What they
+// change happens in the viewer, so no producer reads them.
+
+/// Steadies the controllers' poses before any game reads them (the viewer's
+/// `--controller-smoothing`): 0 is off, higher steadies more; quick movements stay quick.
+pub const CONTROLLER_SMOOTHING: Opt = opt(
+    "controller_smoothing",
+    "Controller smoothing",
+    "Steadies small shakes in the controllers' tracking, in every game. Quick movements stay quick. 0 is off.",
+    Kind::Number { min: 0.0, max: 10.0, step: 1.0, default: 3.0 },
+)
+.on(Shown::Monaka)
+.launcher()
+.viewer_args("*", &["--controller-smoothing"]);
+
+/// Monaka's own settings as a manifest, so the window and the launcher treat them as they do a
+/// game's options. It is never a game: no executables, never on offer.
+pub const MONAKA: Manifest = Manifest {
+    id: "monaka",
+    name: "Monaka",
+    status: Status::Playable,
+    executables: &[],
+    steam_app: 0,
+    producer: "",
+    log: "",
+    options_file: "",
+    run_prefix: "",
+    launch: Launch::Manual,
+    refused_arguments: &[],
+    before: "",
+    options: &[CONTROLLER_SMOOTHING],
+    licences: &[],
+    left_hand_aims: false,
+    weapon_ring: false,
+};
+
 /// Extra `key=value` producer options, appended to the options file (the game's config lists them).
 pub const EXTRA: Opt = line("extra", "Extra producer options", "key=value pairs separated by spaces (see the game's config.rs).", Kind::Text).launcher();
 
@@ -758,6 +836,32 @@ mod tests {
         left_hand_aims: true,
         weapon_ring: true,
     };
+
+    const ANY: Manifest = Manifest {
+        id: "any",
+        name: "Any game",
+        executables: &[ANY_EXECUTABLE],
+        launch: Launch::Manual,
+        options: &[
+            opt(GAME_OPTION, "Game", "", choice(&[("A.exe", "A"), (OTHER_GAME, "Other")], "A.exe")),
+            opt(OTHER_GAME_OPTION, "Other game", "", Kind::Text).only_when(GAME_OPTION, OTHER_GAME),
+        ],
+        ..TEST
+    };
+
+    #[test]
+    fn a_pack_for_any_game_runs_as_the_one_picked() {
+        ANY.check().unwrap();
+        assert_eq!(TEST.runs_as(&Values::default()), ["A.exe", "B.exe"]);
+        let mut values = Values::default();
+        assert_eq!(ANY.runs_as(&values), ["A.exe"]);
+        values.set(GAME_OPTION, OTHER_GAME);
+        assert!(ANY.runs_as(&values).is_empty(), "nothing typed yet");
+        values.set(OTHER_GAME_OPTION, r#" "D:\Games\Some Game\Binaries\Win32\Game.exe" "#);
+        assert_eq!(ANY.runs_as(&values), ["Game.exe"]);
+        let without_picker = Manifest { options: &[], ..ANY };
+        assert!(without_picker.check().is_err());
+    }
 
     #[test]
     fn values_read_as_defaults_and_make_lines() {
@@ -807,5 +911,19 @@ mod tests {
         assert!(bad.check().unwrap_err().contains("hud_scale"));
         let manual = Manifest { launch: Launch::Manual, ..TEST };
         assert!(manual.check().unwrap_err().contains("launch"));
+        // Monaka's own settings belong to no game.
+        assert!(Manifest { id: "monaka", ..TEST }.check().unwrap_err().contains("Monaka"));
+        const OWN: &[Opt] = &[CONTROLLER_SMOOTHING];
+        assert!(Manifest { options: OWN, launch: Launch::Manual, ..TEST }.check().unwrap_err().contains("controller_smoothing"));
+    }
+
+    #[test]
+    fn monaka_settings_read_as_options() {
+        let mut values = Values::default();
+        assert_eq!(values.text(&MONAKA, "controller_smoothing"), "3");
+        values.set_checked(&MONAKA, "controller_smoothing", "0").unwrap();
+        assert_eq!(values.number(&MONAKA, "controller_smoothing"), 0.0);
+        assert!(values.set_checked(&MONAKA, "controller_smoothing", "11").is_err());
+        assert!(MONAKA.options.iter().all(|o| o.shown == Shown::Monaka && !o.producer));
     }
 }

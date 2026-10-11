@@ -10,7 +10,7 @@
 mod screenshot;
 mod theme;
 
-use monaka_launch::games::{self, Game, Kind, Launch, Manifest, Opt, Shown, TABS, Values, number_text};
+use monaka_launch::games::{self, Game, Kind, Launch, MONAKA, Manifest, Opt, Shown, TABS, Values, number_text};
 use monaka_launch::session::{self, Console, Event, State, Stop};
 use monaka_launch::settings::Settings;
 use monaka_launch::{Paths, packs, system};
@@ -36,6 +36,11 @@ use windows::core::{HSTRING, PCWSTR, w};
 
 /// A session event is waiting in the receiver.
 const WM_SESSION: u32 = WM_APP + 1;
+/// Tell the player about packs made for a newer Monaka (posted once the window shows).
+const WM_TOO_NEW: u32 = WM_APP + 2;
+
+/// Where Monaka's releases are, for an update.
+const RELEASES: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/releases");
 /// Checks SteamVR and the game every so often.
 const TIMER_CHECKS: usize = 1;
 /// Takes the `--screenshot` picture once the window has drawn.
@@ -99,6 +104,7 @@ fn main() {
             SetTimer(Some(hwnd), TIMER_SCREENSHOT, 1000, None);
         } else {
             let _ = ShowWindow(hwnd, SW_SHOWDEFAULT);
+            let _ = PostMessageW(Some(hwnd), WM_TOO_NEW, WPARAM(0), LPARAM(0));
         }
         SetTimer(Some(hwnd), TIMER_CHECKS, 1500, None);
         let mut msg = MSG::default();
@@ -301,6 +307,20 @@ fn confirm(owner: HWND, title: &str, question: &str, style: MESSAGEBOX_STYLE) ->
     unsafe { MessageBoxW(Some(owner), &HSTRING::from(question), &HSTRING::from(title), MB_OKCANCEL | MB_DEFBUTTON2 | style) == IDOK }
 }
 
+/// Says `what` (game packs) was made for a newer Monaka, and offers to open the download page.
+fn ask_update(owner: HWND, what: &str) {
+    let question = format!("This game pack needs a newer version of Monaka:
+
+{what}
+
+Update Monaka to use it. Open the download page now?");
+    // SAFETY: a modal message box over our window with owned strings.
+    let answer = unsafe { MessageBoxW(Some(owner), &HSTRING::from(question), &HSTRING::from("Update Monaka"), MB_YESNO | MB_ICONINFORMATION) };
+    if answer == IDYES {
+        let _ = system::open(RELEASES);
+    }
+}
+
 /// The player's pick of a game pack file (a .zip, or a lone .dll), if any.
 fn pick_pack_file(owner: HWND) -> Option<PathBuf> {
     let mut file = vec![0u16; 1024];
@@ -411,6 +431,8 @@ fn text_height(window: HWND, font: HFONT, text: &str, width: i32) -> i32 {
 /// One option's controls.
 struct Row {
     opt: &'static Opt,
+    /// Whose option it is: the game's, or Monaka's own ([`MONAKA`], saved for every game).
+    owner: &'static Manifest,
     label: HWND,
     control: HWND,
     /// The number beside a slider.
@@ -474,6 +496,9 @@ struct App {
     min_client: (i32, i32),
     /// `--screenshot`: where the picture goes.
     screenshot: Option<PathBuf>,
+    /// Packs made for a newer Monaka still to tell the player about, and those told this run.
+    too_new: Vec<String>,
+    told_too_new: Vec<String>,
 }
 
 impl App {
@@ -534,6 +559,8 @@ impl App {
             game_installed: true,
             min_client: (0, 0),
             screenshot: None,
+            too_new: catalogue.too_new.clone(),
+            told_too_new: Vec::new(),
         };
         app.apply_fonts();
         theme::controls(hwnd);
@@ -541,6 +568,18 @@ impl App {
             app.detail(problem);
         }
         app
+    }
+
+    /// Asks the player to update Monaka for the packs made for a newer one that were not asked
+    /// about yet (not while taking a screenshot).
+    fn tell_too_new(&mut self) {
+        let fresh: Vec<String> = self.too_new.iter().filter(|p| !self.told_too_new.contains(p)).cloned().collect();
+        if fresh.is_empty() || self.screenshot.is_some() {
+            return;
+        }
+        self.told_too_new.extend(fresh.iter().cloned());
+        ask_update(self.hwnd, &fresh.join("
+"));
     }
 
     /// The selected game; none while no game is on offer.
@@ -557,6 +596,8 @@ impl App {
         for problem in &catalogue.problems {
             self.detail(problem);
         }
+        self.too_new = catalogue.too_new;
+        self.tell_too_new();
         fill_games(self.games, self.list);
         let index = select.or(before).and_then(|id| self.list.iter().position(|g| g.id == id)).unwrap_or(0);
         self.select(index);
@@ -569,6 +610,10 @@ impl App {
             Ok(staged) => staged,
             Err(why) => return self.say(&format!("Game pack not added: {why}"), true),
         };
+        if let Some(what) = staged.too_new() {
+            self.say(&format!("Game pack not added: {what} was made for a newer Monaka."), true);
+            return ask_update(self.hwnd, &what);
+        }
         let clashes = games::clashes(staged.manifests(), staged.replaces().as_deref());
         if !clashes.is_empty() {
             return self.say(&format!("Game pack not added: {}", clashes.join(" ")), true);
@@ -674,11 +719,13 @@ impl App {
         set_text(self.origin, &game.credit());
         set_text(self.before, &format!("Before you play: {}", game.before));
         let values = self.settings.values(game.id);
-        // Command-line-only options get no row; a row's control id is its index in `rows`.
-        for opt in game.options.iter().filter(|o| o.shown != Shown::Line) {
+        // Command-line-only options get no row; a row's control id is its index in `rows`. Monaka's
+        // own settings follow the game's options.
+        let owned = |owner: &'static Manifest| owner.options.iter().map(move |opt| (owner, opt));
+        for (owner, opt) in owned(game.manifest).chain(owned(&MONAKA)).filter(|(_, o)| o.shown != Shown::Line) {
             let i = self.rows.len() as i32;
             let label = static_text(self.hwnd, opt.label, ID_LABEL + i);
-            let current = values.text(game, opt.id);
+            let current = values.text(owner, opt.id);
             let (control, value) = match opt.kind {
                 Kind::Choice { choices, window, .. } => {
                     let combo = child(self.hwnd, WC_COMBOBOXW, "", WS_TABSTOP.0 | WS_VSCROLL.0 | CBS_DROPDOWNLIST as u32, ID_CONTROL + i);
@@ -705,10 +752,10 @@ impl App {
                 Kind::Text | Kind::Size => (child(self.hwnd, w!("EDIT"), &current, WS_TABSTOP.0 | WS_BORDER.0 | ES_AUTOHSCROLL as u32, ID_CONTROL + i), None),
             };
             let help = static_text(self.hwnd, opt.help, ID_HELP + i);
-            self.rows.push(Row { opt, label, control, value, help });
+            self.rows.push(Row { opt, owner, label, control, value, help });
         }
         // The tabs this game has options in; a tab it lacks falls back to Main.
-        self.tabs_shown = TABS.iter().map(|(t, _)| *t).filter(|t| game.options.iter().any(|o| o.shown == *t)).collect();
+        self.tabs_shown = TABS.iter().map(|(t, _)| *t).filter(|t| self.rows.iter().any(|r| r.opt.shown == *t)).collect();
         if !self.tabs_shown.contains(&self.tab) {
             self.tab = Shown::Main;
         }
@@ -743,7 +790,8 @@ impl App {
             Kind::Text | Kind::Size => text_of(row.control),
         };
         let choice = matches!(row.opt.kind, Kind::Choice { .. } | Kind::Switch { .. });
-        self.settings.values.entry(game.id.to_owned()).or_default().set(row.opt.id, value);
+        let saved = if row.owner.id == MONAKA.id { &mut self.settings.monaka } else { self.settings.values.entry(game.id.to_owned()).or_default() };
+        saved.set(row.opt.id, value);
         let _ = self.settings.save();
         if choice {
             // Another option may come or go with this one ([`games::Opt::when`]).
@@ -807,7 +855,7 @@ impl App {
         let game = self.game();
         let values = game.map(|g| self.settings.values(g.id)).unwrap_or_default();
         for row in game.map_or(&[][..], |_| &self.rows[..]) {
-            let Some(game) = game else { break };
+            let game = row.owner;
             // An option that means nothing with the others' values (the aiming hand without a
             // pointing controller) is left out.
             let visible = row.opt.shown == tab && values.applies(game, row.opt);
@@ -906,8 +954,11 @@ impl App {
             enable(self.start, !idle && !self.closing);
             return;
         };
-        self.game_up = !system::game_processes(game.executables, game.steam_app).is_empty();
-        self.game_installed = self.libraries.is_empty() || system::steam_installed(&self.libraries, game.steam_app);
+        let runs_as = game.runs_as(&self.settings.values(game.id));
+        let executables: Vec<&str> = runs_as.iter().map(String::as_str).collect();
+        self.game_up = !executables.is_empty() && !system::game_processes(&executables, game.steam_app).is_empty();
+        // A pack for any game knows no Steam app.
+        self.game_installed = self.libraries.is_empty() || game.any_game() || system::steam_installed(&self.libraries, game.steam_app);
         let game_text = match (self.game_up, self.game_installed, game.launch) {
             (true, _, _) => "Game: running".to_owned(),
             (false, false, _) => "Game: not installed in Steam".to_owned(),
@@ -915,7 +966,7 @@ impl App {
             (false, true, Launch::Manual) => "Game: not running. Start it and load into gameplay first.".to_owned(),
         };
         set_text(self.game_line, &game_text);
-        enable(self.start_game, idle && !self.game_up && self.game_installed);
+        enable(self.start_game, idle && !self.game_up && self.game_installed && !game.any_game());
         let game_ready = self.game_up || (self.game_installed && matches!(game.launch, Launch::Auto { .. }));
         enable(self.start, if idle { self.steamvr_up && game_ready && !self.other_session } else { !self.closing });
     }
@@ -1107,6 +1158,10 @@ impl App {
             }
             WM_SESSION => {
                 self.session_events();
+                Some(LRESULT(0))
+            }
+            WM_TOO_NEW => {
+                self.tell_too_new();
                 Some(LRESULT(0))
             }
             WM_TIMER if wparam.0 == TIMER_SCREENSHOT => {

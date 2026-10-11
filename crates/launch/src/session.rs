@@ -178,6 +178,14 @@ fn session(game: &Game, values: &Values, paths: &Paths, console: Console, stop: 
 
     report(Event::State(State::WaitingForGame));
     let Some(pid) = find_game(game, values, stop, report)? else { return Ok(()) };
+    // A 32-bit game takes the pack's 32-bit twin.
+    let producer = match system::is_32_bit(pid) {
+        Some(true) => game.dll_for(paths, true),
+        _ => producer,
+    };
+    if !producer.exists() {
+        return Err(format!("{} is missing: {} is a 32-bit game. Build first: cargo build --release --target i686-pc-windows-msvc", producer.display(), game.name));
+    }
     // An unreadable command line is let through: only arguments it is seen to hold are refused.
     if let Some(line) = system::command_line(pid).map(|l| l.to_ascii_lowercase())
         && let Some((_, why)) = game.refused_arguments.iter().find(|(argument, _)| line.contains(&argument.to_ascii_lowercase()))
@@ -231,7 +239,12 @@ fn session(game: &Game, values: &Values, paths: &Paths, console: Console, stop: 
 /// The game's process: already running, or started through Steam and given time to reach its menu
 /// (unless its `launch` option is off; `settle_seconds` overrides the wait).
 fn find_game(game: &Game, values: &Values, stop: &Stop, report: &mut dyn FnMut(Event)) -> Result<Option<u32>, String> {
-    let running = system::game_processes(game.executables, game.steam_app);
+    let runs_as = game.runs_as(values);
+    if runs_as.is_empty() {
+        return Err(format!("Pick the game in {}'s Game option first.", game.name));
+    }
+    let executables: Vec<&str> = runs_as.iter().map(String::as_str).collect();
+    let running = system::game_processes(&executables, game.steam_app);
     if let Some(process) = running.first() {
         return Ok(Some(process.pid));
     }
@@ -246,7 +259,7 @@ fn find_game(game: &Game, values: &Values, stop: &Stop, report: &mut dyn FnMut(E
     system::launch_steam_game(game.steam_app)?;
     let deadline = Instant::now() + Duration::from_secs(180);
     let pid = loop {
-        if let Some(process) = system::game_processes(game.executables, game.steam_app).first() {
+        if let Some(process) = system::game_processes(&executables, game.steam_app).first() {
             break process.pid;
         }
         if Instant::now() > deadline {

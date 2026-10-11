@@ -8,7 +8,7 @@ use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE, UNICODE_STRING};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW};
-use windows::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
+use windows::Win32::System::Threading::{GetExitCodeProcess, IsWow64Process, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
 use windows::Win32::UI::Shell::{FOLDERID_Documents, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, w};
@@ -68,6 +68,19 @@ pub fn process_path(pid: u32) -> Option<PathBuf> {
         read.ok()?;
     }
     Some(PathBuf::from(String::from_utf16_lossy(&buffer[..length as usize])))
+}
+
+/// Whether the process `pid` is 32-bit (running under WOW64), when that can be read.
+pub fn is_32_bit(pid: u32) -> Option<bool> {
+    let mut wow64 = windows::core::BOOL(0);
+    // SAFETY: opens a handle owned here, fills a local, and closes the handle.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let read = IsWow64Process(process, &mut wow64);
+        let _ = CloseHandle(process);
+        read.ok()?;
+    }
+    Some(wow64.as_bool())
 }
 
 /// Whether the process `pid` is still running.
