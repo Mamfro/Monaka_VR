@@ -13,6 +13,7 @@
 //! the engine's reads go engine, overlay, XInput, driver). A read that passes
 //! both is merged once.
 
+pub mod feature;
 pub mod gameinput;
 pub mod mouse;
 pub mod probe;
@@ -76,6 +77,8 @@ static TAKE_RIGHT_Y: AtomicBool = AtomicBool::new(false);
 /// The right stick taken at the last read (x and y as `i16` bits), and the tick of that read.
 static RIGHT_STICK: AtomicU32 = AtomicU32::new(0);
 static RIGHT_TICK: AtomicU64 = AtomicU64::new(0);
+/// The buttons (VR and real pads merged) at the game's last pad read, with the right stick's tick.
+static BUTTONS: AtomicU32 = AtomicU32::new(0);
 /// The left trigger handed to the game at that read (0..=255).
 static LEFT_TRIGGER: AtomicU32 = AtomicU32::new(0);
 /// The left trigger's gate ([`gate_left_trigger`]): on, and the state of the press (idle, held
@@ -173,10 +176,22 @@ pub fn left_trigger(max_age_ms: u64) -> Option<f32> {
     Some(LEFT_TRIGGER.load(Acquire) as f32 / 255.0)
 }
 
-/// Keeps `pad`'s right stick (and left trigger) for the producer ([`right_stick`],
-/// [`left_trigger`]); with [`TAKE_RIGHT`] also centres the stick for the game.
+/// The buttons (VR and real pads merged, with a producer's [`press`]) at the game's last pad read,
+/// if that read was at most `max_age_ms` ago: a producer following what the player holds (a menu
+/// the game keeps open while a button is held).
+pub fn buttons(max_age_ms: u64) -> Option<u16> {
+    let tick = RIGHT_TICK.load(Acquire);
+    if tick == 0 || monaka_channel::tick().saturating_sub(tick) > max_age_ms {
+        return None;
+    }
+    Some(BUTTONS.load(Acquire) as u16)
+}
+
+/// Keeps `pad`'s right stick, left trigger and buttons for the producer ([`right_stick`],
+/// [`left_trigger`], [`buttons`]); with [`TAKE_RIGHT`] also centres the stick for the game.
 fn take_right(pad: &mut Gamepad) {
     LEFT_TRIGGER.store(u32::from(pad.left_trigger), Release);
+    BUTTONS.store(u32::from(pad.buttons), Release);
     if gate_left(pad.left_trigger) {
         pad.left_trigger = 0;
     }

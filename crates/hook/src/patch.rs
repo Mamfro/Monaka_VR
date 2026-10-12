@@ -8,6 +8,7 @@
 //! Relays and trampolines are never freed: a thread may still be inside one after a hook is
 //! removed.
 
+use crate::module::Module;
 use crate::threads::Frozen;
 use crate::{Error, Result, mem};
 use std::marker::PhantomData;
@@ -20,6 +21,35 @@ use windows::Win32::System::Memory::{
 };
 use windows::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 use windows::Win32::System::Threading::GetCurrentProcess;
+
+/// A function in a game module where a hook goes: its name (for the log and errors), its offset in
+/// the module, its first instructions exactly as they must appear, and its type `F` (a function
+/// pointer type). A build table declares its sites; [`Hooks::site`] hooks one.
+pub struct Site<F> {
+    pub name: &'static str,
+    pub rva: usize,
+    pub prologue: &'static [Instruction],
+    function: PhantomData<F>,
+}
+
+impl<F> Clone for Site<F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<F> Copy for Site<F> {}
+
+impl<F> Site<F> {
+    /// # Safety
+    /// At `rva`, in the module the site is used with, starts a function of type `F` (a function
+    /// pointer type), and `prologue` is its first instructions with every rip-relative
+    /// displacement marked. A build table makes this claim once for all its sites, valid for the
+    /// build its fingerprint checks (the bytes are checked again before anything is written).
+    pub const unsafe fn new(name: &'static str, rva: usize, prologue: &'static [Instruction]) -> Self {
+        Self { name, rva, prologue, function: PhantomData }
+    }
+}
 
 /// One instruction of a hooked prologue, exactly as it must appear in the game.
 #[derive(Clone, Copy, Debug)]
@@ -279,6 +309,14 @@ fn function_address<F: Copy>(function: F) -> usize {
 }
 
 impl Hooks {
+    /// Prepares an inline hook at `site` in `module` ([`Hooks::inline`]): safe, the claim that
+    /// `site` is a function of type `F` with that prologue being the site's own ([`Site::new`]).
+    pub fn site<F: Copy>(&mut self, original: &Original<F>, module: &Module, site: &Site<F>, detour: F) -> Result<()> {
+        // SAFETY: the site's declaration is the claim that a function of type F with this prologue
+        // starts at its offset in this module; the prologue is checked before anything is written.
+        unsafe { self.inline(original, site.name, module.at(site.rva), site.prologue, detour) }
+    }
+
     /// Prepares an inline hook at `target` and points `original` at the trampoline the detour
     /// calls. Nothing changes in the game until [`Hooks::enable`].
     ///

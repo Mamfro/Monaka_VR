@@ -19,7 +19,9 @@ pub mod finger_rig;
 pub mod fingers;
 pub mod melee;
 pub mod mouse_aim;
+pub mod mouse_look;
 pub mod roomscale;
+pub mod skeleton;
 pub mod traverse;
 
 use monaka_core::camera::{self as cam, Mat34, apply_head, compose, rigid_inverse, translation};
@@ -321,24 +323,6 @@ pub const MELEE_GRIP: Mat34 = [
     0.0, std::f32::consts::FRAC_1_SQRT_2, -std::f32::consts::FRAC_1_SQRT_2, 0.0, //
     0.0, std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2, 0.0,
 ];
-
-/// A gun's visual class (both Dying Lights); melee weapons are its base, `WeaponVis`.
-pub const GUN_VIS_CLASS: &str = ".?AVFireWeaponVis@@";
-
-/// Whether the weapon visual `weapon` is a gun (`FireWeaponVis`, by its vtable once named).
-pub fn is_gun(weapon: usize) -> bool {
-    static GUN_VTABLE: AtomicU64 = AtomicU64::new(0);
-    let Some(vtable) = monaka_hook::mem::read::<usize>(weapon).filter(|_| weapon != 0) else { return false };
-    let known = GUN_VTABLE.load(Relaxed);
-    if known != 0 {
-        return known == vtable as u64;
-    }
-    let gun = monaka_hook::probe::class_name(weapon).as_deref() == Some(GUN_VIS_CLASS);
-    if gun {
-        GUN_VTABLE.store(vtable as u64, Relaxed);
-    }
-    gun
-}
 
 /// The game holds what is in the aim hand with both hands when the other wrist sits this close to
 /// it (metres, its weapon holder, as animated): a rifle's front hand is about 0.25 m from the grip,

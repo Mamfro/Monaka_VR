@@ -5,6 +5,7 @@
 //! - [`driver`]: the alternate-eye present loop around DXGI's Present (the game's swapchain,
 //!   presents counted, the next eye and pose chosen, pairs published), for any game drawing one
 //!   eye per frame.
+//! - [`feature`]: the present loop as a ready-made component (`present()`).
 //! - [`alternate`]: alternate-eye rendering, each presented frame one eye (D3D11 swapchains).
 //! - [`alternate12`]: the same over a D3D12 swapchain and the fence channel.
 //! - [`pairs11`]: same-frame pairs over a D3D11 swapchain, each eye copied at its present.
@@ -23,6 +24,7 @@
 pub mod alternate;
 pub mod alternate12;
 pub mod driver;
+pub mod feature;
 pub mod hud11;
 pub mod hybrid;
 pub mod pairs11;

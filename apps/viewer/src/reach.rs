@@ -10,8 +10,10 @@
 //! - **Picking.** While a menu is open, the picking stick (the reaching hand's own, or the other
 //!   hand's: [`Pick`]) neither moves nor turns: flicked from the centre past [`FLICK`], it presses
 //!   the face button in that direction (up Y, right B, down A, left X) until it comes back past
-//!   [`CENTRE`], as a player picking with that button would; each pick buzzes. A stick already
-//!   pushed when the menu opened (running) picks nothing until it has been back at the centre.
+//!   [`CENTRE`], as a player picking with that button would; each pick buzzes. A game that picks
+//!   with its right stick instead (`--menu-pick stick`, [`PickWith`]) is handed the flick as its
+//!   right stick, and nothing else there while the menu is open. A stick already pushed when the
+//!   menu opened (running) picks nothing until it has been back at the centre.
 //! - **Closing.** The hand leaving the zone ([`out_of_zone`], a little wider than the way in) lets
 //!   go of the d-pad: the game closes the menu with the last pick made, or none. So does a hand the
 //!   headset stops tracking for [`LOST_FOR`], and a menu open longer than [`OPEN_FOR`].
@@ -64,6 +66,25 @@ pub enum Pick {
     Other,
 }
 
+/// How a pick reaches the game.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PickWith {
+    /// The face button in the flick's direction (Dying Light 1).
+    #[default]
+    Buttons,
+    /// The flick itself, on the game's right stick (The Beast's wheels).
+    Stick,
+}
+
+/// `--menu-pick`: how a pick reaches the game.
+pub fn parse_with(word: &str) -> Result<PickWith, String> {
+    match word {
+        "buttons" => Ok(PickWith::Buttons),
+        "stick" => Ok(PickWith::Stick),
+        other => Err(format!("--menu-pick: {other} is not buttons or stick")),
+    }
+}
+
 /// `--menu-reach`: on (picking with that stick) or off.
 pub fn parse(word: &str) -> Result<Option<Pick>, String> {
     match word {
@@ -106,6 +127,7 @@ struct Hand {
 /// The menus by reach, both hands.
 pub struct Reach {
     pick: Pick,
+    with: PickWith,
     /// The d-pad direction each hand opens (0: none).
     menus: [u16; 2],
     /// How far behind the head a hand reaches to open (metres).
@@ -120,7 +142,12 @@ impl Reach {
     /// hand opens d-pad left, the right hand d-pad right, where held. `depth`: how far behind the head
     /// a hand reaches to open its menu (metres; [`DEPTH`] unless the player sets their own).
     pub fn new(pick: Pick, held: u16, depth: f32) -> Self {
-        Self { pick, menus: [held & button::DPAD_LEFT, held & button::DPAD_RIGHT], depth, hands: [Hand::default(); 2], body: None }
+        Self { pick, with: PickWith::Buttons, menus: [held & button::DPAD_LEFT, held & button::DPAD_RIGHT], depth, hands: [Hand::default(); 2], body: None }
+    }
+
+    /// Picks reach the game as `with` says.
+    pub fn picking_with(self, with: PickWith) -> Self {
+        Self { with, ..self }
     }
 
     /// The body's facing this frame: the head's yaw, followed over [`BODY_FOLLOW`].
@@ -214,7 +241,17 @@ impl Reach {
             } else {
                 held
             };
-            pad.buttons |= held;
+            match self.with {
+                PickWith::Buttons => pad.buttons |= held,
+                PickWith::Stick => {
+                    // The game's right stick carries the flick (from the centre) and nothing else.
+                    Stick::Right.take(pad);
+                    if held != 0 {
+                        let axis = |v: f32| (v.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                        (pad.thumb_rx, pad.thumb_ry) = (axis(x), axis(y));
+                    }
+                }
+            }
             self.hands[h].state = State::Open { since, centred, held };
         }
         buzz
@@ -329,6 +366,23 @@ mod tests {
         assert_eq!(frame(&mut reach, ms(t, 900), SHOULDER_L, FRONT_R, (MAX, 0), (0, 0)).0.buttons, button::DPAD_LEFT | button::B);
         // The hand comes forward: everything let go.
         assert_eq!(frame(&mut reach, ms(t, 950), FRONT_L, FRONT_R, (0, 0), (0, 0)).0.buttons, 0);
+    }
+
+    #[test]
+    fn with_the_stick_a_flick_reaches_the_game_as_its_right_stick() {
+        let t = Instant::now();
+        let mut reach = Reach::new(Pick::Same, button::DPAD_LEFT | button::DPAD_RIGHT, DEPTH).picking_with(PickWith::Stick);
+        // The left hand rests over the left shoulder: its menu opens.
+        frame(&mut reach, t, SHOULDER_L, FRONT_R, (0, 0), (0, 0));
+        frame(&mut reach, ms(t, 200), SHOULDER_L, FRONT_R, (0, 0), (0, 0));
+        // The left stick flicked up: the game's right stick, up; no face button, no walking, and
+        // the right stick's own push does not reach the game.
+        let (pad, _) = frame(&mut reach, ms(t, 250), SHOULDER_L, FRONT_R, (0, MAX), (MAX, 0));
+        assert_eq!((pad.buttons, pad.thumb_lx, pad.thumb_ly, pad.thumb_rx, pad.thumb_ry), (button::DPAD_LEFT, 0, 0, 0, MAX));
+        // Back at the centre: nothing on the right stick.
+        let (pad, _) = frame(&mut reach, ms(t, 300), SHOULDER_L, FRONT_R, (0, 0), (MAX, 0));
+        assert_eq!((pad.thumb_rx, pad.thumb_ry), (0, 0));
+        assert_eq!(parse_with("stick"), Ok(PickWith::Stick));
     }
 
     #[test]

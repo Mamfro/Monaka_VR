@@ -215,6 +215,12 @@ pub fn add_head_aim(camera: &Mat34, orientation: Quat) -> Option<Mat34> {
 /// of the head's turn (head aim fed to the game as input): that share is taken out first, so the
 /// view follows the current head exactly while the game's aim follows it a frame or two later.
 pub fn swap_head_aim(camera: &Mat34, baked_yaw: f32, baked_pitch: f32, orientation: Quat) -> Option<Mat34> {
+    swap_head(camera, baked_yaw, baked_pitch, orientation, [0.0; 3])
+}
+
+/// [`swap_head_aim`] with the head's position as well: `position` (metres) taken in the frame
+/// turned by the yaw only, as [`apply_head`] takes a head's position in the frame it turns.
+pub fn swap_head(camera: &Mat34, baked_yaw: f32, baked_pitch: f32, orientation: Quat, position: Vec3) -> Option<Mat34> {
     let pitch = (-camera[6]).clamp(-1.0, 1.0).asin() - baked_pitch;
     let (head_yaw, head_pitch) = pointing_yaw_pitch(orientation);
     let r = rotation(orientation);
@@ -224,7 +230,58 @@ pub fn swap_head_aim(camera: &Mat34, baked_yaw: f32, baked_pitch: f32, orientati
     let (b, c2) = (roll * 0.5).sin_cos();
     // Pitch about the yawed +X, then roll about the pitched -Z axis.
     let q = [c2 * a, -a * b, c1 * b, c1 * c2];
-    Some(apply_head(&yawed, q, [0.0; 3]))
+    Some(apply_head(&yawed, q, position))
+}
+
+/// How a game camera is taken before the head pose goes on it, for [`view_centre`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Base {
+    /// As the game set it: the head turns and moves it in its own frame, the game's pitch kept.
+    Game,
+    /// Levelled, so only the head looks up and down, with `baked_yaw` radians of the head's turn the
+    /// game carries (head aim fed to it as input) turned back out: [`tracking_origin`].
+    Level { baked_yaw: f32 },
+    /// The game's own yaw and pitch kept, the head's share it carries (`baked_yaw`, `baked_pitch`
+    /// radians) swapped for the head's current turn: [`swap_head`].
+    Swap { baked_yaw: f32, baked_pitch: f32 },
+}
+
+/// The view centre (between the eyes) for the game camera `game` taken as `base`, the head turned
+/// by `orientation` and at `position` (metres, as the head model places it:
+/// [`HeadPosition::position`]).
+pub fn view_centre(game: &Mat34, base: Base, orientation: Quat, position: Vec3) -> Option<Mat34> {
+    match base {
+        Base::Game => Some(apply_head(game, orientation, position)),
+        Base::Level { baked_yaw } => Some(apply_head(&tracking_origin(game, baked_yaw)?, orientation, position)),
+        Base::Swap { baked_yaw, baked_pitch } => swap_head(game, baked_yaw, baked_pitch, orientation, position),
+    }
+}
+
+/// Eye `eye`'s camera (0 left, 1 right) of the view centre `centre`, the eyes `separation` metres
+/// apart along its right axis.
+pub fn eye_camera(centre: &Mat34, eye: usize, separation: f32) -> Mat34 {
+    let side = if eye == 0 { -0.5 } else { 0.5 };
+    offset_right(centre, side * separation)
+}
+
+/// Where the headset's tracking space sits in the world for a view drawn at `drawn` (a view centre
+/// or an eye, camera-to-world) from the tracked head `orientation` and `position` (as tracked,
+/// before a head model or an eye shift moved the view): the drawn view with the real head taken
+/// back out. A controller's pose put through it lands where the drawn eyes see it, so the hands
+/// cannot drift from the view whatever moved it.
+pub fn tracking_space(drawn: &Mat34, orientation: Quat, position: Vec3) -> Mat34 {
+    compose(drawn, &rigid_inverse(&apply_head(&IDENTITY_MATRIX, orientation, position)))
+}
+
+/// The identity camera: at the origin, looking down -Z.
+pub const IDENTITY_MATRIX: Mat34 = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+
+/// Whether `camera` is finite and its position within `reach` (metres) of `reference`'s: a camera
+/// worth writing for a game that looks things up near its camera (one far out or not finite can
+/// crash it).
+pub fn within_reach(camera: &Mat34, reference: &Mat34, reach: f32) -> bool {
+    let apart = [camera[3] - reference[3], camera[7] - reference[7], camera[11] - reference[11]];
+    all_finite(camera) && apart.iter().map(|v| v * v).sum::<f32>().sqrt() < reach
 }
 
 /// Where the forward axis of camera `aim` lands in the image of camera `view`, in normalised
@@ -308,6 +365,12 @@ impl Frustum {
     /// OpenXR angles (left, right, up, down; radians).
     pub fn fov(&self) -> [f32; 4] {
         [self.left.atan(), self.right.atan(), self.up.atan(), self.down.atan()]
+    }
+
+    /// The smallest frustum containing both eyes' fields (OpenXR angles, left eye first): what an
+    /// engine culls with when it culls once for the pair.
+    pub fn both_eyes(fov: &[[f32; 4]; 2]) -> Option<Self> {
+        Some(Self::from_fov(fov[0])?.union(Self::from_fov(fov[1])?))
     }
 
     /// The smallest frustum containing both.
@@ -551,6 +614,62 @@ mod tests {
         assert!((back[1] - 0.5 / 1.25f32.sqrt()).abs() < 1e-5 && back[0].abs() < 1e-6);
         assert!(m[1].abs() < 1e-6, "right stays level: {m:?}");
         assert!(from_back_up([0.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0; 3]).is_none(), "up along back");
+    }
+
+    #[test]
+    fn view_centres_take_the_game_camera_three_ways() {
+        let yaw = 30f32.to_radians();
+        let game = from_back_up([yaw.sin() * 0.9, 0.43, yaw.cos() * 0.9], [0.0, 1.0, 0.0], [5.0, 1.0, 2.0]).unwrap();
+        let head = half_turn(0.2, -0.1);
+        let position = [0.03, -0.02, 0.05];
+        assert_eq!(view_centre(&game, Base::Game, head, position), Some(apply_head(&game, head, position)));
+        let levelled = view_centre(&game, Base::Level { baked_yaw: 0.1 }, head, position).unwrap();
+        assert_eq!(levelled, apply_head(&tracking_origin(&game, 0.1).unwrap(), head, position));
+        let swapped = view_centre(&game, Base::Swap { baked_yaw: 0.1, baked_pitch: 0.05 }, head, position).unwrap();
+        let unmoved = swap_head_aim(&game, 0.1, 0.05, head).unwrap();
+        // Turned as without a position, moved by it in the yawed (level) frame.
+        let yawed = turn(&level(&game).unwrap(), pointing_yaw_pitch(head).0 - 0.1);
+        let moved = apply_head(&yawed, IDENTITY, position);
+        for row in 0..3 {
+            assert_eq!(swapped[row * 4..row * 4 + 3], unmoved[row * 4..row * 4 + 3]);
+            assert!(close(swapped[row * 4 + 3] - unmoved[row * 4 + 3], moved[row * 4 + 3] - yawed[row * 4 + 3]));
+        }
+        // The eyes straddle the centre along its right axis.
+        let [left, right] = [0, 1].map(|eye| eye_camera(&levelled, eye, 0.064));
+        let apart = [right[3] - left[3], right[7] - left[7], right[11] - left[11]];
+        assert!(close(apart.iter().map(|v| v * v).sum::<f32>().sqrt(), 0.064) && left[0] == levelled[0]);
+        assert!(close(apart[0] / 0.064, levelled[0]) && close(apart[2] / 0.064, levelled[8]), "along the right axis");
+    }
+
+    #[test]
+    fn the_hands_land_where_the_drawn_eyes_see_them() {
+        let game = apply_head(&translation([4.0, 1.0, -2.0]), yaw_rotation(0.6), [0.0; 3]);
+        let head = half_turn(0.4, 0.2);
+        let tracked = [0.1, 1.6, -0.2];
+        // Drawn with the head 3 cm off where it was tracked (a head model's shift).
+        let drawn = view_centre(&game, Base::Level { baked_yaw: 0.0 }, head, [0.13, 1.57, -0.2]).unwrap();
+        let space = tracking_space(&drawn, head, tracked);
+        // The tracked head itself lands on the drawn view.
+        assert!(distance(&apply_head(&space, head, tracked), &drawn) < 1e-5);
+        // A hand 40 cm ahead of the head moves by the same 3 cm.
+        let hand = [0.1, 1.5, -0.6];
+        let moved = apply_head(&space, IDENTITY, hand);
+        let unshifted = apply_head(&tracking_origin(&game, 0.0).unwrap(), IDENTITY, hand);
+        let shift = [moved[3] - unshifted[3], moved[7] - unshifted[7], moved[11] - unshifted[11]];
+        let expected = apply_head(&tracking_origin(&game, 0.0).unwrap(), IDENTITY, [0.03, -0.03, 0.0]);
+        let along = [expected[3] - game[3], expected[7] - game[7], expected[11] - game[11]];
+        assert!((0..3).all(|i| (shift[i] - along[i]).abs() < 1e-5), "{shift:?} {along:?}");
+    }
+
+    #[test]
+    fn reach_and_both_eyes() {
+        let near = translation([1.0, 2.0, 3.0]);
+        assert!(within_reach(&translation([1.0, 2.0, 7.9]), &near, 5.0));
+        assert!(!within_reach(&translation([1.0, 2.0, 8.1]), &near, 5.0));
+        assert!(!within_reach(&[f32::NAN; 12], &near, 5.0));
+        let both = Frustum::both_eyes(&[[-1.03, 0.87, 0.87, -1.04], [-0.87, 1.03, 0.9, -1.0]]).unwrap();
+        assert!(close(both.left, (-1.03f32).tan()) && close(both.right, 1.03f32.tan()) && close(both.up, 0.9f32.tan()) && close(both.down, (-1.04f32).tan()));
+        assert!(Frustum::both_eyes(&[[0.0; 4], [-0.87, 1.03, 0.9, -1.0]]).is_none());
     }
 
     #[test]

@@ -15,6 +15,7 @@
 //! option as `id=value` into the game's options file (`Opt::producer`), so a producer reads the
 //! launcher's own ids and nothing is translated on the way.
 
+use crate::feature::Feature;
 use crate::options::{Options, parse_size};
 use std::collections::BTreeMap;
 
@@ -130,6 +131,11 @@ pub struct Opt {
     /// Shown to the player when a run has an eye size settled, `{size}` replaced by it
     /// ([`Opt::eye_size_note`]).
     pub eye_size_note: Option<&'static str>,
+    /// A shared option's feature: only the component that provides it may offer the option, since
+    /// that component is what honours it ([`Opt::owned_by`], `monaka_producer::game`). `None` for
+    /// a game's own options and the launcher's. The pack text does not carry it: the
+    /// launcher has no use for it, and a parsed option gets it back from [`SHARED`] by id.
+    pub owner: Option<Feature>,
 }
 
 /// Files another Steam game installs that an option needs: `file` in `path` under that game's
@@ -209,6 +215,28 @@ impl Opt {
         Opt { kind: Kind::Switch { default }, ..self }
     }
 
+    /// A shared option that only the component providing `feature` honours.
+    pub const fn owned_by(self, feature: Feature) -> Opt {
+        Opt { owner: Some(feature), ..self }
+    }
+
+    /// The option with this game's own help line (a shared option adjusted for what it means here).
+    pub const fn help(self, help: &'static str) -> Opt {
+        Opt { help, ..self }
+    }
+
+    /// A number option with this game's own range.
+    pub const fn range(self, min: f64, max: f64) -> Opt {
+        let Kind::Number { step, default, .. } = self.kind else { panic!("not a number") };
+        Opt { kind: Kind::Number { min, max, step, default }, ..self }
+    }
+
+    /// The option offered whatever the other options say (a shared option's condition dropped: the
+    /// finger options' "only with motion controls" in a game with no `aim` choice).
+    pub const fn always(self) -> Opt {
+        Opt { when: None, ..self }
+    }
+
     /// The option the launcher consumes itself (never written for the producer).
     pub const fn launcher(self) -> Opt {
         Opt { producer: false, ..self }
@@ -226,11 +254,11 @@ impl Opt {
 }
 
 pub const fn opt(id: &'static str, label: &'static str, help: &'static str, kind: Kind) -> Opt {
-    Opt { id, label, help, kind, shown: Shown::Main, when: None, producer: true, turns_off: None, needs_eye_size: false, needs_files: None, viewer: None, eye_size_note: None }
+    Opt { id, label, help, kind, shown: Shown::Main, when: None, producer: true, turns_off: None, needs_eye_size: false, needs_files: None, viewer: None, eye_size_note: None, owner: None }
 }
 
 pub const fn line(id: &'static str, label: &'static str, help: &'static str, kind: Kind) -> Opt {
-    Opt { id, label, help, kind, shown: Shown::Line, when: None, producer: true, turns_off: None, needs_eye_size: false, needs_files: None, viewer: None, eye_size_note: None }
+    Opt { id, label, help, kind, shown: Shown::Line, when: None, producer: true, turns_off: None, needs_eye_size: false, needs_files: None, viewer: None, eye_size_note: None, owner: None }
 }
 
 /// The `executables` of a pack that serves any game on its engine: the player picks the game with
@@ -352,7 +380,9 @@ impl Manifest {
             return Err(format!("{}: that id belongs to Monaka's own settings", self.id));
         }
         for opt in self.options {
-            if opt.shown == Shown::Monaka || MONAKA.option(opt.id).is_some() {
+            // One of Monaka's own settings its producer reads, listed as Monaka has it; no other.
+            let read = MONAKA.option(opt.id).is_some_and(|own| own.producer && own == opt);
+            if (opt.shown == Shown::Monaka || MONAKA.option(opt.id).is_some()) && !read {
                 return Err(format!("{}.{}: Monaka's own settings are not a game's", self.id, opt.id));
             }
         }
@@ -650,15 +680,23 @@ pub const fn aim(choices: &'static [(&'static str, &'static str)], default: &'st
 /// Which controller a pointing aim follows. Only for `aim=controller`: with motion controls the
 /// weapon is in the games' right hand, so the right controller aims.
 pub const AIM_HAND: Opt =
-    opt("aim_hand", "Aiming hand", "The controller that aims.", choice(&[("right", "Right"), ("left", "Left")], "right")).only_when("aim", "controller");
+    opt("aim_hand", "Aiming hand", "The controller that aims.", choice(&[("right", "Right"), ("left", "Left")], "right"))
+        .only_when("aim", "controller")
+        .owned_by(Feature::Look);
 
 /// The free hands' fingers follow the controllers' finger sensing, when the headset has any.
 pub const FINGER_TRACKING: Opt =
-    opt("finger_tracking", "Finger tracking", "Your fingers move the in-game fingers.", Kind::Switch { default: true }).on(Shown::Skeleton).only_when("aim", "hand_rig");
+    opt("finger_tracking", "Finger tracking", "Your fingers move the in-game fingers.", Kind::Switch { default: true })
+        .on(Shown::Skeleton)
+        .only_when("aim", "hand_rig")
+        .owned_by(Feature::FingerRig);
 
 /// With finger tracking (controllers that sense the fingers): each finger open or a fist.
 pub const BINARY_FINGERS: Opt =
-    opt("finger_binary", "Binary fingers", "Fingers register as fully open or fully closed.", Kind::Switch { default: false }).on(Shown::Skeleton).only_when("aim", "hand_rig");
+    opt("finger_binary", "Binary fingers", "Fingers register as fully open or fully closed.", Kind::Switch { default: false })
+        .on(Shown::Skeleton)
+        .only_when("aim", "hand_rig")
+        .owned_by(Feature::FingerRig);
 
 /// The sizes `render_size` offers: the headset's own (SteamVR's recommended, its supersampling
 /// included), common headsets' panels, or the game's own resolution.
@@ -678,10 +716,13 @@ pub const fn render_size(help: &'static str) -> Opt {
 }
 
 /// The HUD's pieces on the hands instead of in front of the eyes.
-pub const WORLD_HUD: Opt = opt("world_hud", "Dynamic HUD", "Puts HUD pieces on your hands.", Kind::Switch { default: true }).on(Shown::Hud);
+pub const WORLD_HUD: Opt =
+    opt("world_hud", "Dynamic HUD", "Puts HUD pieces on your hands.", Kind::Switch { default: true }).on(Shown::Hud).owned_by(Feature::HudPanels);
 
 /// The HUD's size, 1 being its size on a monitor (`default_number` for the game's own).
-pub const HUD_SIZE: Opt = opt("hud_scale", "HUD size", "1 is the size on a monitor.", Kind::Number { min: 0.1, max: 1.0, step: 0.01, default: 0.5 }).on(Shown::Hud);
+pub const HUD_SIZE: Opt = opt("hud_scale", "HUD size", "1 is the size on a monitor.", Kind::Number { min: 0.1, max: 1.0, step: 0.01, default: 0.5 })
+    .on(Shown::Hud)
+    .owned_by(Feature::HudLayer);
 
 /// Runs on a game build other than the one Monaka was built for (`monaka_producer::require_build`
 /// lets a mismatch through, logged): each hook still checks the exact code it patches and is left
@@ -751,19 +792,47 @@ pub const CONTROLLER_PROXY: Opt = opt(
 .launcher()
 .viewer_args("*", &["--act-like"]);
 
-pub const HUD_DISTANCE: Opt = opt("hud_distance", "HUD distance (m)", "How far away the HUD appears.", Kind::Number { min: 0.5, max: 20.0, step: 0.1, default: 2.0 }).on(Shown::Hud);
+pub const HUD_DISTANCE: Opt = opt("hud_distance", "HUD distance (m)", "How far away the HUD appears.", Kind::Number { min: 0.5, max: 20.0, step: 0.1, default: 2.0 })
+    .on(Shown::Hud)
+    .owned_by(Feature::HudLayer);
 
 /// How much of the headset's position moves the view: `lean` (leaning, without the eyes' small
 /// shift as the head turns), `full` or `off` (rotation only). Fixed at lean; for testing.
 pub const HEAD_MOVEMENT: Opt =
-    line("head_position", "Head movement", "lean, full or off (rotation only).", choice(&[("lean", "Lean"), ("full", "Full"), ("off", "Rotation only")], "lean"));
+    line("head_position", "Head movement", "lean, full or off (rotation only).", choice(&[("lean", "Lean"), ("full", "Full"), ("off", "Rotation only")], "lean"))
+        .owned_by(Feature::Stereo);
 
 /// Presents between choosing an eye and presenting it: each producer knows its game's
 /// (`default_number`); for testing.
-pub const LATENCY: Opt = line("latency", "Eye timing (frames)", "Overrides the game's own.", Kind::Number { min: 0.0, max: 8.0, step: 1.0, default: 2.0 });
+pub const LATENCY: Opt =
+    line("latency", "Eye timing (frames)", "Overrides the game's own.", Kind::Number { min: 0.0, max: 8.0, step: 1.0, default: 2.0 }).owned_by(Feature::Stereo);
 
 /// Used only when the headset reports no eye distance.
-pub const EYE_SEPARATION: Opt = line("eye_separation", "Eye distance (m)", "Used when the headset reports none.", Kind::Number { min: 0.03, max: 0.09, step: 0.001, default: 0.064 });
+pub const EYE_SEPARATION: Opt =
+    line("eye_separation", "Eye distance (m)", "Used when the headset reports none.", Kind::Number { min: 0.03, max: 0.09, step: 0.001, default: 0.064 })
+        .owned_by(Feature::Stereo);
+
+/// The character walks where the player steps (`monaka_arms::roomscale`).
+pub const ROOM_SCALE: Opt =
+    opt("room_scale", "Room-scale movement", "Your real steps and leans move your character; walls and enemies still stop it.", Kind::Switch { default: true })
+        .on(Shown::Game)
+        .only_when("aim", "hand_rig")
+        .owned_by(Feature::RoomScale);
+
+/// The VR controllers as the game's gamepad (`monaka_pad`).
+pub const CONTROLLER_PAD: Opt =
+    opt("controller_pad", "Controllers as gamepad", "Your VR controllers' sticks and buttons work as the game's gamepad.", Kind::Switch { default: true })
+        .on(Shown::Game)
+        .owned_by(Feature::Gamepad);
+
+/// Every shared option a part of a game's code honours (each with its owner): a game offers these
+/// constants, never an option of its own under one of their ids.
+pub const SHARED: &[Opt] = &[AIM_HAND, FINGER_TRACKING, BINARY_FINGERS, WORLD_HUD, HUD_SIZE, HUD_DISTANCE, HEAD_MOVEMENT, LATENCY, EYE_SEPARATION, ROOM_SCALE, CONTROLLER_PAD];
+
+/// The owner of the shared option `id` ([`SHARED`]), for an option read back from a pack's text.
+pub fn shared_owner(id: &str) -> Option<Feature> {
+    SHARED.iter().find(|o| o.id == id).and_then(|o| o.owner)
+}
 
 // ---- Monaka's own settings ----
 //
@@ -782,8 +851,19 @@ pub const CONTROLLER_SMOOTHING: Opt = opt(
 .launcher()
 .viewer_args("*", &["--controller-smoothing"]);
 
+/// Disabled view bobbing: Monaka's own setting (saved once, for every game), read by the producer of
+/// each game that can (the game lists it among its options, unchanged: [`Manifest::check`]).
+pub const DISABLE_VIEW_BOBBING: Opt = opt(
+    "disable_view_bobbing",
+    "Disable view bobbing",
+    "The view stays level while you walk and run, instead of rising and falling with the character's steps, in every game that can.",
+    Kind::Switch { default: true },
+)
+.on(Shown::Monaka);
+
 /// Monaka's own settings as a manifest, so the window and the launcher treat them as they do a
-/// game's options. It is never a game: no executables, never on offer.
+/// game's options. It is never a game: no executables, never on offer. Those a game's producer
+/// reads (written to its options file) are listed by that game too.
 pub const MONAKA: Manifest = Manifest {
     id: "monaka",
     name: "Monaka",
@@ -797,7 +877,7 @@ pub const MONAKA: Manifest = Manifest {
     launch: Launch::Manual,
     refused_arguments: &[],
     before: "",
-    options: &[CONTROLLER_SMOOTHING],
+    options: &[CONTROLLER_SMOOTHING, DISABLE_VIEW_BOBBING],
     licences: &[],
     left_hand_aims: false,
     weapon_ring: false,
@@ -915,6 +995,11 @@ mod tests {
         assert!(Manifest { id: "monaka", ..TEST }.check().unwrap_err().contains("Monaka"));
         const OWN: &[Opt] = &[CONTROLLER_SMOOTHING];
         assert!(Manifest { options: OWN, launch: Launch::Manual, ..TEST }.check().unwrap_err().contains("controller_smoothing"));
+        // One its producer reads, listed as Monaka has it, is the game's to read; changed, it is not.
+        const READS: &[Opt] = &[DISABLE_VIEW_BOBBING];
+        assert!(Manifest { options: READS, launch: Launch::Manual, ..TEST }.check().is_ok());
+        const CHANGED: &[Opt] = &[DISABLE_VIEW_BOBBING.default_switch(false)];
+        assert!(Manifest { options: CHANGED, launch: Launch::Manual, ..TEST }.check().unwrap_err().contains("disable_view_bobbing"));
     }
 
     #[test]
@@ -924,6 +1009,11 @@ mod tests {
         values.set_checked(&MONAKA, "controller_smoothing", "0").unwrap();
         assert_eq!(values.number(&MONAKA, "controller_smoothing"), 0.0);
         assert!(values.set_checked(&MONAKA, "controller_smoothing", "11").is_err());
-        assert!(MONAKA.options.iter().all(|o| o.shown == Shown::Monaka && !o.producer));
+        assert!(MONAKA.options.iter().all(|o| o.shown == Shown::Monaka));
+        // A game that reads one gets Monaka's value, the one saved for every game.
+        values.set_checked(&MONAKA, "disable_view_bobbing", "0").unwrap();
+        const READS: &[Opt] = &[DISABLE_VIEW_BOBBING];
+        let game = Manifest { options: READS, ..TEST };
+        assert_eq!(values.producer_lines(&game), ["disable_view_bobbing=0"]);
     }
 }

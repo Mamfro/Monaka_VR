@@ -18,7 +18,7 @@ const PRESS_MS: u64 = 150;
 /// How long a swing holds the trigger ([`set_press_ms`]).
 static PRESS: AtomicU64 = AtomicU64::new(PRESS_MS);
 
-/// What the first-person arms hold.
+/// What the first-person arms hold, as the game's producer reads it from its own weapon objects.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Held {
     Gun,
@@ -27,18 +27,6 @@ pub enum Held {
     /// A sharp one: only a cut attacks ([`SwingRules::BLADE`]).
     Blade,
     Nothing,
-}
-
-impl Held {
-    /// What the arms' weapon visual `weapon` (0 for none) is: a gun ([`crate::is_gun`]), another
-    /// weapon, or nothing.
-    pub fn of(weapon: usize) -> Self {
-        match weapon {
-            0 => Held::Nothing,
-            w if crate::is_gun(w) => Held::Gun,
-            _ => Held::Melee,
-        }
-    }
 }
 
 /// How swings attack.
@@ -316,6 +304,11 @@ fn side_name(side: usize) -> &'static str {
 
 pub fn report() {
     if ACTIVE.load(Relaxed) {
-        log!("melee: {} swings pressed the attack, {} reached nothing", SWINGS.load(Relaxed), AIR_SWINGS.load(Relaxed));
+        log!("{}", summary());
     }
+}
+
+/// The swings so far, for the stop's log.
+pub fn summary() -> String {
+    format!("melee: {} swings pressed the attack, {} reached nothing", SWINGS.load(Relaxed), AIR_SWINGS.load(Relaxed))
 }

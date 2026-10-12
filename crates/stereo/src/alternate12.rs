@@ -180,6 +180,35 @@ impl AlternatePublisher12 {
         }
     }
 
+    /// Publishes this frame to both eyes with no pose record: a frame the viewer shows on its flat
+    /// screen (a menu over the game). An eye kept for a pair is let go.
+    pub fn show_flat(&mut self, swap: &IDXGISwapChain3, queue: &ID3D12CommandQueue) -> Step {
+        if self.broken {
+            return Step::Failed;
+        }
+        // SAFETY: COM calls on the game's live swapchain, on the thread that presents it.
+        let Ok(buffer) = (unsafe { swap.GetBuffer::<ID3D12Resource>(swap.GetCurrentBackBufferIndex()) }) else { return self.failed() };
+        if self.producer.is_none() {
+            match self.create(&buffer, queue) {
+                Ok(producer) => self.producer = Some(producer),
+                Err(why) => return self.broke(why),
+            }
+        }
+        // SAFETY: reads a descriptor.
+        let desc = unsafe { buffer.GetDesc() };
+        if (desc.Width as u32, desc.Height) != self.size {
+            let (w, h) = self.size;
+            return self.broke(format!("the game resized from {w}x{h} to {}x{}", desc.Width, desc.Height));
+        }
+        self.left_ready = false;
+        let producer = self.producer.as_mut().expect("created above");
+        match producer.publish((&buffer, D3D12_RESOURCE_STATE_PRESENT), (&buffer, D3D12_RESOURCE_STATE_PRESENT), monaka_channel::tick()) {
+            Ok(true) => Step::Published,
+            Ok(false) => self.failed(),
+            Err(e) => self.broke(format!("publish failed: {e}")),
+        }
+    }
+
     /// Lets go of the channel (end of a run). Its GPU objects are freed once the GPU is done with
     /// them, or leaked if it never is.
     pub fn close(&mut self) {

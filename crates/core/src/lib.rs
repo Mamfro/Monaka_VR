@@ -10,8 +10,11 @@ pub mod bmp;
 pub mod camera;
 pub mod convention;
 pub mod depth;
+pub mod eye_history;
+pub mod feature;
 pub mod fence_rules;
 pub mod fingers;
+pub mod gesture;
 pub mod half;
 pub mod hud;
 pub mod manifest;
@@ -26,7 +29,10 @@ pub mod protocol;
 pub mod reach;
 pub mod scan;
 pub mod sha256;
+pub mod situation;
 pub mod swing;
+pub mod ticket;
+pub mod trail;
 pub mod x64;
 
 /// A value on a 16-byte boundary: engine matrix code reads with aligned SSE loads, and an unaligned

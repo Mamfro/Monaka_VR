@@ -36,7 +36,9 @@ pub struct Contract {
 ///
 /// - 1.1: the text's `author` and `source` ([`About`]).
 /// - 1.2: packs for any game on an engine (`exe` [`crate::manifest::ANY_EXECUTABLE`], the game
-///   picked in [`crate::manifest::GAME_OPTION`]), and 32-bit twins of a pack's DLL for 32-bit games.
+///   picked in [`crate::manifest::GAME_OPTION`]), 32-bit twins of a pack's DLL for 32-bit games, and
+///   Monaka's own settings a game's producer reads, listed among its options (on the `monaka` tab;
+///   [`crate::manifest::DISABLE_VIEW_BOBBING`]).
 pub const CONTRACT: Contract = Contract { major: 1, minor: 2 };
 
 /// Who made a pack and where it comes from, as the pack itself says (nothing checks it): its
@@ -480,6 +482,7 @@ impl OptDraft {
             }),
             viewer: self.viewer.map(|(value, args)| (leak(value), leak_slice(args.into_iter().map(leak).collect()))),
             eye_size_note: self.eye_size_note.map(leak),
+            owner: crate::manifest::shared_owner(&id),
         })
     }
 }
@@ -734,6 +737,17 @@ mod tests {
         const BYTES: [u8; text_len(&[GAME, MANUAL], "Someone <a@b.c>", "https://example.org/x\ty")] = text_bytes(&[GAME, MANUAL], "Someone <a@b.c>", "https://example.org/x\ty");
         assert_eq!(&BYTES[..BYTES.len() - 1], text.as_bytes());
         assert_eq!(BYTES[BYTES.len() - 1], 0);
+    }
+
+    #[test]
+    fn a_monaka_setting_a_game_reads_survives_the_text() {
+        // A game listing one of Monaka's own settings its producer reads passes the check after the
+        // round trip: what it lists still is Monaka's, unchanged.
+        const READS: &[Opt] = &[crate::manifest::DISABLE_VIEW_BOBBING];
+        const READER: Manifest = Manifest { options: READS, launch: Launch::Manual, ..GAME };
+        let parsed = parse(&text(&[READER], "", "")).unwrap();
+        assert!(parsed.manifests[0] == READER);
+        assert!(parsed.manifests[0].check().is_ok(), "{:?}", parsed.manifests[0].check());
     }
 
     #[test]

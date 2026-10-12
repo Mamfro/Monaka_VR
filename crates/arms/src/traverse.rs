@@ -8,6 +8,7 @@
 
 use monaka_core::camera::Mat34;
 use monaka_producer::log;
+use monaka_producer::situation::{self, Situation};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering::*};
 
@@ -34,16 +35,16 @@ const LEAVE_MS: u64 = 300;
 pub const BLEND_MS: f32 = 200.0;
 /// After a swing attacks, the attack's own animation may raise both hands: no switch for this long (ms).
 const AFTER_SWING_MS: u64 = 1000;
-/// Until this tick (`monaka_channel::tick`) the producer knows the character is fighting, not
-/// climbing ([`hold_off`]).
-static HOLD_OFF_UNTIL: AtomicU64 = AtomicU64::new(0);
+/// A game's climbing report ([`report_climbing`]) holds this long in the run's situations (ms).
+const CLIMBING_FRESH_MS: u64 = 500;
 
 /// The character is fighting, not climbing, for the next `ms`: the arms stay on the controllers
 /// whatever the game's animation does with the hands (Kingdom Come raises them to the eyes for a
-/// guard over the head and for its attacks). A producer renews it while the fight goes
-/// on; the arms already with the game come back once the hands come down.
+/// guard over the head and for its attacks). The same as reporting [`Situation::Fighting`] for
+/// that long, which the rig reads; a producer renews it while the fight goes on, and the arms
+/// already with the game come back once the hands come down.
 pub fn hold_off(ms: u64) {
-    HOLD_OFF_UNTIL.fetch_max(monaka_channel::tick() + ms, Relaxed);
+    situation::report(Situation::Fighting, true, ms);
 }
 
 /// Set by a game without climbing ([`declare_no_climbing`]).
@@ -62,9 +63,11 @@ static REPORTED: AtomicU8 = AtomicU8::new(0);
 
 /// The game says, each update, whether its character climbs (hangs from a ledge, holds a ladder,
 /// rides a zip line): the arms go to its animation exactly then. Once a game reports, the wrists'
-/// height is no longer looked at (other animations raise the hands too: a throw's wind-up).
+/// height is no longer looked at (other animations raise the hands too: a throw's wind-up). The
+/// report also goes into the run's situations ([`Situation::Traversal`]) for the other features.
 pub fn report_climbing(climbing: bool) {
     REPORTED.store(if climbing { 2 } else { 1 }, Relaxed);
+    situation::report(Situation::Traversal, climbing, CLIMBING_FRESH_MS);
 }
 
 /// Whether the game drives the arms and how far the rig has blended in.
@@ -132,7 +135,7 @@ pub fn update(wrists: [[f32; 3]; 2], game: &Mat34) -> f32 {
     }
     let Ok(mut state) = STATE.lock() else { return 1.0 };
     let now = monaka_channel::tick();
-    let fighting = crate::melee::swung_within(AFTER_SWING_MS) || now < HOLD_OFF_UNTIL.load(Relaxed);
+    let fighting = crate::melee::swung_within(AFTER_SWING_MS) || situation::active(Situation::Fighting);
     let reported = match REPORTED.load(Relaxed) {
         1 => Some(false),
         2 => Some(true),
@@ -299,6 +302,16 @@ mod tests {
         t.step(1000, UP, false, None);
         t.step(1100, UP, false, None);
         assert_eq!(t.step(5000, UP, false, None).0, 0.0);
+    }
+
+    #[test]
+    fn holding_off_and_climbing_reports_reach_the_run_s_situations() {
+        hold_off(60_000);
+        assert!(situation::active(Situation::Fighting), "the rig reads fighting from there");
+        report_climbing(true);
+        assert_eq!(situation::state(Situation::Traversal), Some(true));
+        report_climbing(false);
+        assert_eq!(situation::state(Situation::Traversal), Some(false));
     }
 
     #[test]

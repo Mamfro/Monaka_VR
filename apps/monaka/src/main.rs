@@ -720,9 +720,10 @@ impl App {
         set_text(self.before, &format!("Before you play: {}", game.before));
         let values = self.settings.values(game.id);
         // Command-line-only options get no row; a row's control id is its index in `rows`. Monaka's
-        // own settings follow the game's options.
+        // own settings follow the game's options (one the game reads too has Monaka's row only).
         let owned = |owner: &'static Manifest| owner.options.iter().map(move |opt| (owner, opt));
-        for (owner, opt) in owned(game.manifest).chain(owned(&MONAKA)).filter(|(_, o)| o.shown != Shown::Line) {
+        let game_rows = owned(game.manifest).filter(|(_, o)| o.shown != Shown::Monaka);
+        for (owner, opt) in game_rows.chain(owned(&MONAKA)).filter(|(_, o)| o.shown != Shown::Line) {
             let i = self.rows.len() as i32;
             let label = static_text(self.hwnd, opt.label, ID_LABEL + i);
             let current = values.text(owner, opt.id);

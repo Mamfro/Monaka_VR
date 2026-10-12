@@ -28,7 +28,7 @@ pub mod probe;
 mod threads;
 pub mod watch;
 
-pub use patch::{Hooks, Instruction, Original, Placement, slot};
+pub use patch::{Hooks, Instruction, Original, Placement, Site, slot};
 
 /// A float as an atomic (its bits in an `AtomicU32`), for values detours share across threads.
 pub struct AtomicF32(std::sync::atomic::AtomicU32);

@@ -5,7 +5,7 @@
 //! ```text
 //! monaka_viewer --gpu-map <channel> --loader <openxr_loader.dll> [--runtime <manifest.json>]
 //!             [--seconds N] [--pixel-aspect A] [--screen-width M] [--reticle left|right]... [--reticle-from head|palm]
-//!             [--dpad-hold left,right] [--menu-reach same|other|off] [--menu-reach-depth CM] [--act-like touch|index]
+//!             [--dpad-hold left,right] [--menu-reach same|other|off] [--menu-pick buttons|stick] [--menu-reach-depth CM] [--act-like touch|index]
 //!             [--controller-smoothing 0-10] [--stop-event <name>]
 //! monaka_viewer --info --loader <openxr_loader.dll> [--runtime <manifest.json>]
 //! ```
@@ -65,6 +65,8 @@ struct Args {
     /// Those menus also open by reaching over a shoulder, picked with this stick ([`reach`]); `None`:
     /// not by reach.
     menu_reach: Option<reach::Pick>,
+    /// How a pick from those menus reaches the game: a face button, or the game's right stick.
+    menu_pick: reach::PickWith,
     /// How far behind the head a hand reaches to open one (metres; `--menu-reach-depth` in cm).
     menu_reach_depth: f32,
     /// The controllers act like another kind (`--act-like touch|index`, a layout test).
@@ -83,7 +85,7 @@ fn smoothing_default() -> f32 {
 
 fn parse_args() -> Result<Args, String> {
     let mut args =
-        Args { channel: None, info: false, seconds: 30, pixel_aspect: 1.0, screen_width: 2.4, loader: PathBuf::new(), runtime: None, reticles: [false; 2], reticle_palm: false, panel_nearest: 0.0, dpad_hold: 0, menu_reach: Some(reach::Pick::Same), menu_reach_depth: reach::DEPTH, proxy: pad::Proxy::None, controller_smoothing: smoothing_default() };
+        Args { channel: None, info: false, seconds: 30, pixel_aspect: 1.0, screen_width: 2.4, loader: PathBuf::new(), runtime: None, reticles: [false; 2], reticle_palm: false, panel_nearest: 0.0, dpad_hold: 0, menu_reach: Some(reach::Pick::Same), menu_pick: reach::PickWith::Buttons, menu_reach_depth: reach::DEPTH, proxy: pad::Proxy::None, controller_smoothing: smoothing_default() };
     let mut words = std::env::args().skip(1);
     while let Some(flag) = words.next() {
         if flag == "--info" {
@@ -104,6 +106,7 @@ fn parse_args() -> Result<Args, String> {
             // Those menus by reaching over a shoulder: picked with the same hand's stick, the
             // other's, or off.
             "--menu-reach" => args.menu_reach = reach::parse(&value)?,
+            "--menu-pick" => args.menu_pick = reach::parse_with(&value)?,
             "--menu-reach-depth" => {
                 let cm = number("--menu-reach-depth")?;
                 if !(5.0..=40.0).contains(&cm) {
@@ -318,7 +321,7 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
     }
     let pad_actions = actions.as_ref().and_then(|set| pad::PadActions::create(set, args.dpad_hold, args.proxy).map_err(|e| println!("No controller buttons: {e}")).ok());
     // The held menus by reaching over a shoulder, and the buzz that says one opened or picked.
-    let mut reach = args.menu_reach.map(|pick| reach::Reach::new(pick, args.dpad_hold, args.menu_reach_depth)).filter(|r| r.active() && pad_actions.is_some());
+    let mut reach = args.menu_reach.map(|pick| reach::Reach::new(pick, args.dpad_hold, args.menu_reach_depth).picking_with(args.menu_pick)).filter(|r| r.active() && pad_actions.is_some());
     if let (Some(pick), true) = (args.menu_reach, reach.is_some()) {
         println!("Menus by reach: rest a hand over its shoulder to open its menu; flick {} stick to pick", if pick == reach::Pick::Same { "that hand's" } else { "the other hand's" });
     }

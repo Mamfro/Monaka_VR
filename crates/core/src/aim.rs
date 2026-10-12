@@ -144,10 +144,47 @@ impl BakedYaw {
     }
 }
 
+/// No stick pitch, kept level: while only the head looks up and down (the stick's up and down
+/// taken from the game), nothing else would ever bring back a tilt in the game's own pitch (a seat's
+/// limits, a cutscene, a climb), so the game's own pitch may only go back toward level. Pitch here
+/// is in the game's units with either sign convention, as long as one call uses one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Levelling {
+    /// Within this of level the game's pitch counts as level.
+    pub dead_band: f32,
+    /// The most [`Levelling::step`] changes it in one go.
+    pub step: f32,
+}
+
+impl Levelling {
+    /// The change that brings the game's own pitch `own` back toward level, at most
+    /// [`Levelling::step`]; none within the dead band. For a game whose own pitch the producer
+    /// writes.
+    pub fn step(&self, own: f32) -> f32 {
+        if own.abs() < self.dead_band { 0.0 } else { (-own).clamp(-self.step, self.step) }
+    }
+
+    /// Whether the game's own look input, changing its pitch `own` the positive way (`positive`) or
+    /// the negative, takes it back toward level from beyond the dead band. For a game whose look
+    /// input the producer can only pass or hold back.
+    pub fn toward_level(&self, own: f32, positive: bool) -> bool {
+        if positive { own < -self.dead_band } else { own > self.dead_band }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use core::f32::consts::FRAC_PI_6;
+
+    #[test]
+    fn levelling_steps_and_gates_toward_level() {
+        let rule = Levelling { dead_band: 0.05, step: 0.25 };
+        assert_eq!((rule.step(15.0), rule.step(-15.0), rule.step(0.2), rule.step(0.01)), (-0.25, 0.25, -0.2, 0.0));
+        assert!(rule.toward_level(-3.0, true) && !rule.toward_level(-3.0, false));
+        assert!(rule.toward_level(3.0, false) && !rule.toward_level(3.0, true));
+        assert!(!rule.toward_level(0.04, false) && !rule.toward_level(-0.04, true), "level enough: nothing passes");
+    }
 
     const DL2: Convention = Convention::DEGREES_YAW_RIGHT;
 

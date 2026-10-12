@@ -20,6 +20,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+pub mod game;
+pub mod ledger;
+pub mod situation;
+
 /// Win32 codes the loader understands.
 pub mod code {
     pub const SUCCESS: u32 = 0;
@@ -222,7 +226,11 @@ fn this_module_dir() -> Option<PathBuf> {
 
 impl Session {
     fn open(log_name: &str) -> Option<&'static Session> {
-        let dir = this_module_dir()?;
+        Self::open_in(this_module_dir()?, log_name)
+    }
+
+    /// The session in `dir` (the DLL copy's own folder in a run; a test's folder in tests).
+    fn open_in(dir: PathBuf, log_name: &str) -> Option<&'static Session> {
         let file = File::create(dir.join(log_name)).ok()?;
         let session = SESSION.get_or_init(|| Session { dir, log: Mutex::new(Some(file)), started: std::time::Instant::now() });
         Some(session)
@@ -312,25 +320,26 @@ pub fn rates<const N: usize>(now: [u64; N], last: &[std::sync::atomic::AtomicU64
     std::array::from_fn(|i| now[i].saturating_sub(last[i].swap(now[i], std::sync::atomic::Ordering::Relaxed)) as f64 / seconds)
 }
 
-/// Declares a game crate's producer exports from its manifests (`src/manifest.rs`,
-/// `monaka_core::manifest`):
+/// Declares a game crate's producer exports from its [`game::Game`]:
 ///
 /// ```ignore
-/// monaka_producer::producer!(manifests: crate::manifest::MANIFESTS, start: start, stop: stop);
+/// monaka_producer::producer!(game: crate::MyGame);
 /// ```
 ///
-/// generates `MonakaStart`, `MonakaStop` and `MonakaStatus` driving `start(&Session)` and `stop()`
-/// through a [`Lifecycle`], refuses to start in any executable but the manifests', logs to the
-/// manifests' log file, and exports `MONAKA_HOST` (the executables, `;`-separated, NUL-terminated),
-/// which `monaka_loader` reads from the DLL file to know which game the producer belongs to.
+/// generates `MonakaStart`, `MonakaStop` and `MonakaStatus` running the game through
+/// [`game::start`] and [`game::stop`] in a [`Lifecycle`], refuses to start in any executable but
+/// the manifests', logs to the manifests' log file, and exports `MONAKA_HOST` (the executables,
+/// `;`-separated, NUL-terminated), `MONAKA_CONTRACT` and `MONAKA_MANIFEST`, which the loader and
+/// the launcher read from the DLL file.
 #[macro_export]
 macro_rules! producer {
-    (manifests: $manifests:expr, start: $start:path, stop: $stop:path) => {
+    (game: $game:ty) => {
         static LIFECYCLE: $crate::Lifecycle = $crate::Lifecycle::new();
 
         /// The game executables this producer belongs to (read by monaka_loader from the file).
         #[unsafe(no_mangle)]
-        pub static MONAKA_HOST: [u8; $crate::manifest::host_len($manifests)] = $crate::manifest::host_bytes($manifests);
+        pub static MONAKA_HOST: [u8; $crate::manifest::host_len(<$game as $crate::game::Game>::MANIFESTS)] =
+            $crate::manifest::host_bytes(<$game as $crate::game::Game>::MANIFESTS);
 
         /// The pack contract this producer was built against (`monaka_core::pack::CONTRACT`), read
         /// by the launcher from the file.
@@ -341,22 +350,23 @@ macro_rules! producer {
         /// the file: the game list, options and tabs come from the pack, and who made it from the
         /// game crate's `authors` and `repository`.
         #[unsafe(no_mangle)]
-        pub static MONAKA_MANIFEST: [u8; $crate::pack::text_len($manifests, env!("CARGO_PKG_AUTHORS"), env!("CARGO_PKG_REPOSITORY"))] =
-            $crate::pack::text_bytes($manifests, env!("CARGO_PKG_AUTHORS"), env!("CARGO_PKG_REPOSITORY"));
+        pub static MONAKA_MANIFEST: [u8; $crate::pack::text_len(<$game as $crate::game::Game>::MANIFESTS, env!("CARGO_PKG_AUTHORS"), env!("CARGO_PKG_REPOSITORY"))] =
+            $crate::pack::text_bytes(<$game as $crate::game::Game>::MANIFESTS, env!("CARGO_PKG_AUTHORS"), env!("CARGO_PKG_REPOSITORY"));
 
         /// Called by the loader on a new thread in the game.
         #[unsafe(no_mangle)]
         pub extern "system" fn MonakaStart(_: *mut ::core::ffi::c_void) -> u32 {
-            LIFECYCLE.start($manifests[0].log, |session| {
-                $crate::require_host(&$crate::manifest::host_text($manifests))?;
-                $crate::allow_other_builds(session.manifest_options(&$manifests[0]).switch("other_builds", false));
-                $start(session)
+            let manifests = <$game as $crate::game::Game>::MANIFESTS;
+            LIFECYCLE.start(manifests[0].log, |session| {
+                $crate::require_host(&$crate::manifest::host_text(manifests))?;
+                $crate::allow_other_builds(session.manifest_options(&manifests[0]).switch("other_builds", false));
+                $crate::game::start::<$game>(session)
             })
         }
 
         #[unsafe(no_mangle)]
         pub extern "system" fn MonakaStop(_: *mut ::core::ffi::c_void) -> u32 {
-            LIFECYCLE.stop($stop)
+            LIFECYCLE.stop($crate::game::stop::<$game>)
         }
 
         #[unsafe(no_mangle)]
@@ -366,20 +376,24 @@ macro_rules! producer {
 
         #[cfg(test)]
         mod producer_tests {
-            /// The producer reads every option its manifests offer, and the manifests are sound.
+            /// The manifests are sound and the exported text reads back as the manifests (what
+            /// each part offers is checked as the options are built, at compile time).
             #[test]
             fn manifests_are_sound() {
-                for manifest in $manifests {
+                let manifests = <$game as $crate::game::Game>::MANIFESTS;
+                for manifest in manifests {
                     manifest.check().unwrap_or_else(|why| panic!("{why}"));
+                    // Each option the manifest offers is read by the shared settings or a component.
+                    let unread = $crate::manifest::unread_options(manifest, |options| $crate::game::read_all::<$game>(options, manifest));
+                    assert!(unread.is_empty(), "{}: offered but read by nothing: {unread:?}", manifest.id);
                 }
                 let host = ::std::str::from_utf8(&super::MONAKA_HOST[..super::MONAKA_HOST.len() - 1]).unwrap();
-                assert_eq!(host, $crate::manifest::host_text($manifests));
-                // The exported manifest text reads back as the manifests themselves.
+                assert_eq!(host, $crate::manifest::host_text(manifests));
                 let text = ::std::str::from_utf8(&super::MONAKA_MANIFEST[..super::MONAKA_MANIFEST.len() - 1]).unwrap();
                 let read = $crate::pack::parse(text).unwrap_or_else(|why| panic!("{why}"));
                 assert_eq!(read.contract, $crate::pack::CONTRACT);
                 assert_eq!(read.about.source, env!("CARGO_PKG_REPOSITORY"));
-                assert!(read.manifests.iter().eq($manifests.iter()), "the manifest text does not read back as the manifests");
+                assert!(read.manifests.iter().eq(manifests.iter()), "the manifest text does not read back as the manifests");
             }
         }
     };
