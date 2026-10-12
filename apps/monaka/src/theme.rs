@@ -162,7 +162,7 @@ extern "system" fn theme_child(hwnd: HWND, _: LPARAM) -> BOOL {
         let _ = unsafe { SetWindowTheme(hwnd, if dark { name } else { PCWSTR::null() }, PCWSTR::null()) };
     };
     match class.as_str() {
-        "Button" | "ListBox" | "Edit" => set(hwnd, w!("DarkMode_Explorer")),
+        "Button" | "ListBox" | "Edit" | "ScrollBar" => set(hwnd, w!("DarkMode_Explorer")),
         "ComboBox" => {
             set(hwnd, w!("DarkMode_CFD"));
             let mut info = COMBOBOXINFO { cbSize: size_of::<COMBOBOXINFO>() as u32, ..Default::default() };

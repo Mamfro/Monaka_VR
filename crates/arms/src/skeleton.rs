@@ -1,10 +1,135 @@
-//! Finding the arms and fingers on a game's skeleton, for games that name them differently from
-//! what [`crate::follow`] expects (`l_upperarm`, `r_hand`, ...) or not at all: a rename table onto
-//! the solver's names ([`Renames`]), or the skeleton's shape alone ([`find_arm`],
-//! [`finger_chains`], [`attach_joint`]) for a skeleton without names.
+//! A game's skeleton, the hand rig's provider ([`Skeleton`]), one moment of it ([`Snapshot`]) and
+//! its frames through one update ([`Frames`]); and finding the arms and fingers on a skeleton
+//! whose names differ from what [`crate::follow`] expects (`l_upperarm`, `r_hand`, ...) or that has
+//! none: a rename table onto the solver's names ([`Renames`]), or the skeleton's shape alone
+//! ([`find_arm`], [`finger_chains`], [`attach_joint`]).
 //!
 //! A skeleton's shape is its parent table: one entry per joint, the parent's index or -1 for a
 //! root, parents before their children.
+
+use monaka_core::camera::Mat34;
+use std::sync::Mutex;
+
+#[cfg(test)]
+mod tests;
+
+/// A game's skeleton, the hand rig's provider: its elements (bones, helpers and, in some games,
+/// mesh parts) by index, each with a world matrix (row-major 3x4, camera-to-world convention:
+/// columns right, up, back, position). Every matrix is in the space of the moment it is read at:
+/// one right-handed space, Y up, in metres, shared with what the hands are put on
+/// ([`hand_rig::Moment`]); an impl converts the engine's own form both ways. A skeleton the hand
+/// rig places by its own targets ([`hand_rig::Method::HandRooted`]) may keep the space and units
+/// its targets are given in.
+pub trait Skeleton {
+    /// Identifies this skeleton (its address): a different one is looked up again.
+    fn id(&self) -> usize;
+    fn count(&self) -> i32;
+    /// "" where the engine names no elements.
+    fn name(&self, element: i32) -> String;
+    /// The parent element, or a negative number for a root; parents come before their children.
+    fn parent(&self, element: i32) -> i32;
+    /// The element's rest pose (the skeleton's bind or reference pose) against its parent, where
+    /// the engine keeps one. None: the pose first seen stands for it.
+    fn rest(&self, _element: i32) -> Option<Mat34> {
+        None
+    }
+    /// The rest poses of `elements`, all under `root`, at once (an engine that reads them by
+    /// resetting `root`'s subtree to its reference frame does that once).
+    fn rests_under(&self, _root: i32, elements: &[i32]) -> Vec<Option<Mat34>> {
+        elements.iter().map(|&e| self.rest(e)).collect()
+    }
+    fn world(&self, element: i32) -> Option<Mat34>;
+    /// The rig's pose for one element: set in place, or kept for the game's own write-back after
+    /// the rig's call returns (a queue, a buffer swapped in at an upload).
+    fn set_world(&self, element: i32, matrix: &Mat34);
+    /// Whether the element is a bone (helpers and mesh parts follow their bones and are never
+    /// written: moving them leaves the arms where the game put them).
+    fn is_bone(&self, element: i32) -> bool;
+}
+
+/// Every element's world matrix of a skeleton at one moment. An element the skeleton cannot give
+/// as finite numbers is kept as NaN and never written: Dying Light 2 can leave an outfit's glove
+/// bone so for good after a cutscene, and refusing the whole skeleton for it would leave the arms
+/// to the game.
+pub struct Snapshot {
+    pub skeleton: usize,
+    pub worlds: Vec<Mat34>,
+}
+
+static SPARE: Mutex<Vec<Mat34>> = Mutex::new(Vec::new());
+
+impl Snapshot {
+    pub fn take(skeleton: &dyn Skeleton) -> Option<Self> {
+        let mut worlds = SPARE.lock().ok().map(|mut spare| std::mem::take(&mut *spare)).unwrap_or_default();
+        worlds.clear();
+        for element in 0..skeleton.count() {
+            worlds.push(skeleton.world(element).filter(|w| w.iter().all(|v| v.is_finite())).unwrap_or([f32::NAN; 12]));
+        }
+        worlds.iter().any(|w| w[0].is_finite()).then_some(Self { skeleton: skeleton.id(), worlds })
+    }
+
+    /// The pose of skeleton `skeleton` as the game read it elsewhere (a queue's stored set, a
+    /// worker's pose), not-finite matrices kept as NaN; None when nothing is readable.
+    pub fn of(skeleton: usize, mut worlds: Vec<Mat34>) -> Option<Self> {
+        for world in &mut worlds {
+            if !world.iter().all(|v| v.is_finite()) {
+                *world = [f32::NAN; 12];
+            }
+        }
+        worlds.iter().any(|w| w[0].is_finite()).then_some(Self { skeleton, worlds })
+    }
+}
+
+/// A skeleton's frames through one update: as the game animated them, as the rig has them now, and
+/// which the rig placed. Written back in one go ([`Frames::flush`]): every element placed, and
+/// every other one the rig changed.
+pub struct Frames<'a> {
+    pub animated: &'a [Mat34],
+    pub now: Vec<Mat34>,
+    placed: Vec<bool>,
+    /// Per side, the wrist and its child toward the elbow, where the arms were found by the
+    /// skeleton's shape (a skeleton hung from the hands): where the fingers are looked for by shape.
+    pub wrists: [Option<(usize, usize)>; 2],
+}
+
+impl<'a> Frames<'a> {
+    pub fn new(animated: &'a Snapshot) -> Self {
+        Self { animated: &animated.worlds, now: animated.worlds.clone(), placed: vec![false; animated.worlds.len()], wrists: [None; 2] }
+    }
+
+    /// Element `element` placed at `matrix`: written back even if that is where it was.
+    pub fn place(&mut self, element: usize, matrix: Mat34) {
+        if let (Some(now), Some(placed)) = (self.now.get_mut(element), self.placed.get_mut(element)) {
+            *now = matrix;
+            *placed = true;
+        }
+    }
+
+    /// Whether element `element` goes back to the game: placed, or changed from its animation.
+    fn written(&self, element: usize) -> bool {
+        self.now[element].iter().all(|v| v.is_finite()) && (self.placed[element] || self.now[element] != self.animated[element])
+    }
+
+    /// Writes the elements placed or changed into `skeleton` (bones only, in index order) and
+    /// returns them.
+    pub fn flush(&self, skeleton: &dyn Skeleton) -> Vec<usize> {
+        let count = (skeleton.count().max(0) as usize).min(self.now.len());
+        let written: Vec<usize> = (0..count).filter(|&e| self.written(e) && skeleton.is_bone(e as i32)).collect();
+        for &element in &written {
+            skeleton.set_world(element as i32, &self.now[element]);
+        }
+        written
+    }
+}
+
+impl Drop for Snapshot {
+    fn drop(&mut self) {
+        // Keep the allocation for the next call.
+        if let Ok(mut spare) = SPARE.lock() {
+            *spare = std::mem::take(&mut self.worlds);
+        }
+    }
+}
 
 /// A game's arm joint names onto the solver's: each side's prefix (the game's, the solver's), a
 /// suffix the game puts after every name, and the names in between (the game's, the solver's).
@@ -136,46 +261,3 @@ pub fn finger_chains(parents: &[i32], wrist: usize, forearm: usize) -> Vec<(usiz
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_rename_table_maps_a_games_names() {
-        const PREFIXED: Renames = Renames { sides: [("Left", "l_"), ("Right", "r_")], suffix: "", names: &[("ForeArm", "forearm"), ("Hand", "hand")] };
-        assert_eq!(PREFIXED.solver_name(1, "RightForeArm").as_deref(), Some("r_forearm"));
-        assert_eq!(PREFIXED.solver_name(0, "LeftHand").as_deref(), Some("l_hand"));
-        assert_eq!(PREFIXED.solver_name(0, "RightHand"), None, "the other side's prefix");
-        assert_eq!(PREFIXED.solver_name(0, "LeftHandIndex1"), None, "not in the table");
-        const SUFFIXED: Renames = Renames { sides: [("l_", "l_"), ("r_", "r_")], suffix: "_jnt", names: &[("lowerArm", "forearm")] };
-        assert_eq!(SUFFIXED.solver_name(0, "l_lowerArm_jnt").as_deref(), Some("l_forearm"));
-        assert_eq!(SUFFIXED.solver_name(1, "r_lowerArm").as_deref(), Some("r_forearm"), "the suffix may be missing");
-    }
-
-    /// A right arm hung from its attach joint: joint 0 a root, 1 the attach joint, 2 the wrist with
-    /// three fingers (3, 4, 5), 6 and 7 forearm twists, 8 the elbow, 9 the shoulder.
-    const ARM: [i32; 10] = [-1, 0, 1, 2, 2, 2, 2, 6, 7, 8];
-
-    #[test]
-    fn an_arm_is_found_by_its_shape() {
-        let arm = find_arm(&ARM, 1).unwrap();
-        assert_eq!((arm.wrist, arm.elbow, arm.shoulder), (2, 8, 9));
-        assert_eq!(arm.forearm, vec![6, 7, 8, 9]);
-        assert_eq!(arm.subtree.len(), 9);
-        assert_eq!(subtree(&ARM, 6), vec![6, 7, 8, 9]);
-        assert_eq!(children(&ARM, 2), vec![3, 4, 5, 6]);
-        // Fingers: the three one-joint chains beside the forearm.
-        let fingers = finger_chains(&ARM, 2, 6);
-        assert_eq!(fingers, vec![(2, vec![3]), (2, vec![4]), (2, vec![5])]);
-        // Both arms under one root: that root is no arm, and not an attach joint.
-        let mut both = ARM.to_vec();
-        for &parent in &ARM[1..] {
-            both.push(if parent == 0 { 0 } else { parent + 9 });
-        }
-        assert!(find_arm(&both, 0).is_none());
-        let mut distances = vec![9.0; both.len()];
-        distances[0] = 0.0;
-        distances[1] = 0.0;
-        assert_eq!(attach_joint(&both, &distances), Some(1));
-    }
-}

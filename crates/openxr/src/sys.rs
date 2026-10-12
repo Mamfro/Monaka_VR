@@ -106,6 +106,96 @@ pub type PFN_xrCreateHandTrackerEXT = unsafe extern "system" fn(Session, *const 
 pub type PFN_xrDestroyHandTrackerEXT = unsafe extern "system" fn(HandTrackerEXT) -> Result;
 pub type PFN_xrLocateHandJointsEXT = unsafe extern "system" fn(HandTrackerEXT, *const HandJointsLocateInfoEXT, *mut HandJointLocationsEXT) -> Result;
 
+/// Depth beside each eye of a projection layer, for the runtime's reprojection.
+pub const KHR_COMPOSITION_LAYER_DEPTH: &std::ffi::CStr = c"XR_KHR_composition_layer_depth";
+pub const TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR: StructureType = 1_000_010_000;
+
+/// Chained on an `XrCompositionLayerProjectionView`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CompositionLayerDepthInfoKHR {
+    pub ty: StructureType,
+    pub next: *const c_void,
+    pub subImage: SwapchainSubImage,
+    pub minDepth: f32,
+    pub maxDepth: f32,
+    pub nearZ: f32,
+    pub farZ: f32,
+}
+
+/// Eye gaze as a pose action (`/interaction_profiles/ext/eye_gaze_interaction`).
+pub const EXT_EYE_GAZE_INTERACTION: &std::ffi::CStr = c"XR_EXT_eye_gaze_interaction";
+pub const TYPE_SYSTEM_EYE_GAZE_INTERACTION_PROPERTIES_EXT: StructureType = 1_000_030_000;
+pub const TYPE_EYE_GAZE_SAMPLE_TIME_EXT: StructureType = 1_000_030_001;
+
+/// Chained on `XrSystemProperties`.
+#[repr(C)]
+pub struct SystemEyeGazeInteractionPropertiesEXT {
+    pub ty: StructureType,
+    pub next: *mut c_void,
+    pub supportsEyeGazeInteraction: Bool32,
+}
+
+/// Chained on the `XrSpaceLocation` of a gaze action space: when the gaze was sampled.
+#[repr(C)]
+pub struct EyeGazeSampleTimeEXT {
+    pub ty: StructureType,
+    pub next: *mut c_void,
+    pub time: Time,
+}
+
+/// Meta's eye tracking: each eye's gaze from an eye tracker object.
+pub const FB_EYE_TRACKING_SOCIAL: &std::ffi::CStr = c"XR_FB_eye_tracking_social";
+pub const TYPE_EYE_TRACKER_CREATE_INFO_FB: StructureType = 1_000_202_001;
+pub const TYPE_EYE_GAZES_INFO_FB: StructureType = 1_000_202_002;
+pub const TYPE_EYE_GAZES_FB: StructureType = 1_000_202_003;
+pub const TYPE_SYSTEM_EYE_TRACKING_PROPERTIES_FB: StructureType = 1_000_202_004;
+/// `XR_EYE_POSITION_COUNT_FB`.
+pub const EYE_POSITION_COUNT_FB: usize = 2;
+pub type EyeTrackerFB = u64;
+
+/// Chained on `XrSystemProperties`.
+#[repr(C)]
+pub struct SystemEyeTrackingPropertiesFB {
+    pub ty: StructureType,
+    pub next: *mut c_void,
+    pub supportsEyeTracking: Bool32,
+}
+
+#[repr(C)]
+pub struct EyeTrackerCreateInfoFB {
+    pub ty: StructureType,
+    pub next: *const c_void,
+}
+
+#[repr(C)]
+pub struct EyeGazesInfoFB {
+    pub ty: StructureType,
+    pub next: *const c_void,
+    pub baseSpace: Space,
+    pub time: Time,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EyeGazeFB {
+    pub isValid: Bool32,
+    pub gazePose: Posef,
+    pub gazeConfidence: f32,
+}
+
+#[repr(C)]
+pub struct EyeGazesFB {
+    pub ty: StructureType,
+    pub next: *mut c_void,
+    pub gaze: [EyeGazeFB; EYE_POSITION_COUNT_FB],
+    pub time: Time,
+}
+
+pub type PFN_xrCreateEyeTrackerFB = unsafe extern "system" fn(Session, *const EyeTrackerCreateInfoFB, *mut EyeTrackerFB) -> Result;
+pub type PFN_xrDestroyEyeTrackerFB = unsafe extern "system" fn(EyeTrackerFB) -> Result;
+pub type PFN_xrGetEyeGazesFB = unsafe extern "system" fn(EyeTrackerFB, *const EyeGazesInfoFB, *mut EyeGazesFB) -> Result;
+
 // XrStructureType
 pub const TYPE_EXTENSION_PROPERTIES: StructureType = 2;
 pub const TYPE_INSTANCE_CREATE_INFO: StructureType = 3;
@@ -179,6 +269,7 @@ pub const ACTION_TYPE_POSE_INPUT: i32 = 4;
 pub const ACTION_TYPE_VIBRATION_OUTPUT: i32 = 100;
 /// `XR_FREQUENCY_UNSPECIFIED`: the runtime's own vibration frequency.
 pub const FREQUENCY_UNSPECIFIED: f32 = 0.0;
+pub const SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT: Flags64 = 0x2;
 pub const SWAPCHAIN_USAGE_TRANSFER_DST_BIT: Flags64 = 0x10;
 pub const SWAPCHAIN_USAGE_SAMPLED_BIT: Flags64 = 0x20;
 
@@ -802,5 +893,23 @@ mod tests {
         assert_eq!(offset_of!(HandJointLocationEXT, pose), 8);
         assert_eq!(size_of::<HandJointLocationsEXT>(), 32);
         assert_eq!(offset_of!(HandJointLocationsEXT, jointLocations), 24);
+        // XR_KHR_composition_layer_depth.
+        assert_eq!(size_of::<CompositionLayerDepthInfoKHR>(), 64);
+        assert_eq!(offset_of!(CompositionLayerDepthInfoKHR, subImage), 16);
+        assert_eq!(offset_of!(CompositionLayerDepthInfoKHR, minDepth), 48);
+        assert_eq!(offset_of!(CompositionLayerDepthInfoKHR, farZ), 60);
+        // XR_EXT_eye_gaze_interaction.
+        assert_eq!(size_of::<SystemEyeGazeInteractionPropertiesEXT>(), 24);
+        assert_eq!(size_of::<EyeGazeSampleTimeEXT>(), 24);
+        assert_eq!(offset_of!(EyeGazeSampleTimeEXT, time), 16);
+        // XR_FB_eye_tracking_social.
+        assert_eq!(size_of::<SystemEyeTrackingPropertiesFB>(), 24);
+        assert_eq!(size_of::<EyeTrackerCreateInfoFB>(), 16);
+        assert_eq!(size_of::<EyeGazesInfoFB>(), 32);
+        assert_eq!(size_of::<EyeGazeFB>(), 36);
+        assert_eq!(offset_of!(EyeGazeFB, gazeConfidence), 32);
+        assert_eq!(size_of::<EyeGazesFB>(), 96);
+        assert_eq!(offset_of!(EyeGazesFB, gaze), 16);
+        assert_eq!(offset_of!(EyeGazesFB, time), 88);
     }
 }

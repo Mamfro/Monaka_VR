@@ -1,68 +1,62 @@
-//! Alternate-eye publishing over a D3D12 swapchain: the D3D12 twin of [`crate::alternate`], over
-//! the fence channel. Every presented frame is one eye; the left eye's back buffer is kept
-//! ([`FenceProducer::hold`]) on the game's queue, and the right eye's present publishes the pair
-//! with the head poses both were rendered from (see [`monaka_core::alternate`] for the timing).
+//! Alternate-eye publishing over a D3D12 swapchain: the D3D12 twin of [`crate::alternate`], a
+//! schedule and a pose ring over [`PairPublisher12`]. Every presented frame is one eye; the left
+//! eye's back buffer is kept ([`PairPublisher12::hold`]) on the game's queue, and the right eye's
+//! present publishes the pair with the head poses both were rendered from (see
+//! [`monaka_core::alternate`] for the timing).
 //!
 //! The game crate, after each present `n`, makes the next frame render eye
 //! `Schedule::camera_eye(n)` from a head pose and gives that pose to
 //! [`AlternatePublisher12::record_pose`]; before each present it calls
 //! [`AlternatePublisher12::before_present`] with the swapchain and the game's direct queue (the
 //! copies go on that queue, ahead of the present).
+//!
+//! A game with each frame's depth gives it with the frame (the `_with_depth` calls, [`FrameDepth`]):
+//! the left eye's depth is kept with its image ([`PairPublisher12::hold_depth`]) and the pair goes
+//! out with both eyes' depth when both frames had it.
 
 pub use crate::alternate::Step;
-use monaka_channel::fence::FenceProducer;
-use monaka_channel::pose::HeadSource;
+use crate::pairs12::{EyeDepth12, PairDepth, PairPublisher12};
 use monaka_channel::ChannelName;
+use monaka_channel::pose::HeadSource;
 use monaka_core::alternate::{POSE_RING, Schedule};
-use monaka_core::protocol::HeadPose;
-use monaka_producer::log;
+use monaka_core::protocol::{DepthParams, HeadPose};
 use windows::Win32::Graphics::Direct3D12::{D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_PRESENT, ID3D12CommandQueue, ID3D12Resource};
 use windows::Win32::Graphics::Dxgi::IDXGISwapChain3;
 
-pub struct AlternatePublisher12 {
-    schedule: Schedule,
-    channel: ChannelName,
-    producer: Option<FenceProducer>,
-    /// The channel could not be made (or the image changed size): nothing more is published.
-    broken: bool,
-    size: (u32, u32),
-    left_ready: bool,
-    ring: [HeadPose; POSE_RING],
-    pairs: u64,
-    failures: u64,
-    last: Option<(u64, [HeadPose; 2])>,
-    /// The pose of the left eye kept by [`AlternatePublisher12::show_labelled`].
-    left_pose: HeadPose,
+/// The depth of the frame about to present, for its eye: the texture, its state, the part of it
+/// that lines up with the image, and how it maps to distance.
+#[derive(Clone)]
+pub struct FrameDepth {
+    pub eye: EyeDepth12,
+    pub params: DepthParams,
 }
 
-/// The fence channel at `buffer`'s size and format (the game's back buffer), on the game queue's
-/// device; and that size.
-pub(crate) fn create_producer(channel: &ChannelName, buffer: &ID3D12Resource, queue: &ID3D12CommandQueue) -> Result<(FenceProducer, (u32, u32)), String> {
-    let (producer, (width, height)) = FenceProducer::for_back_buffer(channel, buffer, queue)?;
-    log!("D3D12 fence channel {width}x{height}");
-    Ok((producer, (width, height)))
+pub struct AlternatePublisher12 {
+    schedule: Schedule,
+    pairs: PairPublisher12,
+    left_ready: bool,
+    /// The kept left eye's depth: its rect (the held copy has the source's size) and parameters.
+    left_depth: Option<(Option<[u32; 4]>, DepthParams)>,
+    ring: [HeadPose; POSE_RING],
+    /// The pose of the left eye kept by [`AlternatePublisher12::show_labelled`].
+    left_pose: HeadPose,
 }
 
 impl AlternatePublisher12 {
     pub fn new(channel: ChannelName, schedule: Schedule) -> Self {
         Self {
             schedule,
-            channel,
-            producer: None,
-            broken: false,
-            size: (0, 0),
+            pairs: PairPublisher12::new(channel),
             left_ready: false,
+            left_depth: None,
             ring: [HeadPose::default(); POSE_RING],
-            pairs: 0,
-            failures: 0,
-            last: None,
             left_pose: HeadPose::default(),
         }
     }
 
     /// The last published pair's sequence and the poses its record carried.
     pub fn last_pair(&self) -> Option<(u64, [HeadPose; 2])> {
-        self.last
+        self.pairs.last_pair()
     }
 
     pub fn schedule(&self) -> Schedule {
@@ -76,33 +70,20 @@ impl AlternatePublisher12 {
 
     /// The eye image size the channel was made with.
     pub fn size(&self) -> (u32, u32) {
-        self.size
+        self.pairs.size()
     }
 
     pub fn pairs(&self) -> u64 {
-        self.pairs
+        self.pairs.pairs()
+    }
+
+    /// Pairs published with each eye's depth.
+    pub fn pairs_with_depth(&self) -> u64 {
+        self.pairs.pairs_with_depth()
     }
 
     pub fn failures(&self) -> u64 {
-        self.failures
-    }
-
-    fn failed(&mut self) -> Step {
-        self.failures += 1;
-        Step::Failed
-    }
-
-    fn broke(&mut self, why: String) -> Step {
-        log!("{why}; not publishing");
-        self.broken = true;
-        self.failed()
-    }
-
-    /// Makes the channel at the first frame's size, on the game queue's device.
-    fn create(&mut self, buffer: &ID3D12Resource, queue: &ID3D12CommandQueue) -> Result<FenceProducer, String> {
-        let (producer, size) = create_producer(&self.channel, buffer, queue)?;
-        self.size = size;
-        Ok(producer)
+        self.pairs.failures()
     }
 
     /// At present `n` (counted from attachment), before the game's present: keeps the back buffer
@@ -110,109 +91,131 @@ impl AlternatePublisher12 {
     /// `head`). `report` adjusts each eye's pose before it goes out (for example the field of view
     /// actually rendered).
     pub fn before_present(&mut self, swap: &IDXGISwapChain3, queue: &ID3D12CommandQueue, n: u64, head: &HeadSource, report: impl Fn(&mut HeadPose)) -> Step {
+        self.before_present_with_depth(swap, queue, n, |_| None, head, report)
+    }
+
+    /// [`AlternatePublisher12::before_present`] with the frame's depth: `depth` gives it for the
+    /// eye the frame shows (asked only when the schedule says which).
+    pub fn before_present_with_depth(
+        &mut self,
+        swap: &IDXGISwapChain3,
+        queue: &ID3D12CommandQueue,
+        n: u64,
+        depth: impl FnOnce(usize) -> Option<FrameDepth>,
+        head: &HeadSource,
+        report: impl Fn(&mut HeadPose),
+    ) -> Step {
         let Some(eye) = self.schedule.shown_eye(n) else { return Step::Waiting };
         let slots = self.schedule.pair_slots(n);
-        self.show(swap, queue, eye, [self.ring[slots[0]], self.ring[slots[1]]], head, report)
+        self.show(swap, queue, eye, [self.ring[slots[0]], self.ring[slots[1]]], depth(eye), head, report)
     }
 
     /// Like [`AlternatePublisher12::before_present`] for a frame whose eye and head pose are known
     /// exactly (labelled where it was rendered), so no latency is assumed: a left eye is kept with
     /// its pose, and a right eye completes the pair with the left eye kept last.
     pub fn show_labelled(&mut self, swap: &IDXGISwapChain3, queue: &ID3D12CommandQueue, eye: usize, pose: HeadPose, head: &HeadSource, report: impl Fn(&mut HeadPose)) -> Step {
+        self.show_labelled_with_depth(swap, queue, eye, pose, None, head, report)
+    }
+
+    /// [`AlternatePublisher12::show_labelled`] with the frame's `depth` (`None`: it has none, and
+    /// its pair goes without).
+    #[allow(clippy::too_many_arguments)]
+    pub fn show_labelled_with_depth(
+        &mut self,
+        swap: &IDXGISwapChain3,
+        queue: &ID3D12CommandQueue,
+        eye: usize,
+        pose: HeadPose,
+        depth: Option<FrameDepth>,
+        head: &HeadSource,
+        report: impl Fn(&mut HeadPose),
+    ) -> Step {
         if eye == 0 {
             self.left_pose = pose;
         }
-        self.show(swap, queue, eye.min(1), [self.left_pose, pose], head, report)
+        self.show(swap, queue, eye.min(1), [self.left_pose, pose], depth, head, report)
     }
 
-    /// Keeps `eye`'s frame, or with a right eye publishes the pair rendered from `poses`.
-    fn show(&mut self, swap: &IDXGISwapChain3, queue: &ID3D12CommandQueue, eye: usize, poses: [HeadPose; 2], head: &HeadSource, report: impl Fn(&mut HeadPose)) -> Step {
-        if self.broken {
-            return Step::Failed;
+    /// The back buffer about to present, once the channel is there for it (made at the first
+    /// frame's size on the game queue's device).
+    fn back_buffer(&mut self, swap: &IDXGISwapChain3, queue: &ID3D12CommandQueue) -> Result<ID3D12Resource, Step> {
+        if self.pairs.broken() {
+            return Err(Step::Failed);
         }
         // SAFETY: COM calls on the game's live swapchain, on the thread that presents it.
-        let Ok(buffer) = (unsafe { swap.GetBuffer::<ID3D12Resource>(swap.GetCurrentBackBufferIndex()) }) else { return self.failed() };
-        if self.producer.is_none() {
-            match self.create(&buffer, queue) {
-                Ok(producer) => self.producer = Some(producer),
-                Err(why) => return self.broke(why),
-            }
+        let Ok(buffer) = (unsafe { swap.GetBuffer::<ID3D12Resource>(swap.GetCurrentBackBufferIndex()) }) else { return Err(self.pairs.failed()) };
+        if !self.pairs.ready_for(&buffer, queue) {
+            return Err(Step::Failed);
         }
-        // SAFETY: reads a descriptor.
-        let desc = unsafe { buffer.GetDesc() };
-        if (desc.Width as u32, desc.Height) != self.size {
-            // The channel's slots have one size; a resized game needs a new run.
-            let (w, h) = self.size;
-            return self.broke(format!("the game resized from {w}x{h} to {}x{}", desc.Width, desc.Height));
-        }
-        let producer = self.producer.as_mut().expect("created above");
+        Ok(buffer)
+    }
+
+    /// Keeps `eye`'s frame (and its `depth`), or with a right eye publishes the pair rendered from
+    /// `poses`, with both eyes' depth when both frames had it.
+    #[allow(clippy::too_many_arguments)]
+    fn show(
+        &mut self,
+        swap: &IDXGISwapChain3,
+        queue: &ID3D12CommandQueue,
+        eye: usize,
+        poses: [HeadPose; 2],
+        depth: Option<FrameDepth>,
+        head: &HeadSource,
+        report: impl Fn(&mut HeadPose),
+    ) -> Step {
+        let buffer = match self.back_buffer(swap, queue) {
+            Ok(buffer) => buffer,
+            Err(step) => return step,
+        };
         if eye == 0 {
-            return match producer.hold(&buffer, D3D12_RESOURCE_STATE_PRESENT) {
-                Ok(true) => {
-                    self.left_ready = true;
-                    Step::Left
-                }
-                Ok(false) => {
-                    self.left_ready = false;
-                    Step::Waiting
-                }
-                Err(e) => self.broke(format!("left-eye copy failed: {e}")),
+            self.left_ready = self.pairs.hold(&buffer, D3D12_RESOURCE_STATE_PRESENT);
+            self.left_depth = depth
+                .filter(|_| self.left_ready)
+                .and_then(|d| self.pairs.hold_depth(&d.eye.texture, d.eye.state).then_some((d.eye.rect, d.params)));
+            return match (self.left_ready, self.pairs.broken()) {
+                (true, _) => Step::Left,
+                (false, true) => Step::Failed,
+                (false, false) => Step::Waiting,
             };
         }
+        let left_depth = self.left_depth.take();
         if !std::mem::take(&mut self.left_ready) {
             return Step::Unpaired;
         }
-        let Some(held) = producer.held() else { return self.failed() };
-        // The pose record goes out first under the sequence this pair will get, so a viewer that
-        // sees the images always finds their poses.
-        let mut eyes = poses;
-        eyes.iter_mut().filter(|e| e.valid != 0).for_each(&report);
-        let sequence = producer.next_sequence();
-        head.write_pair(sequence, eyes);
-        match producer.publish((&held, D3D12_RESOURCE_STATE_COMMON), (&buffer, D3D12_RESOURCE_STATE_PRESENT), monaka_channel::tick()) {
-            Ok(true) => {
-                self.pairs += 1;
-                self.last = Some((sequence, eyes));
-                Step::Published
-            }
-            Ok(false) => self.failed(),
-            Err(e) => self.broke(format!("publish failed: {e}")),
-        }
+        let Some(held) = self.pairs.held() else { return self.pairs.failed() };
+        // The pair's depth: the kept left eye's and this one's, mapped as the newer frame says.
+        let pair_depth = match (left_depth, depth, self.pairs.held_depth()) {
+            (Some((left_rect, _)), Some(right), Some(left)) => Some(PairDepth {
+                eyes: [EyeDepth12 { texture: left, state: D3D12_RESOURCE_STATE_COMMON, rect: left_rect }, right.eye],
+                params: right.params,
+            }),
+            _ => None,
+        };
+        let eyes = [(&held, D3D12_RESOURCE_STATE_COMMON), (&buffer, D3D12_RESOURCE_STATE_PRESENT)];
+        self.pairs.publish_with_depth(eyes, pair_depth.as_ref(), poses, head, report)
     }
 
-    /// Publishes this frame to both eyes with no pose record: a frame the viewer shows on its flat
-    /// screen (a menu over the game). An eye kept for a pair is let go.
-    pub fn show_flat(&mut self, swap: &IDXGISwapChain3, queue: &ID3D12CommandQueue) -> Step {
-        if self.broken {
-            return Step::Failed;
-        }
-        // SAFETY: COM calls on the game's live swapchain, on the thread that presents it.
-        let Ok(buffer) = (unsafe { swap.GetBuffer::<ID3D12Resource>(swap.GetCurrentBackBufferIndex()) }) else { return self.failed() };
-        if self.producer.is_none() {
-            match self.create(&buffer, queue) {
-                Ok(producer) => self.producer = Some(producer),
-                Err(why) => return self.broke(why),
-            }
-        }
-        // SAFETY: reads a descriptor.
-        let desc = unsafe { buffer.GetDesc() };
-        if (desc.Width as u32, desc.Height) != self.size {
-            let (w, h) = self.size;
-            return self.broke(format!("the game resized from {w}x{h} to {}x{}", desc.Width, desc.Height));
-        }
+    /// At present `n`: this frame to both eyes without head poses, which the viewer shows on its
+    /// flat screen (a menu over the game). Sent at the presents that end a pair, as
+    /// [`crate::alternate::AlternatePublisher::publish_flat`]; an eye kept for a pair is let go.
+    pub fn show_flat(&mut self, swap: &IDXGISwapChain3, queue: &ID3D12CommandQueue, n: u64, head: &HeadSource) -> Step {
+        let Some(eye) = self.schedule.shown_eye(n) else { return Step::Waiting };
         self.left_ready = false;
-        let producer = self.producer.as_mut().expect("created above");
-        match producer.publish((&buffer, D3D12_RESOURCE_STATE_PRESENT), (&buffer, D3D12_RESOURCE_STATE_PRESENT), monaka_channel::tick()) {
-            Ok(true) => Step::Published,
-            Ok(false) => self.failed(),
-            Err(e) => self.broke(format!("publish failed: {e}")),
+        self.left_depth = None;
+        if eye == 0 {
+            return Step::Waiting;
+        }
+        match self.back_buffer(swap, queue) {
+            Ok(buffer) => self.pairs.publish_flat([(&buffer, D3D12_RESOURCE_STATE_PRESENT); 2], head),
+            Err(step) => step,
         }
     }
 
     /// Lets go of the channel (end of a run). Its GPU objects are freed once the GPU is done with
     /// them, or leaked if it never is.
     pub fn close(&mut self) {
-        self.producer = None;
+        self.pairs.close();
         self.left_ready = false;
+        self.left_depth = None;
     }
 }

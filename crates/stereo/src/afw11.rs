@@ -1,12 +1,17 @@
-//! Alternate-eye rendering with depth: every presented frame is one real eye, and the other eye of
-//! the same moment is that frame reprojected with its depth (`monaka_warp::Reprojector`). What the
+//! AFW on D3D11 (alternate-eye rendering with depth): every presented frame is one real eye, and
+//! the other eye of the same moment is that frame reprojected with its depth
+//! (`monaka_warp::Reprojector`). What the
 //! real eye could not see is filled from the other eye's own previous real frame, which saw it from
 //! the right place, so the gaps get rendered pixels instead of stretched ones. A pair goes out
 //! every frame (alternate-eye alone publishes every second frame, a frame apart).
 //!
 //! The game crate captures each frame's world image (before the HUD) and depth with the cameras
-//! it was rendered from ([`Hybrid::capture`]), and publishes at present ([`Hybrid::publish`]).
+//! it was rendered from ([`Afw11::capture`]), and publishes at present ([`Afw11::publish`]).
 
+pub mod ready;
+
+use crate::alternate::Step;
+use crate::publish::{Tally, copy_into, record_first};
 use monaka_channel::keyed::LazyWriter;
 use monaka_channel::pose::HeadSource;
 use monaka_channel::{ChannelName, d3d};
@@ -33,7 +38,7 @@ struct Real {
     cameras: EyeCameras,
 }
 
-pub struct Hybrid {
+pub struct Afw11 {
     reprojector: Reprojector,
     real: [Option<Real>; 2],
     /// The eye captured last (this frame's real eye).
@@ -44,11 +49,10 @@ pub struct Hybrid {
     hud: Option<HudLayer>,
     hud_begun: bool,
     hud_views: Option<[ID3D11RenderTargetView; 2]>,
-    pairs: u64,
-    failures: u64,
+    tally: Tally,
 }
 
-impl Hybrid {
+impl Afw11 {
     pub fn new(device: &ID3D11Device, channel: ChannelName) -> Result<Self, monaka_warp::Error> {
         Ok(Self {
             reprojector: Reprojector::new(device)?,
@@ -59,12 +63,11 @@ impl Hybrid {
             hud: None,
             hud_begun: false,
             hud_views: None,
-            pairs: 0,
-            failures: 0,
+            tally: Tally::NEW,
         })
     }
 
-    /// Takes the HUD as a layer laid over both eyes ([`Hybrid::hud_targets`]) instead of leaving
+    /// Takes the HUD as a layer laid over both eyes ([`Afw11::hud_targets`]) instead of leaving
     /// it in the real eye's image only.
     pub fn enable_hud(&mut self, device: &ID3D11Device) -> Result<(), monaka_warp::Error> {
         self.hud = Some(HudLayer::new(device)?);
@@ -87,21 +90,21 @@ impl Hybrid {
                 Some(targets)
             }
             Err(e) => {
-                if self.failures == 0 {
+                if self.tally.failures == 0 {
                     log!("HUD layer unavailable: {e}");
                 }
-                self.failures += 1;
+                self.tally.failures += 1;
                 None
             }
         }
     }
 
     pub fn pairs(&self) -> u64 {
-        self.pairs
+        self.tally.pairs
     }
 
     pub fn failures(&self) -> u64 {
-        self.failures
+        self.tally.failures
     }
 
     /// The frame for eye `eye` is complete before its HUD: keep its world image and depth with
@@ -114,10 +117,10 @@ impl Hybrid {
                 self.latest = Some(eye);
             }
             Err(e) => {
-                if self.failures == 0 {
-                    log!("hybrid capture failed: {e}");
+                if self.tally.failures == 0 {
+                    log!("frame warping capture failed: {e}");
                 }
-                self.failures += 1;
+                self.tally.failures += 1;
                 self.latest = None;
             }
         }
@@ -153,32 +156,27 @@ impl Hybrid {
         let synthesized = match self.reprojector.run(context, &view, &real.frame, fill) {
             Ok(image) => image.clone(),
             Err(e) => {
-                if self.failures == 0 {
-                    log!("hybrid reprojection failed: {e}");
+                if self.tally.failures == 0 {
+                    log!("frame warping reprojection failed: {e}");
                 }
-                self.failures += 1;
+                self.tally.failures += 1;
                 return false;
             }
         };
         // The real eye's finished image, copied so the game can reuse its back buffer (typeless,
         // so an sRGB back buffer is read as stored).
-        if self.shown.as_ref().is_none_or(|s| d3d::texture_desc(s).Width != desc.Width || d3d::texture_desc(s).Height != desc.Height) {
-            let copy = D3D11_TEXTURE2D_DESC { Format: DXGI_FORMAT_R8G8B8A8_TYPELESS, ..d3d::private_copy_desc(&desc) };
-            self.shown = d3d::create_texture(device, &copy).ok();
-        }
-        let Some(shown) = self.shown.clone() else { return false };
-        // SAFETY: copies the back buffer into a same-shaped texture of its family on its device.
-        unsafe { context.CopyResource(&shown, final_image) };
+        let copy = D3D11_TEXTURE2D_DESC { Format: DXGI_FORMAT_R8G8B8A8_TYPELESS, ..d3d::private_copy_desc(&desc) };
+        let Some(shown) = copy_into(&mut self.shown, device, context, final_image, &copy).cloned() else { return false };
         let mut images = if eye == 0 { [shown, synthesized] } else { [synthesized, shown] };
         if hud_drawn && let Some(layer) = self.hud.as_mut() {
             for (slot, image) in images.iter_mut().enumerate() {
                 match layer.composite(context, slot, image, hud_rects[slot]) {
                     Ok(with_hud) => *image = with_hud.clone(),
                     Err(e) => {
-                        if self.failures == 0 {
+                        if self.tally.failures == 0 {
                             log!("HUD composite failed: {e}");
                         }
-                        self.failures += 1;
+                        self.tally.failures += 1;
                     }
                 }
             }
@@ -188,21 +186,14 @@ impl Hybrid {
         let Some(writer) = self.writer.get(device, desc.Width, desc.Height).ready(|note| log!("{note} (alternate-eye with depth)")) else { return false };
         let mut pose = cameras.pose;
         report(&mut pose);
-        head.write_pair(writer.next_sequence(), [pose, pose]);
-        match writer.publish(context, [&images[0], &images[1]], monaka_channel::tick()) {
-            Ok(true) => {
-                self.pairs += 1;
-                true
-            }
-            Ok(false) => {
-                self.failures += 1;
-                false
-            }
+        record_first(head, writer.next_sequence(), [pose, pose], |_| {});
+        match self.tally.count(writer.publish(context, [&images[0], &images[1]], monaka_channel::tick())) {
+            Ok(step) => step == Step::Published,
             Err(e) => {
-                if self.failures == 0 {
+                if self.tally.failures == 0 {
                     log!("publish failed: {e}");
                 }
-                self.failures += 1;
+                self.tally.failures += 1;
                 false
             }
         }

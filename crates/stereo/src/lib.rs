@@ -6,13 +6,38 @@
 //!   presents counted, the next eye and pose chosen, pairs published), for any game drawing one
 //!   eye per frame.
 //! - [`feature`]: the present loop as a ready-made component (`present()`).
+//! - [`same_frame`]: the same-frame present loop (both eyes of a pair in one simulation frame) as a
+//!   ready-made component (`same_frame()`), over D3D11, D3D12 or an OpenGL frame holding both eyes.
+//! - [`providers`]: what a game provides once and every ready-made feature reads: its frame labels,
+//!   its frame inputs (collected by the ready-made `frame_inputs()`), its HUD layer.
+//! - [`depth_layer`]: each eye's depth to the headset with its pair, its component ready-made
+//!   (`depth_layer()`).
+//! - [`eye_site`]: the hook where the game's camera becomes an eye: its provider (`EyeSite`), the
+//!   shared recipe at a call (`draw`), its component ready-made (`eyes()`).
+//! - [`eye_size`]: rendering at the headset's eye size as a ready-made component (`eye_size()`).
+//! - [`foveate12`]: eye-tracked foveated rendering through variable rate shading on D3D12, its
+//!   component ready-made (`foveation()`).
+//! - [`upscaler`]: a game's own temporal upscaler kept per eye, its component ready-made
+//!   (`per_eye()`).
 //! - [`alternate`]: alternate-eye rendering, each presented frame one eye (D3D11 swapchains).
 //! - [`alternate12`]: the same over a D3D12 swapchain and the fence channel.
 //! - [`pairs11`]: same-frame pairs over a D3D11 swapchain, each eye copied at its present.
 //! - [`pairs12`]: any two D3D12 textures published as one pair, each eye with its own pose.
-//! - [`hybrid`]: alternate-eye rendering with depth: a pair every frame, the other eye reprojected
-//!   from the real one and its gaps filled from that eye's own last real frame.
-//! - [`hud11`]: a D3D11 game's HUD placed in front of each eye (viewport of the draws after the scene copy).
+//! - [`afw11`]: AFW on D3D11 (alternate-eye rendering with depth): a pair every frame, the other eye
+//!   reprojected from the real one and its gaps filled from that eye's own last real frame.
+//! - [`afw12`]: the same on D3D12 (alternate frame warping): the real eye warped into the other
+//!   at the same head pose, a pair of one moment at every present, both eyes' depth with it; its
+//!   components ready-made (`frame_warping()`, `frame_generation()`).
+//! - [`framegen12`]: per-eye FSR frame generation for alternate eyes, its component ready-made
+//!   (`per_eye()`), and for same-frame pairs (`pairs::per_eye_pairs()`).
+//! - [`hud_layer`]: the HUD layer's base component (`hud_layer()`): the feature, the HUD's size and
+//!   distance options, on while the HUD is shown; every method's HUD component builds on it.
+//! - [`hud11`]: a D3D11 game's HUD placed in front of each eye (viewport of the draws after the
+//!   scene copy).
+//! - [`hudover12`]: a D3D12 game's UI layer laid back over each eye frame at the HUD's place, on
+//!   [`framepass12`], a compute pass over a swapchain frame.
+//! - [`lists12`]: one hook point for a D3D12 game's command lists, from its queue, shared by the
+//!   features that watch or add to them (foveation, a HUD layer from the game's draws).
 //! - [`present`]: DXGI's Present hooked for a game whose swapchain is out of reach.
 //! - [`queue12`]: the game's D3D12 direct queue, caught at `ExecuteCommandLists`, for a game whose
 //!   engine keeps it out of reach.
@@ -21,14 +46,30 @@
 //! Depth-based stereo from a single centre render is `monaka_warp`, with its math in
 //! `monaka_core::depth`.
 
+pub mod afw11;
+pub mod afw12;
 pub mod alternate;
 pub mod alternate12;
+pub mod depth_layer;
 pub mod driver;
+pub mod eye_site;
+pub mod eye_size;
 pub mod feature;
+pub mod foveate12;
+pub mod framegen12;
+pub mod framepass12;
 pub mod hud11;
-pub mod hybrid;
+pub mod hud_layer;
+pub mod hud_panels;
+pub mod hudover12;
+pub mod lists12;
 pub mod pairs11;
 pub mod pairs12;
+pub mod panel11;
 pub mod present;
+pub mod providers;
+mod publish;
 pub mod queue12;
+pub mod same_frame;
 pub mod swapchain_queue;
+pub mod upscaler;

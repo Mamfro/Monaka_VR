@@ -386,6 +386,7 @@ mod tests {
         licences: &[],
         left_hand_aims: false,
         weapon_ring: false,
+        controls: &[],
     };
 
     /// Stands in for reading a DLL: a file whose text is `pack <contract>` is a pack of [`GAME`]

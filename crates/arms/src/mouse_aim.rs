@@ -21,10 +21,11 @@
 //! Dishonored: Blink, Far Reach, Domino...) and a little after it is let go.
 //!
 //! A game may weaken its stick look while mouse counts come in, so once calibrated the right
-//! stick is taken from the pad ([`monaka_pad::take_right_stick`]) and turns the body instead (at a
-//! set speed): the game sees one look device.
+//! stick is taken from the pad ([`monaka_pad::take_right_stick`]) and turns the body instead
+//! ([`StickTurn`]): the game sees one look device.
 
 use monaka_core::camera::{direction_yaw_pitch, pointing_yaw_pitch};
+use monaka_core::pad::{StickTurn, TurnLatch};
 use monaka_core::protocol::{HeadPose, LEFT_HAND};
 use monaka_pad::mouse;
 use monaka_producer::log;
@@ -97,9 +98,9 @@ pub struct MouseAim {
     /// inverted). The aim is steered, so a scale somewhat off only slows it a little, and the start
     /// needs no probes twitching the view. `None`: measured at the start.
     pub usual_scale: Option<[f32; 2]>,
-    /// The right stick turns the body at these speeds (degrees per second, yaw and pitch), or with
-    /// `native_stick` the game turns with it (stick pitch is never the game's).
-    pub stick_speed: [f32; 2],
+    /// How the right stick turns the body, yaw and pitch (a pitch at speed 0 never pitches it), or
+    /// with `native_stick` the game turns with it (stick pitch is never the game's).
+    pub stick_turn: [StickTurn; 2],
     pub native_stick: bool,
     /// The left controller aims while the left trigger is held ([`power_hand`]); `rig`: the arms
     /// are on the controllers (the palm's line converges with the game's aim ray).
@@ -163,8 +164,9 @@ struct State {
     /// Probes the game read without turning, and how many builds a settle lasts.
     no_turns: u32,
     settle_builds: u32,
-    /// Stick turning speeds (degrees per second, yaw and pitch) and the last build's time.
-    stick_speed: [f32; 2],
+    /// Stick turning (yaw and pitch), a snap's latch, and the last build's time.
+    stick_turn: [StickTurn; 2],
+    latch: TurnLatch,
     last_build: Option<Instant>,
     /// The game turns with the stick itself ([`take_stick`]); while the stick is pushed (and until
     /// [`NATIVE_SETTLE`] after) the body follows the game's turn. `stick_push`: since when, and
@@ -200,7 +202,8 @@ static STATE: Mutex<State> =
     attempts: 0,
     no_turns: 0,
     settle_builds: 20,
-    stick_speed: [0.0; 2],
+    stick_turn: [StickTurn::smooth(0.0); 2],
+    latch: TurnLatch::new(),
     last_build: None,
     native_stick: false,
     native_until: None,
@@ -227,12 +230,13 @@ fn give_stick() {
 
 /// Starts steering the game's aim (see [`MouseAim`]).
 pub fn start(aim: MouseAim) {
-    let MouseAim { scale, usual_scale, stick_speed, native_stick, power_aim, rig, pointer, left_weapon } = aim;
+    let MouseAim { scale, usual_scale, stick_turn, native_stick, power_aim, rig, pointer, left_weapon } = aim;
     let mut state = STATE.locked();
     state.usual = usual_scale;
     state.pointer = pointer;
     state.left_weapon = left_weapon;
-    state.stick_speed = stick_speed;
+    state.stick_turn = stick_turn;
+    state.latch = TurnLatch::new();
     state.native_stick = native_stick;
     state.native_until = None;
     state.stick_push = None;
@@ -420,9 +424,10 @@ pub fn on_build(camera: [f32; 2], pose: &HeadPose) -> Option<[f32; 2]> {
     let native_turning = state.native_stick && native_turn(&mut state, now, camera[0]);
     if let Some(stick) = monaka_pad::right_stick(STICK_MAX_AGE_MS).filter(|_| !state.native_stick) {
         // Stick right turns right (yaw, left positive, goes down); stick up looks up.
-        let [x, y] = stick.map(monaka_core::pad::turn_response);
-        body[0] = turned(body[0] - x * state.stick_speed[0] * step, 0.0);
-        body[1] = (body[1] + y * state.stick_speed[1] * step).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        let [yaw, pitch] = state.stick_turn;
+        let (right, up) = (yaw.turn(stick[0], step, &mut state.latch), pitch.turn(stick[1], step, &mut TurnLatch::new()));
+        body[0] = turned(body[0] - right, 0.0);
+        body[1] = (body[1] + up).clamp(-PITCH_LIMIT, PITCH_LIMIT);
     }
     let in_flight = mouse::pending();
     let target = [turned(body[0] + aimed[0], 0.0), (body[1] + aimed[1]).clamp(-PITCH_LIMIT, PITCH_LIMIT)];
@@ -516,7 +521,7 @@ fn power_hand(state: &mut State) -> Option<[f32; 2]> {
 /// or let go within [`NATIVE_SETTLE`]). Logs each push's turn rate, for comparing the game's stick
 /// look with and without mouse counts coming in.
 fn native_turn(state: &mut State, now: Instant, camera_yaw: f32) -> bool {
-    let pushed = monaka_pad::right_stick(STICK_MAX_AGE_MS).is_some_and(|[x, _]| monaka_core::pad::turn_response(x) != 0.0);
+    let pushed = monaka_pad::right_stick(STICK_MAX_AGE_MS).is_some_and(|[x, _]| state.stick_turn[0].pushed(x));
     if pushed {
         state.native_until = Some(now + NATIVE_SETTLE);
         state.stick_push.get_or_insert((now, camera_yaw));

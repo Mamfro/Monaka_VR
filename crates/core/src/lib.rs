@@ -27,6 +27,7 @@ pub mod pe;
 pub mod png;
 pub mod protocol;
 pub mod reach;
+pub mod rendering;
 pub mod scan;
 pub mod sha256;
 pub mod situation;

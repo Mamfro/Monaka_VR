@@ -1,9 +1,10 @@
 //! HUD pieces the game publishes on their own (`<channel>-panel-<piece>`, texture channels of
 //! either transport, premultiplied RGBA: the minimap, the quests, the weapon widget, health, the
-//! quick item), shown on the hands: each a quad in its controller's grip space, so the runtime
-//! moves it with the hand at the headset's own rate, on the back of the hand or above the palm. A
-//! channel appears only when the producer has that piece (Dying Light 1 and 2 with the dynamic
-//! HUD); until then it is looked for now and then.
+//! quick item, a second gun's ammo in the left hand), shown on the hands: each a quad in its
+//! controller's grip space, so the runtime moves it with the hand at the headset's own rate, on the
+//! back of the hand or above the palm. A channel appears only when the producer has that piece
+//! (Dying Light 1 and 2 with the dynamic HUD, Wolfenstein with the in-world HUD); until then it is
+//! looked for now and then.
 
 use monaka_channel::d3d::{self, create_texture, simple_texture_desc};
 use monaka_channel::reader::{self, AnyReader};

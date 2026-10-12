@@ -15,10 +15,14 @@
 //! screen anchored in the room in front of where the head faced. Where each controller points
 //! (its aim pose) and where it sits in the hand (its grip pose) go to the game through the hand
 //! block, for hand aim and for putting the game's hand on the controller, steadied first
-//! ([`smooth`]).
+//! ([`smooth`]). Where the eyes look goes with each head pose when the headset tracks them
+//! ([`gaze`]), and each eye's depth goes with the projection layer when the producer sends it and
+//! the runtime takes it ([`depth`]).
 #![deny(unsafe_code)]
 
 mod console;
+mod depth;
+mod gaze;
 mod pad;
 mod panel;
 mod reach;
@@ -142,8 +146,8 @@ fn parse_args() -> Result<Args, String> {
             }
             // A launcher without a console stops the viewer by setting this event.
             "--stop-event" => console::watch_stop_event(&value)?,
-            // Eye tracking is not implemented; the flag is accepted and ignored for launch scripts
-            // that pass it.
+            // Accepted and ignored for launch scripts that pass it: the gaze goes to the game with
+            // every head pose when the headset tracks the eyes.
             "--gaze-log" => {}
             _ => return Err(format!("unknown argument {flag}")),
         }
@@ -200,15 +204,32 @@ fn pose(orientation: Quat, position: Vec3) -> Posef {
     Posef { orientation: Quaternionf { x, y, z, w }, position: Vector3f { x: px, y: py, z: pz } }
 }
 
+/// What the runtime offers for eye tracking, through either extension.
+fn eye_tracking_report(instance: &Instance, system: monaka_openxr::SystemId) -> [String; 2] {
+    let report = |name: &std::ffi::CStr, supported: bool| {
+        let state = if supported {
+            "supported"
+        } else if instance.has_extension(name) {
+            "offered, but this headset reports no eye tracking"
+        } else {
+            "not offered"
+        };
+        format!("Eye tracking ({}): {state}", name.to_string_lossy())
+    };
+    [report(sys::EXT_EYE_GAZE_INTERACTION, instance.eye_gaze(system)), report(sys::FB_EYE_TRACKING_SOCIAL, instance.eye_tracking_fb(system))]
+}
+
 #[derive(Default)]
 struct Stats {
     frames: u64,
     visible: u64,
     pairs: u64,
     poses_written: u64,
+    gazes: u64,
     hands_written: u64,
     fingers_written: u64,
     projected: u64,
+    with_depth: u64,
 }
 
 /// Controller profiles whose aim and grip poses the viewer suggests; the runtime uses whichever
@@ -281,6 +302,11 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
             "Recommended eye image {eye}: {}x{} (max {}x{})",
             v.recommendedImageRectWidth, v.recommendedImageRectHeight, v.maxImageRectWidth, v.maxImageRectHeight
         );
+    }
+    let depth_state = if instance.depth_layer() { "offered" } else { "not offered" };
+    println!("Depth layer ({}): {depth_state}", sys::KHR_COMPOSITION_LAYER_DEPTH.to_string_lossy());
+    for line in eye_tracking_report(&instance, system) {
+        println!("{line}");
     }
     let Some(producer) = producer else {
         // --info: the DL2 launcher renders the game at this size.
@@ -360,20 +386,44 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
         }
         println!("Controller profiles: {}", if profiles.is_empty() { "none accepted".into() } else { profiles.join(", ") });
     }
+    // Eye gaze as a pose action in the same set, bound through its own interaction profile.
+    let gaze_action = actions.as_ref().filter(|_| instance.eye_gaze(system)).and_then(|set| {
+        let action = set.pose_action("gaze", "Eye gaze", &[]).map_err(|e| println!("No eye gaze action: {e}")).ok()?;
+        instance.suggest_bindings(gaze::PROFILE, &[(&action, gaze::BINDING)]).map_err(|e| println!("No eye gaze binding: {e}")).ok()?;
+        Some(action)
+    });
 
     let session = instance.create_session(system, &device)?;
     let local = session.reference_space(sys::REFERENCE_SPACE_TYPE_LOCAL)?;
     let view_space = session.reference_space(sys::REFERENCE_SPACE_TYPE_VIEW)?;
-    let controllers = match (&actions, &aim, &grip) {
-        (Some(set), Some(aim), Some(grip)) => (|| -> monaka_openxr::Result<_> {
-            session.attach(&[set])?;
+    // The action set is attached once, with all its actions: the controllers' and the gaze's.
+    let attached = actions
+        .as_ref()
+        .filter(|_| (aim.is_some() && grip.is_some()) || gaze_action.is_some())
+        .filter(|set| session.attach(&[set]).map_err(|e| println!("No controller input: {e}")).is_ok());
+    let controllers = match (attached, &aim, &grip) {
+        (Some(_), Some(aim), Some(grip)) => (|| -> monaka_openxr::Result<_> {
             let spaces = |action| -> monaka_openxr::Result<_> { Ok([session.action_space(action, hand_paths[0])?, session.action_space(action, hand_paths[1])?]) };
-            Ok((set, [(aim, spaces(aim)?), (grip, spaces(grip)?)]))
+            Ok([(aim, spaces(aim)?), (grip, spaces(grip)?)])
         })()
         .map_err(|e| println!("No controller input: {e}"))
         .ok(),
         _ => None,
     };
+    // Where the eyes look, from the gaze action, else from Meta's eye tracker.
+    let gaze_source = match (attached, &gaze_action) {
+        (Some(_), Some(action)) => session.action_space(action, sys::NULL_HANDLE).map(|space| gaze::Source::Action(action, space)).map_err(|e| println!("No eye gaze space: {e}")).ok(),
+        _ => None,
+    }
+    .or_else(|| instance.eye_tracking_fb(system).then(|| session.eye_tracker().map(gaze::Source::Tracker).map_err(|e| println!("No eye tracker: {e}")).ok()).flatten());
+    println!(
+        "{}",
+        match &gaze_source {
+            Some(gaze::Source::Action(..)) => "Eye gaze on (XR_EXT_eye_gaze_interaction), sent with each head pose",
+            Some(gaze::Source::Tracker(_)) => "Eye gaze on (XR_FB_eye_tracking_social), sent with each head pose",
+            None => "No eye gaze (the headset or runtime offers none)",
+        }
+    );
     let mut hands_out = controllers.as_ref().and_then(|_| HandChannel::open(name).ok());
     // Fingers, where the headset tracks them (from the controllers' finger sensing, or cameras).
     let finger_trackers: Option<[_; 2]> = instance
@@ -399,7 +449,8 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
     let mut reticle_aims = if args.reticles.contains(&true) { ReticleChannel::open(name).ok() } else { None };
     println!("Forward follows the headset: use its centre/recentre control.");
 
-    let format = swapchain_format(&session.swapchain_formats()?, &producer).ok_or("runtime has no image format matching the game's")?;
+    let offered_formats = session.swapchain_formats()?;
+    let format = swapchain_format(&offered_formats, &producer).ok_or("runtime has no image format matching the game's")?;
     let swapchains = [
         session.create_swapchain(format as i64, producer.width, producer.height)?,
         session.create_swapchain(format as i64, producer.width, producer.height)?,
@@ -418,13 +469,14 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
             *reticle = Some(swapchain);
         }
     }
-    // HUD pieces the game publishes on their own, on the right hand.
+    // HUD pieces the game publishes on their own, on the hands.
     let mut hand_panels = [
         panel::HandPanel::new(name, format, "minimap", RIGHT_HAND, panel::Side::BackOfHand, panel::HAND_WIDTH, false),
         panel::HandPanel::new(name, format, "quests", RIGHT_HAND, panel::Side::BackOfHand, panel::QUESTS_WIDTH, true),
         panel::HandPanel::new(name, format, "weapon", RIGHT_HAND, panel::Side::Palm, panel::HAND_WIDTH, false),
         panel::HandPanel::new(name, format, "health", LEFT_HAND, panel::Side::BackOfHand, panel::HAND_WIDTH, false),
         panel::HandPanel::new(name, format, "tool", LEFT_HAND, panel::Side::Palm, panel::ICON_WIDTH, false),
+        panel::HandPanel::new(name, format, "weapon_left", LEFT_HAND, panel::Side::Palm, panel::HAND_WIDTH, false),
     ];
     let source_format = if producer.fence { producer.format } else { format };
     let mut source_desc = simple_texture_desc(producer.width, producer.height, DXGI_FORMAT(source_format as i32));
@@ -460,6 +512,10 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
     let mut rendered: Option<RenderedPair> = None;
     let mut last_head: Option<HeadPose> = None;
     let mut screen: Option<Posef> = None;
+    // The newest pair's depth, read only when the runtime takes depth, and its swapchains.
+    let depth_layer = instance.depth_layer();
+    let mut pair_depth: Option<monaka_channel::fence::ReadDepth> = None;
+    let mut depth_chains: Option<depth::DepthChains<'_>> = None;
     let image_aspect = producer.height as f32 / (producer.width as f32 * args.pixel_aspect);
     println!("Live stereo; update cadence set by the producer. Ctrl+C exits.");
 
@@ -501,10 +557,19 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
 
         let frame = session.wait_frame()?;
         session.begin_frame()?;
+        // The actions are read once a frame, before the head pose: the gaze goes out with it.
+        let synced = attached.is_some_and(|set| session.sync(set).is_ok());
         if let Some(located) = session.locate_views(&local, frame.display_time)? {
             let positions = [vec3(located[0].pose.position), vec3(located[1].pose.position)];
             let fov = [fov_angles(located[0].fov), fov_angles(located[1].fov)];
-            let head = math::head_from_views(quat(located[0].pose.orientation), positions, fov);
+            let mut head = math::head_from_views(quat(located[0].pose.orientation), positions, fov);
+            let gaze_readable = |source: &gaze::Source<'_>| synced || matches!(source, gaze::Source::Tracker(_));
+            if let Some(source) = gaze_source.as_ref().filter(|s| gaze_readable(s))
+                && let Some(gaze) = source.read(&session, &view_space, frame.display_time, tick())
+            {
+                head.gaze = gaze;
+                stats.gazes += 1;
+            }
             if poses.as_mut().is_some_and(|p| p.write_head(&head)) {
                 stats.poses_written += 1;
             }
@@ -512,8 +577,8 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
         }
         let mut aiming: [Option<(HandPose, HandPose)>; 2] = [None, None];
         let mut grip_poses = [HandPose::default(); 2];
-        if let Some((set, poses_of)) = &controllers
-            && session.sync(set).is_ok()
+        if let Some(poses_of) = &controllers
+            && synced
         {
             // Aim poses, then grip poses, of both hands.
             let mut located = [[HandPose::default(); 2]; 2];
@@ -582,11 +647,18 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
         }
         let mut layers = Vec::new();
         if frame.should_render {
-            if let Some(pair) = input.read(&context, eyes, seen)? {
+            let read = if depth_layer { input.read_with_depth(&context, eyes, seen)? } else { input.read(&context, eyes, seen)?.map(|pair| (pair, None)) };
+            if let Some((pair, depth)) = read {
                 seen = pair.sequence;
                 stats.pairs += 1;
                 last_pair_at = tick();
                 rendered = poses.as_mut().and_then(|p| p.read_pair(seen)).filter(|p| p.eyes.iter().all(|e| e.valid != 0));
+                pair_depth = depth;
+                if let Some(depth) = &pair_depth
+                    && !depth_chains.as_ref().is_some_and(|chains| chains.fits(depth))
+                {
+                    depth_chains = Some(depth::DepthChains::new(&session, &offered_formats, depth));
+                }
             }
             for hand_panel in &mut hand_panels {
                 hand_panel.update(&session, &device, &context);
@@ -599,13 +671,23 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
             }
             if let Some(pair) = &rendered {
                 screen = None;
-                let view = |eye: usize| {
+                // Each eye's depth, when the pair came with it and it has swapchains.
+                let depth_views = match (&pair_depth, &depth_chains, input.depth_textures()) {
+                    (Some(depth), Some(chains), Some(sources)) => chains.fill(&context, sources, depth),
+                    _ => None,
+                };
+                let mut depth_views = depth_views.map(|[left, right]| [Some(left), Some(right)]).unwrap_or([None, None]);
+                if depth_views[0].is_some() {
+                    stats.with_depth += 1;
+                }
+                let mut view = |eye: usize| {
                     let e = &pair.eyes[eye];
                     let [left, right, up, down] = e.fov[eye];
                     ProjectionView {
                         pose: pose(e.orientation, math::eye_position(e, eye)),
                         fov: Fovf { angleLeft: left, angleRight: right, angleUp: up, angleDown: down },
                         swapchain: &swapchains[eye],
+                        depth: depth_views[eye].take(),
                     }
                 };
                 layers.push(Layer::Projection { space: &local, views: [view(0), view(1)] });
@@ -660,8 +742,8 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
     }
 
     println!(
-        "Frame cycles: {}; stereo image submissions: {}; pairs received: {}; head poses sent: {}; hand records sent: {}; finger records sent: {}; projection-layer frames: {}",
-        stats.frames, stats.visible, stats.pairs, stats.poses_written, stats.hands_written, stats.fingers_written, stats.projected
+        "Frame cycles: {}; stereo image submissions: {}; pairs received: {}; head poses sent: {} ({} with eye gaze); hand records sent: {}; finger records sent: {}; projection-layer frames: {} ({} with depth)",
+        stats.frames, stats.visible, stats.pairs, stats.poses_written, stats.gazes, stats.hands_written, stats.fingers_written, stats.projected, stats.with_depth
     );
     Ok(if stats.visible > 0 { 0 } else { 2 })
 }

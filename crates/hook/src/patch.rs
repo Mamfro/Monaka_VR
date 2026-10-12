@@ -43,6 +43,15 @@ impl<F> Clone for Site<F> {
 
 impl<F> Copy for Site<F> {}
 
+impl<F> std::fmt::Debug for Site<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.export {
+            Some(export) => write!(f, "{} ({export})", self.name),
+            None => write!(f, "{} (+{:#x})", self.name, self.rva),
+        }
+    }
+}
+
 impl<F> Site<F> {
     /// # Safety
     /// At `rva`, in the module the site is used with, starts a function of type `F` (a function
@@ -67,6 +76,24 @@ impl<F> Site<F> {
             Some(export) => module.export(export).ok_or_else(|| Error::Refused(format!("{}: {export} is not exported", self.name))),
             None => Ok(module.at(self.rva)),
         }
+    }
+
+    /// The site's function in `module`, to call: every instruction the site describes checked
+    /// first, so the call goes to the code the build table measured.
+    pub fn function(&self, module: &Module) -> Result<F>
+    where
+        F: Copy,
+    {
+        assert!(size_of::<F>() == size_of::<usize>(), "{}: a site's type is a function pointer", self.name);
+        let address = self.address(module)?;
+        let expected: Vec<u8> = self.prologue.iter().flat_map(|i| i.bytes.iter().copied()).collect();
+        let mut actual = vec![0u8; expected.len()];
+        if expected.is_empty() || !mem::read_bytes(address, &mut actual) || actual != expected {
+            return Err(Error::Signature(self.name.to_owned()));
+        }
+        // SAFETY: the site's declaration ([`Site::new`]) is the claim that a function of type `F`
+        // starts here in this module, and its code was just checked; `F` is pointer-sized.
+        Ok(unsafe { std::mem::transmute_copy::<usize, F>(&address) })
     }
 }
 

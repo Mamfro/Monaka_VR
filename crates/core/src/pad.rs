@@ -1,6 +1,10 @@
 //! A gamepad made from VR controllers: the viewer turns its OpenXR actions into one Xbox-layout
 //! pad ([`Gamepad`], XInput's `XINPUT_GAMEPAD`), a producer hands it to the game's own gamepad
-//! input, merged with a real pad when one is plugged in ([`merge`]).
+//! input, merged with a real pad when one is plugged in ([`merge`]). A producer that turns the
+//! player itself with the right stick does it through [`StickTurn`].
+
+use crate::manifest::Manifest;
+use crate::options::Options;
 
 /// XInput's `XINPUT_GAMEPAD`: buttons, triggers 0..255, sticks -32768..32767 (up positive).
 #[repr(C)]
@@ -36,14 +40,88 @@ pub mod button {
 /// Below this a VR stick reads as centred, so a resting controller's drift never moves the game.
 pub const STICK_DEADZONE: f32 = 0.12;
 
-/// Stick deflection a producer's own turning ignores around the centre ([`turn_response`]).
+/// Stick deflection a producer's own smooth turning ignores around the centre
+/// ([`StickTurn::smooth`]).
 pub const TURN_DEADZONE: f32 = 0.15;
 
-/// A stick axis (-1..=1) a producer turns the player with: past [`TURN_DEADZONE`], rescaled to
-/// -1..=1 and eased in for fine control.
-pub fn turn_response(v: f32) -> f32 {
-    let past = ((v.abs() - TURN_DEADZONE) / (1.0 - TURN_DEADZONE)).clamp(0.0, 1.0);
-    v.signum() * past.powf(1.5)
+/// How a producer's own turning takes a stick axis (-1..=1, right positive). The turn it gives is
+/// in degrees, right positive as the stick is; each producer applies it to its own heading.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StickTurn {
+    /// Turning while the stick is pushed: past `dead_zone` the push is rescaled to 0..=1 and raised
+    /// to `ease` (1 straight; more eases in for fine control), `speed` degrees a second at full tilt.
+    Smooth { speed: f32, dead_zone: f32, ease: f32 },
+    /// A turn of `degrees` once the stick is pushed past `at`; the next once it has come back
+    /// within `release` ([`TurnLatch`]).
+    Snap { degrees: f32, at: f32, release: f32 },
+}
+
+/// A snap turn's latch: set by a snap, cleared once the stick comes back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TurnLatch {
+    snapped: bool,
+}
+
+impl TurnLatch {
+    pub const fn new() -> Self {
+        Self { snapped: false }
+    }
+}
+
+impl StickTurn {
+    /// A smooth turn at `speed` degrees a second, past [`TURN_DEADZONE`] and eased in.
+    pub const fn smooth(speed: f32) -> Self {
+        Self::Smooth { speed, dead_zone: TURN_DEADZONE, ease: 1.5 }
+    }
+
+    /// A 30 degree snap past seven tenths of the stick's travel, again once it is back within three.
+    pub const SNAP: Self = Self::Snap { degrees: 30.0, at: 0.7, release: 0.3 };
+
+    /// The turn the `turn` option asks for ([`crate::manifest::TURN`]; the game's default when
+    /// unset): `smooth` or `snap`.
+    pub fn from_options(options: &Options, manifest: &Manifest, smooth: StickTurn, snap: StickTurn) -> StickTurn {
+        let snapping = options.choice("turn", &[("smooth", false), ("snap", true)], manifest.choice_default("turn") == Some("snap"));
+        if snapping { snap } else { smooth }
+    }
+
+    /// A smooth turn's share of its full speed for the stick at `x` (-1..=1, signed as the
+    /// stick): 0 within the dead zone. A snap's is 0.
+    pub fn share(&self, x: f32) -> f32 {
+        match *self {
+            Self::Smooth { dead_zone, ease, .. } => {
+                let past = ((x.abs() - dead_zone) / (1.0 - dead_zone)).clamp(0.0, 1.0);
+                x.signum() * past.powf(ease)
+            }
+            Self::Snap { .. } => 0.0,
+        }
+    }
+
+    /// Whether the stick at `x` is pushed far enough to turn.
+    pub fn pushed(&self, x: f32) -> bool {
+        match *self {
+            Self::Smooth { .. } => self.share(x) != 0.0,
+            Self::Snap { at, .. } => x.abs() > at,
+        }
+    }
+
+    /// How far the stick at `x` turns over `seconds` (degrees, right positive): a smooth turn by
+    /// its share of the speed, a snap once per push (`latch`).
+    pub fn turn(&self, x: f32, seconds: f32, latch: &mut TurnLatch) -> f32 {
+        match *self {
+            Self::Smooth { speed, .. } => self.share(x) * speed * seconds,
+            Self::Snap { degrees, at, release } => {
+                if !latch.snapped && x.abs() > at {
+                    latch.snapped = true;
+                    degrees * x.signum()
+                } else {
+                    if x.abs() < release {
+                        latch.snapped = false;
+                    }
+                    0.0
+                }
+            }
+        }
+    }
 }
 
 /// A stick axis (-1..1) as XInput's, with [`STICK_DEADZONE`] taken out and the rest rescaled.
@@ -98,13 +176,64 @@ pub fn dither(pad: Gamepad, held: Gamepad, odd: bool) -> Gamepad {
 mod tests {
     use super::*;
 
+    /// The producers' stick response as it was written before [`StickTurn`].
+    fn old_turn_response(v: f32) -> f32 {
+        let past = ((v.abs() - TURN_DEADZONE) / (1.0 - TURN_DEADZONE)).clamp(0.0, 1.0);
+        v.signum() * past.powf(1.5)
+    }
+
     #[test]
     fn turning_has_a_deadzone_and_eases_in() {
-        assert_eq!(turn_response(0.1), 0.0);
-        assert_eq!(turn_response(-0.15), 0.0);
-        assert!((turn_response(1.0) - 1.0).abs() < 1e-6 && (turn_response(-1.0) + 1.0).abs() < 1e-6);
-        let half = turn_response(0.575);
+        let turn = StickTurn::smooth(150.0);
+        assert_eq!(turn.share(0.1), 0.0);
+        assert_eq!(turn.share(-0.15), 0.0);
+        assert!((turn.share(1.0) - 1.0).abs() < 1e-6 && (turn.share(-1.0) + 1.0).abs() < 1e-6);
+        let half = turn.share(0.575);
         assert!(half > 0.3 && half < 0.4, "eased: {half}");
+    }
+
+    #[test]
+    fn the_smooth_turn_is_the_old_stick_response_times_speed() {
+        let mut latch = TurnLatch::new();
+        for speed in [150.0f32, 90.0, 720.0] {
+            let turn = StickTurn::smooth(speed);
+            for i in -40..=40 {
+                let x = i as f32 / 40.0;
+                assert_eq!(turn.share(x), old_turn_response(x), "{x}");
+                assert_eq!(turn.pushed(x), old_turn_response(x) != 0.0, "{x}");
+                for step in [0.0f32, 0.011, 0.1] {
+                    // Head aim through the mouse: degrees, `x * speed * step` in that order.
+                    assert_eq!(turn.turn(x, step, &mut latch), old_turn_response(x) * speed * step);
+                    // DL1's facing: radians, the speed turned to radians first.
+                    let old = old_turn_response(x) * speed.to_radians() * step;
+                    assert!((turn.turn(x, step, &mut latch).to_radians() - old).abs() <= 1e-6 * old.abs().max(1e-3), "{x} {step}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_snap_turns_once_per_push_and_a_straight_smooth_turn_is_linear() {
+        // As eng_unr's first person turns: a straight smooth turn past 0.2, and a 30 degree snap.
+        let straight = StickTurn::Smooth { speed: 120.0, dead_zone: 0.2, ease: 1.0 };
+        let mut latch = TurnLatch::new();
+        assert_eq!(straight.turn(0.15, 0.1, &mut latch), 0.0);
+        assert!((straight.turn(0.6, 0.1, &mut latch) - 0.5 * 120.0 * 0.1).abs() < 1e-5);
+        assert!((straight.turn(-1.0, 0.1, &mut latch) + 12.0).abs() < 1e-5);
+        let snap = StickTurn::SNAP;
+        let pushes = [0.0, 0.8, 0.9, 0.5, 0.8, 0.2, -0.75, -0.8, 0.0, 0.71];
+        let turned: Vec<f32> = pushes.iter().map(|&x| snap.turn(x, 0.011, &mut latch)).collect();
+        assert_eq!(turned, [0.0, 30.0, 0.0, 0.0, 0.0, 0.0, -30.0, 0.0, 0.0, 30.0], "back within 0.3 before the next");
+        assert!(snap.pushed(0.75) && !snap.pushed(0.6) && snap.share(1.0) == 0.0);
+    }
+
+    #[test]
+    fn the_turn_option_picks_smooth_or_snap() {
+        let manifest = Manifest { options: &[crate::manifest::TURN], ..Manifest::GAME };
+        let pick = |text: &str| StickTurn::from_options(&Options::parse(text), &manifest, StickTurn::smooth(150.0), StickTurn::SNAP);
+        assert_eq!(pick(""), StickTurn::smooth(150.0));
+        assert_eq!(pick("turn=snap"), StickTurn::SNAP);
+        assert_eq!(pick("turn=Smooth"), StickTurn::smooth(150.0));
     }
 
     #[test]

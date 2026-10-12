@@ -3,10 +3,15 @@
 //! with depth); a game's HUD as its own layer laid over each eye ([`HudLayer`]); and motion vectors
 //! for temporal upscaling from depth and two cameras of one eye ([`MotionPass`]); a flat frame
 //! resampled to the eye size ([`Scaler`]). The math is in
-//! [`monaka_core::depth`]. On D3D12 a game brings its own runner.
+//! [`monaka_core::depth`].
 //!
 //! Runs on the game's own immediate context: the compute bindings it changes are saved and put
 //! back around every call.
+//!
+//! On D3D12, [`warp12`]: both eyes warped from one rendered frame and its depth on the game's
+//! queue (depth stereo), with the game's UI layer laid back over each eye; and [`reproject12`]:
+//! a frame redrawn from another camera with a second frame filling its gaps, as [`Reprojector`]
+//! does on D3D11 (alternate frame warping).
 
 use monaka_channel::d3d;
 use monaka_channel::d3d12::compute;
@@ -21,6 +26,8 @@ mod hud;
 mod motion;
 mod reproject;
 mod scale;
+pub mod reproject12;
+pub mod warp12;
 pub use hud::{HUD_SOURCE, HudLayer};
 pub use motion::{EyeView, MOTION_SOURCE, MotionPass, ObjectMotion};
 pub use reproject::{Frame, REPROJECT_SOURCE, Reprojector, View};

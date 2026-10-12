@@ -11,7 +11,7 @@
 //! ([`Values::producer_lines`]), so the producer reads the launcher's own ids; the game's
 //! `config.rs` says what each means to it.
 
-pub use monaka_core::manifest::{Kind, Launch, MONAKA, Manifest, Opt, Shown, Status, SteamFiles, TABS, Values, describe, number_text};
+pub use monaka_core::manifest::{HowTo, Kind, Launch, MONAKA, Manifest, Opt, PLAY_WITH, Shown, Status, SteamFiles, TABS, Values, describe, number_text};
 use crate::Paths;
 use crate::packs::{self, Pack};
 use monaka_core::manifest::aims;
@@ -412,8 +412,8 @@ mod tests {
         options: &[
             aim(&[AIM_MOTION, AIM_LOOK, AIM_POINT, AIM_MOUSE], aims::HAND_RIG),
             AIM_HAND,
-            render_size("Size."),
-            opt("upscale", "Upscale", "Needs both.", Kind::Switch { default: false }).on(Shown::Engine).needs_eye_size().needs_steam_files(SteamFiles {
+            RENDER_SIZE,
+            opt("upscale", "Upscale", "Needs both.", Kind::Switch { default: false }).on(Shown::Rendering).needs_eye_size().needs_steam_files(SteamFiles {
                 game_folder: "Other Game",
                 path: r"bin\x64",
                 file: "a.dll",
@@ -427,6 +427,7 @@ mod tests {
         licences: &["T-LICENSE.txt"],
         left_hand_aims: true,
         weapon_ring: true,
+        controls: &[],
     };
 
     fn parsed(args: &[&str]) -> Values {

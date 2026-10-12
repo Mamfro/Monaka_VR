@@ -240,7 +240,7 @@ impl Shared {
             schedule: Schedule::from_options(options, latency),
             eye_separation: number("eye_separation", 0.03, 0.09, 0.064),
             test_separation: options.value::<f32>("test_separation").filter(|v| v.is_finite() && (0.0..=5.0).contains(v)),
-            head_tracking: options.switch("head_tracking", true),
+            head_tracking: switch("head_tracking", true),
             head_position: options.head_position(
                 "head_position",
                 match manifest.choice_default("head_position") {
@@ -254,13 +254,13 @@ impl Shared {
             aim: Aim::from_options(options, manifest),
             fingers: Fingers { tracking: switch("finger_tracking", true), binary: switch("finger_binary", false) },
             hud: Hud {
-                shown: options.switch("hud", true),
+                shown: switch("hud", true),
                 world: switch("world_hud", true),
                 scale: number("hud_scale", 0.1, 1.0, 0.5),
                 distance: number("hud_distance", 0.5, 20.0, 2.0),
                 markers: switch("world_markers", true),
             },
-            controller_pad: options.switch("controller_pad", true),
+            controller_pad: switch("controller_pad", true),
             stick_speed: [options.number("stick_yaw_speed", 10.0, 720.0, 150.0), options.number("stick_pitch_speed", 0.0, 720.0, 0.0)],
             other_builds: switch("other_builds", false),
         }
@@ -359,6 +359,7 @@ mod tests {
         licences: &[],
         left_hand_aims: false,
         weapon_ring: false,
+        controls: &[],
     };
 
     #[test]

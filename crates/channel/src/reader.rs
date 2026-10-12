@@ -3,7 +3,7 @@
 //! and one reader over whichever transport it is ([`AnyReader`]). A channel is one or the other:
 //! D3D12 producers publish over [`crate::fence`], D3D11 ones over [`crate::keyed`].
 
-use crate::fence::{self, FenceReader};
+use crate::fence::{self, FenceReader, ReadDepth};
 use crate::keyed::{self, KeyedReader, Pair};
 use crate::{ChannelName, Result};
 use monaka_core::protocol::{Luid, dxgi_format};
@@ -74,6 +74,23 @@ impl AnyReader {
         match self {
             AnyReader::Keyed(r) => r.read(context, eyes, seen),
             AnyReader::Fence(r) => r.read(context, eyes, seen),
+        }
+    }
+
+    /// [`AnyReader::read`], also copying the pair's depth into [`AnyReader::depth_textures`] when
+    /// the producer sent it (fence channels only; a keyed pair never has depth).
+    pub fn read_with_depth(&mut self, context: &ID3D11DeviceContext, eyes: [&ID3D11Texture2D; 2], seen: u64) -> Result<Option<(Pair, Option<ReadDepth>)>> {
+        match self {
+            AnyReader::Keyed(r) => Ok(r.read(context, eyes, seen)?.map(|pair| (pair, None))),
+            AnyReader::Fence(r) => r.read_with_depth(context, eyes, seen),
+        }
+    }
+
+    /// The reader's copies of the last depth read, left eye first ([`FenceReader::depth_textures`]).
+    pub fn depth_textures(&self) -> Option<[&ID3D11Texture2D; 2]> {
+        match self {
+            AnyReader::Fence(r) => r.depth_textures(),
+            AnyReader::Keyed(_) => None,
         }
     }
 }

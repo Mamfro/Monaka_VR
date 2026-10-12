@@ -1,11 +1,13 @@
-//! Melee by swinging: a controller swung like the weapon it holds presses the game's attack (the
-//! right trigger, on the VR pad: `monaka_pad::press`), once per swing ([`monaka_core::swing`]). With a
-//! melee weapon drawn the aim hand swings it; with bare hands either hand punches; a gun is never
-//! fired by a swing. The game's attack plays and hits as it would from the trigger, aimed where the
-//! character looks; a producer can aim melee with the head ([`holding_melee`]).
+//! Melee by swinging: a controller swung like the weapon it holds presses the game's attack (its
+//! light attack, by the actions provider: `monaka_pad::actions`; the right trigger on the VR pad
+//! unless the game binds it otherwise), once per swing ([`monaka_core::swing`]). With a melee
+//! weapon drawn the aim hand swings it; with bare hands either hand punches; a gun, a bow, a
+//! throwable or a tool is never swung ([`swing_rules`]). The game's attack plays and hits as it
+//! would from the trigger, aimed where the character looks; a producer can aim melee with the head
+//! ([`holding_melee`]).
 
-use monaka_core::pad::Gamepad;
 use monaka_core::protocol::{HandPose, LEFT_HAND, RIGHT_HAND};
+use monaka_pad::actions::{self, Action};
 use monaka_core::swing::{Swing, SwingRules};
 use monaka_producer::log;
 use std::sync::Mutex;
@@ -18,7 +20,9 @@ const PRESS_MS: u64 = 150;
 /// How long a swing holds the trigger ([`set_press_ms`]).
 static PRESS: AtomicU64 = AtomicU64::new(PRESS_MS);
 
-/// What the first-person arms hold, as the game's producer reads it from its own weapon objects.
+/// The kind of what a hand holds: the held-item provider's kind (`crate::hand_rig::HandRig::held`;
+/// the rest of the item, `crate::held`), and what a swing takes the arms to hold ([`update`]). Its
+/// rules: [`Held::grips`], [`swing_rules`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Held {
     Gun,
@@ -27,6 +31,12 @@ pub enum Held {
     /// A sharp one: only a cut attacks ([`SwingRules::BLADE`]).
     Blade,
     Nothing,
+    /// A bow, in the hand that holds it out (the other draws its string, empty).
+    Bow,
+    /// Something thrown from the hand: a knife, a grenade, a bottle.
+    Throwable,
+    /// A tool worked by hand: a lockpick, a lighter, a map.
+    Tool,
 }
 
 /// How swings attack.
@@ -89,8 +99,34 @@ impl Physical {
     }
 }
 
-/// What the arms held at the latest update (a [`Held`] as 0 gun, 1 melee, 2 nothing).
+/// What the arms held at the latest update (a [`Held`] as its [`code`]).
 static HELD: AtomicU64 = AtomicU64::new(0);
+
+/// [`Held`] as kept in [`HELD`].
+const fn code(held: Held) -> u64 {
+    match held {
+        Held::Gun => 0,
+        Held::Melee => 1,
+        Held::Nothing => 2,
+        Held::Blade => 3,
+        Held::Bow => 4,
+        Held::Throwable => 5,
+        Held::Tool => 6,
+    }
+}
+
+/// [`code`] read back.
+const fn of_code(code: u64) -> Held {
+    match code {
+        0 => Held::Gun,
+        1 => Held::Melee,
+        3 => Held::Blade,
+        4 => Held::Bow,
+        5 => Held::Throwable,
+        6 => Held::Tool,
+        _ => Held::Nothing,
+    }
+}
 static SWINGS: AtomicU64 = AtomicU64::new(0);
 /// When the latest swing attacked (`monaka_channel::tick`), 0 for never.
 static LAST_SWING: AtomicU64 = AtomicU64::new(0);
@@ -113,7 +149,7 @@ pub fn set_blade(direction: [f32; 3]) {
 /// aims the character with the head then: the attack goes where the player looks, not where the
 /// swinging controller happens to point when it lands.
 pub fn holding_melee() -> bool {
-    ACTIVE.load(Relaxed) && HELD.load(Relaxed) != 0
+    ACTIVE.load(Relaxed) && matches!(of_code(HELD.load(Relaxed)), Held::Melee | Held::Blade | Held::Nothing)
 }
 
 /// How long a swing holds the trigger, in milliseconds (default 150). A game that starts an
@@ -128,12 +164,7 @@ pub fn held() -> Option<Held> {
     if !ACTIVE.load(Relaxed) {
         return None;
     }
-    Some(match HELD.load(Relaxed) {
-        0 => Held::Gun,
-        1 => Held::Melee,
-        3 => Held::Blade,
-        _ => Held::Nothing,
-    })
+    Some(of_code(HELD.load(Relaxed)))
 }
 
 /// After a swing, how far the game's own animation moved the aim wrist (camera space): its attack
@@ -199,7 +230,7 @@ fn reach_check() -> Option<fn() -> bool> {
 
 /// Presses the attack for a swing, and notes it.
 fn attack(held: Held, side: usize, speed: f32, direction: [f32; 3]) {
-    monaka_pad::press(Gamepad { right_trigger: 255, ..Gamepad::default() }, PRESS.load(Relaxed));
+    actions::press(Action::Attack, PRESS.load(Relaxed));
     LAST_SWING.store(monaka_channel::tick(), Relaxed);
     let n = SWINGS.fetch_add(1, Relaxed) + 1;
     if n <= 8
@@ -215,12 +246,7 @@ fn attack(held: Held, side: usize, speed: f32, direction: [f32; 3]) {
 /// One arms update: notes what is held and feeds the controllers (`palms`, by side, in tracking
 /// space) to their swing detectors.
 pub fn update(held: Held, palms: [Option<HandPose>; 2], settings: &Settings) {
-    let code = match held {
-        Held::Gun => 0,
-        Held::Melee => 1,
-        Held::Nothing => 2,
-        Held::Blade => 3,
-    };
+    let code = code(held);
     if HELD.swap(code, Relaxed) != code || !ACTIVE.swap(true, Relaxed) {
         log!("melee: holding {held:?}");
     }
@@ -235,20 +261,12 @@ pub fn update(held: Held, palms: [Option<HandPose>; 2], settings: &Settings) {
         return;
     }
     let time = hands.started.get_or_insert_with(Instant::now).elapsed().as_secs_f64();
-    let speed = settings.speed / SwingRules::WEAPON.start_speed;
+    let blade = BLADE.lock().ok().and_then(|b| *b);
     for side in [LEFT_HAND, RIGHT_HAND] {
-        let rules = match held {
-            Held::Melee if side == settings.aim_side => SwingRules::WEAPON.faster(speed),
-            Held::Blade if side == settings.aim_side => {
-                let blade = BLADE.lock().ok().and_then(|b| *b).unwrap_or(SwingRules::BLADE.blade);
-                SwingRules::BLADE.faster(speed).pointing(blade)
-            }
-            Held::Nothing => SwingRules::FIST.faster(speed),
-            _ => {
-                hands.swings[side].reset();
-                hands.armed[side] = None;
-                continue;
-            }
+        let Some(rules) = swing_rules(held, side, settings, blade) else {
+            hands.swings[side].reset();
+            hands.armed[side] = None;
+            continue;
         };
         let Some(palm) = palms[side] else {
             hands.swings[side].reset();
@@ -292,6 +310,20 @@ pub fn update(held: Held, palms: [Option<HandPose>; 2], settings: &Settings) {
     }
 }
 
+/// How hand `side` swings while the arms hold `held` (the weapon in the aim hand, `settings`), or
+/// whether it does not: the aim hand swings a melee weapon (a blade along `blade`, the way the
+/// producer measured it, else ahead), either hand punches with bare hands, and nothing held as a
+/// gun, a bow, a throwable or a tool swings. The speed to swing scales with `settings.speed`.
+pub fn swing_rules(held: Held, side: usize, settings: &Settings, blade: Option<[f32; 3]>) -> Option<SwingRules> {
+    let speed = settings.speed / SwingRules::WEAPON.start_speed;
+    match held {
+        Held::Melee if side == settings.aim_side => Some(SwingRules::WEAPON.faster(speed)),
+        Held::Blade if side == settings.aim_side => Some(SwingRules::BLADE.faster(speed).pointing(blade.unwrap_or(SwingRules::BLADE.blade))),
+        Held::Nothing => Some(SwingRules::FIST.faster(speed)),
+        _ => None,
+    }
+}
+
 /// Whether a swing attacked within the last `ms` milliseconds.
 pub fn swung_within(ms: u64) -> bool {
     let at = LAST_SWING.load(Relaxed);
@@ -311,4 +343,65 @@ pub fn report() {
 /// The swings so far, for the stop's log.
 pub fn summary() -> String {
     format!("melee: {} swings pressed the attack, {} reached nothing", SWINGS.load(Relaxed), AIR_SWINGS.load(Relaxed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use monaka_core::pad::Gamepad;
+    use monaka_pad::actions::Binding;
+
+    const KINDS: [Held; 7] = [Held::Gun, Held::Melee, Held::Blade, Held::Nothing, Held::Bow, Held::Throwable, Held::Tool];
+
+    /// The rules [`update`] chose inline before [`swing_rules`].
+    fn rules_before(held: Held, side: usize, settings: &Settings, blade: Option<[f32; 3]>) -> Option<SwingRules> {
+        let speed = settings.speed / SwingRules::WEAPON.start_speed;
+        match held {
+            Held::Melee if side == settings.aim_side => Some(SwingRules::WEAPON.faster(speed)),
+            Held::Blade if side == settings.aim_side => {
+                let blade = blade.unwrap_or(SwingRules::BLADE.blade);
+                Some(SwingRules::BLADE.faster(speed).pointing(blade))
+            }
+            Held::Nothing => Some(SwingRules::FIST.faster(speed)),
+            Held::Gun | Held::Melee | Held::Blade => None,
+            _ => unreachable!("not a kind before"),
+        }
+    }
+
+    #[test]
+    fn the_swing_rules_are_the_ones_chosen_before_and_new_kinds_never_swing() {
+        for aim_side in [LEFT_HAND, RIGHT_HAND] {
+            for speed in [0.5, 2.2, 7.0] {
+                let settings = Settings { swing: true, speed, aim_side };
+                for blade in [None, Some([0.0, 0.6, -0.8])] {
+                    for side in [LEFT_HAND, RIGHT_HAND] {
+                        for held in [Held::Gun, Held::Melee, Held::Blade, Held::Nothing] {
+                            assert_eq!(swing_rules(held, side, &settings, blade), rules_before(held, side, &settings, blade), "{held:?} {side} {aim_side} {speed}");
+                        }
+                        for held in [Held::Bow, Held::Throwable, Held::Tool] {
+                            assert!(swing_rules(held, side, &settings, blade).is_none(), "{held:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn each_kind_is_kept_and_read_back_and_only_melee_or_fists_aim_by_the_head() {
+        for held in KINDS {
+            assert_eq!(of_code(code(held)), held);
+        }
+        // The kinds before: everything but a gun aimed melee by the head.
+        for held in [Held::Gun, Held::Melee, Held::Blade, Held::Nothing] {
+            assert_eq!(matches!(held, Held::Melee | Held::Blade | Held::Nothing), held != Held::Gun);
+        }
+        assert_eq!([code(Held::Gun), code(Held::Melee), code(Held::Nothing), code(Held::Blade)], [0, 1, 2, 3], "the codes kept before");
+    }
+
+    #[test]
+    fn a_swing_presses_the_right_trigger_as_before() {
+        // No game's actions installed in this test run: the standard layout, the trigger a swing held.
+        assert_eq!(actions::binding(Action::Attack), Binding::Pad(Gamepad { right_trigger: 255, ..Gamepad::default() }));
+    }
 }

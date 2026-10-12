@@ -15,9 +15,10 @@
 //! inside a value are tab-separated; numbers that are options' bounds are an f64's bits in hex, so
 //! they come back exactly. Before the games, `author` and `source` say who made the pack and where
 //! it comes from (its crate's `authors` and `repository`; contract 1.1). A `game` line starts each
-//! manifest and an `option` line each option.
+//! manifest and an `option` line each option; after the options, a `control` line starts each
+//! how-to, its `way` lines (the text, then `id`, `value` pairs) and one `tunes` line (option ids).
 
-use crate::manifest::{Kind, Launch, Manifest, Opt, Shown, Status, SteamFiles, TurnsOff};
+use crate::manifest::{HowTo, Kind, Launch, Manifest, Opt, Shown, Status, SteamFiles, TurnsOff, Way};
 
 /// A version of the contract: `major` changes when something a pack relies on changes shape (a
 /// pack built before would read or write the wrong thing), `minor` when something is only added
@@ -39,7 +40,9 @@ pub struct Contract {
 ///   picked in [`crate::manifest::GAME_OPTION`]), 32-bit twins of a pack's DLL for 32-bit games, and
 ///   Monaka's own settings a game's producer reads, listed among its options (on the `monaka` tab;
 ///   [`crate::manifest::DISABLE_VIEW_BOBBING`]).
-pub const CONTRACT: Contract = Contract { major: 1, minor: 2 };
+/// - 1.3: the Controls tab: the `controls` tab word, a game's how-tos (`control`, `way`, `tunes`
+///   lines; [`crate::manifest::HowTo`]), and conditions on any value but one (`!value`).
+pub const CONTRACT: Contract = Contract { major: 1, minor: 3 };
 
 /// Who made a pack and where it comes from, as the pack itself says (nothing checks it): its
 /// crate's `authors` and `repository`. Empty where the crate names none, or the pack predates 1.1.
@@ -191,9 +194,10 @@ const fn status_word(status: Status) -> &'static str {
 const fn shown_word(shown: Shown) -> &'static str {
     match shown {
         Shown::Main => "main",
+        Shown::Controls => "controls",
         Shown::Hud => "hud",
         Shown::Skeleton => "skeleton",
-        Shown::Engine => "engine",
+        Shown::Rendering => "rendering",
         Shown::Game => "game",
         Shown::Monaka => "monaka",
         Shown::Line => "line",
@@ -339,7 +343,42 @@ const fn write_game(out: &mut Out, m: &Manifest) {
         write_option(out, &m.options[i]);
         i += 1;
     }
+    i = 0;
+    while i < m.controls.len() {
+        write_how(out, &m.controls[i]);
+        i += 1;
+    }
     out.raw(b"end\n");
+}
+
+const fn write_how(out: &mut Out, how: &HowTo) {
+    out.field(b"control", how.action);
+    let mut i = 0;
+    while i < how.ways.len() {
+        let way = &how.ways[i];
+        out.key(b"way");
+        out.text(way.text);
+        let mut j = 0;
+        while j < way.when.len() {
+            out.byte(b'\t');
+            out.text(way.when[j].0);
+            out.byte(b'\t');
+            out.text(way.when[j].1);
+            j += 1;
+        }
+        out.byte(b'\n');
+        i += 1;
+    }
+    out.key(b"tunes");
+    i = 0;
+    while i < how.options.len() {
+        if i > 0 {
+            out.byte(b'\t');
+        }
+        out.text(how.options[i]);
+        i += 1;
+    }
+    out.byte(b'\n');
 }
 
 const fn write(out: &mut Out, manifests: &[Manifest], author: &str, source: &str) {
@@ -505,6 +544,8 @@ struct GameDraft {
     licences: Vec<&'static str>,
     left_hand_aims: Option<bool>,
     weapon_ring: Option<bool>,
+    /// The how-tos: (action, ways, option ids).
+    controls: Vec<(&'static str, Vec<Way>, &'static [&'static str])>,
 }
 
 impl GameDraft {
@@ -527,6 +568,7 @@ impl GameDraft {
             licences: leak_slice(self.licences),
             left_hand_aims: self.left_hand_aims.ok_or_else(|| missing("left_hand_aims"))?,
             weapon_ring: self.weapon_ring.ok_or_else(|| missing("weapon_ring"))?,
+            controls: leak_slice(self.controls.into_iter().map(|(action, ways, options)| HowTo { action, ways: leak_slice(ways), options }).collect()),
             id: leak(id),
         })
     }
@@ -656,6 +698,22 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
             "licence" => g.licences.push(leak(unescape(value))),
             "left_hand_aims" => g.left_hand_aims = Some(flag(value).map_err(at)?),
             "weapon_ring" => g.weapon_ring = Some(flag(value).map_err(at)?),
+            "control" => g.controls.push((leak(unescape(value)), Vec::new(), &[])),
+            "way" => {
+                let how = g.controls.last_mut().ok_or_else(|| at("a way outside a control".into()))?;
+                let mut p = parts(value).into_iter();
+                let text = leak(p.next().unwrap_or_default());
+                let rest: Vec<String> = p.collect();
+                if !rest.len().is_multiple_of(2) {
+                    return Err(at("a way's conditions are id and value pairs".into()));
+                }
+                let when = leak_slice(rest.chunks(2).map(|pair| (leak(pair[0].clone()), leak(pair[1].clone()))).collect());
+                how.1.push(Way { text, when });
+            }
+            "tunes" => {
+                let how = g.controls.last_mut().ok_or_else(|| at("tunes outside a control".into()))?;
+                how.2 = leak_slice(if value.is_empty() { Vec::new() } else { parts(value).into_iter().map(leak).collect() });
+            }
             "end" => games.push(game.take().expect("open").finish().map_err(at)?),
             other => return Err(at(format!("unknown field {other}"))),
         }
@@ -680,9 +738,10 @@ fn status_of(word: &str) -> Result<Status, String> {
 fn shown_of(word: &str) -> Result<Shown, String> {
     Ok(match word {
         "main" => Shown::Main,
+        "controls" => Shown::Controls,
         "hud" => Shown::Hud,
         "skeleton" => Shown::Skeleton,
-        "engine" => Shown::Engine,
+        "rendering" => Shown::Rendering,
         "game" => Shown::Game,
         "monaka" => Shown::Monaka,
         "line" => Shown::Line,
@@ -720,9 +779,13 @@ mod tests {
         licences: &["X-LICENSE.txt"],
         left_hand_aims: true,
         weapon_ring: false,
+        controls: &[
+            HowTo { action: "Do\tit \\ now", ways: &[way("A way,\twith a tab.", &[("pick", "!a"), ("flag", "1")]), always("")], options: &["flag", "size"] },
+            HowTo { action: "Nothing to tune", ways: &[], options: &[] },
+        ],
     };
 
-    const MANUAL: Manifest = Manifest { id: "m", launch: Launch::Manual, options: &[], ..GAME };
+    const MANUAL: Manifest = Manifest { id: "m", launch: Launch::Manual, options: &[], controls: &[], ..GAME };
 
     #[test]
     fn the_text_reads_back_exactly() {
@@ -744,7 +807,7 @@ mod tests {
         // A game listing one of Monaka's own settings its producer reads passes the check after the
         // round trip: what it lists still is Monaka's, unchanged.
         const READS: &[Opt] = &[crate::manifest::DISABLE_VIEW_BOBBING];
-        const READER: Manifest = Manifest { options: READS, launch: Launch::Manual, ..GAME };
+        const READER: Manifest = Manifest { options: READS, launch: Launch::Manual, controls: &[], ..GAME };
         let parsed = parse(&text(&[READER], "", "")).unwrap();
         assert!(parsed.manifests[0] == READER);
         assert!(parsed.manifests[0].check().is_ok(), "{:?}", parsed.manifests[0].check());

@@ -18,8 +18,8 @@
 //! character does not walk off to the new centre.
 
 use crate::traverse;
-use monaka_core::camera::Mat34;
-use monaka_core::math::dot;
+use monaka_core::camera::{Base, Mat34};
+use monaka_core::math::{Vec3, dot};
 use monaka_core::options::{Options, Shared};
 use monaka_producer::log;
 use std::sync::Mutex;
@@ -115,10 +115,28 @@ pub fn anchor() -> [f32; 2] {
 /// along the origin's own x and z axes. Every tracking origin the eyes and arms are built on goes
 /// through here, so they move together.
 pub fn shift_origin(origin: &mut Mat34) {
-    let [x, z] = anchor();
-    origin[3] -= origin[0] * x + origin[2] * z;
-    origin[7] -= origin[4] * x + origin[6] * z;
-    origin[11] -= origin[8] * x + origin[10] * z;
+    *origin = moved_back(origin, origin, anchor());
+}
+
+/// Room-scale following on a view drawn from the game camera `game` taken as `base`, the head
+/// drawn at `head` (tracking space, as the head model places it): the view noted ([`note_view`])
+/// and `game` moved back by what following has walked, along the tracking origin's own x and z
+/// axes ([`shift_origin`]), so the eyes built on it with `base` keep the head where it is against
+/// the character. Every eye site on following calls this.
+pub fn follow_view(game: &Mat34, base: Base, head: Vec3) -> Option<Mat34> {
+    let origin = base.origin(game)?;
+    note_view(&origin, head);
+    Some(moved_back(game, &origin, anchor()))
+}
+
+/// `frame` moved back by `anchor` (tracking x and z) along the tracking origin `origin`'s x and z
+/// axes.
+fn moved_back(frame: &Mat34, origin: &Mat34, [x, z]: [f32; 2]) -> Mat34 {
+    let mut out = *frame;
+    for row in 0..3 {
+        out[row * 4 + 3] -= origin[row * 4] * x + origin[row * 4 + 2] * z;
+    }
+    out
 }
 
 /// A view was placed from the tracking origin `origin` (before [`shift_origin`]; its axes are
@@ -271,5 +289,28 @@ mod tests {
         let (before, after) = (world(anchor, old), world(a, new));
         assert!((0..3).all(|k| (before[k] - after[k]).abs() < 1e-5), "{before:?} {after:?}");
         assert_eq!(turned_anchor(anchor, head, old, old), anchor, "no turn, no change");
+    }
+
+    #[test]
+    fn eyes_on_the_moved_back_camera_are_those_on_the_moved_back_origin() {
+        use monaka_core::camera::{apply_head, distance, from_back_up, tracking_origin, view_centre};
+        // A pitched game camera turned 30 degrees left, 0.2 m walked to the right and 0.1 back.
+        let yaw = 30f32.to_radians();
+        let game = from_back_up([yaw.sin() * 0.9, 0.43, yaw.cos() * 0.9], [0.0, 1.0, 0.0], [5.0, 1.0, 2.0]).unwrap();
+        let (anchor, head, q) = ([0.2, 0.1], [0.25, 1.6, 0.05], [0.0, 0.2588, 0.0, 0.9659]);
+        for base in [Base::Game, Base::Level { baked_yaw: 0.3 }] {
+            // As the eye sites did it: the tracking origin shifted, the head applied to it.
+            let mut origin = match base {
+                Base::Level { baked_yaw } => tracking_origin(&game, baked_yaw).unwrap(),
+                _ => game,
+            };
+            origin[3] -= origin[0] * anchor[0] + origin[2] * anchor[1];
+            origin[7] -= origin[4] * anchor[0] + origin[6] * anchor[1];
+            origin[11] -= origin[8] * anchor[0] + origin[10] * anchor[1];
+            let before = apply_head(&origin, q, head);
+            let moved = moved_back(&game, &base.origin(&game).unwrap(), anchor);
+            let after = view_centre(&moved, base, q, head).unwrap();
+            assert!(distance(&before, &after) < 1e-5, "{base:?}: {before:?} {after:?}");
+        }
     }
 }

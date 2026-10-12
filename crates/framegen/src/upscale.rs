@@ -98,6 +98,17 @@ const _: () = {
 /// The kind of a description header (its first field), for a producer reading the game's own calls.
 pub const DISPATCH_UPSCALE_KIND: u64 = DISPATCH_UPSCALE;
 
+/// Whether `desc` (the game's argument to `ffxCreateContext`) creates an upscale context.
+pub fn creates_upscaler(desc: *const core::ffi::c_void) -> bool {
+    monaka_hook::mem::read::<u64>(desc as usize) == Some(CREATE_UPSCALE)
+}
+
+/// The flags ([`create`]) of the upscale context `desc` creates (the game's argument to
+/// `ffxCreateContext`), if it creates one.
+pub fn create_flags(desc: *const core::ffi::c_void) -> Option<u32> {
+    creates_upscaler(desc).then(|| monaka_hook::mem::read::<u32>(desc as usize + std::mem::offset_of!(CreateUpscale, flags))).flatten()
+}
+
 /// A resource of a game's own upscale dispatch, as the game described it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GameResource {
@@ -212,6 +223,37 @@ impl GameDispatchCopy {
     /// The description to pass to `ffxDispatch` (valid while this copy lives).
     pub fn as_desc(&self) -> *const core::ffi::c_void {
         &self.0 as *const DispatchUpscale as *const core::ffi::c_void
+    }
+
+    /// A game's upscale dispatch as a test makes one: on `list`, `frame` the depth and motion
+    /// vectors (both in `state`) with the camera and sizes it gives.
+    #[cfg(test)]
+    pub(crate) fn for_tests(list: &ID3D12GraphicsCommandList, depth: Resource, motion_vectors: Resource, frame: &Frame) -> Self {
+        Self(DispatchUpscale {
+            header: Header::new(DISPATCH_UPSCALE),
+            command_list: list.as_raw(),
+            color: Resource::default(),
+            depth,
+            motion_vectors,
+            exposure: Resource::default(),
+            reactive: Resource::default(),
+            transparency_and_composition: Resource::default(),
+            output: Resource::default(),
+            jitter_offset: frame.jitter,
+            motion_vector_scale: frame.motion_vector_scale,
+            render_size: frame.render_size,
+            upscale_size: Size2 { width: frame.render_size.width * 3 / 2, height: frame.render_size.height * 3 / 2 },
+            enable_sharpening: false,
+            sharpness: 0.0,
+            frame_time_delta: frame.frame_time_ms,
+            pre_exposure: 1.0,
+            reset: frame.reset,
+            camera_near: frame.near,
+            camera_far: frame.far,
+            camera_fov_vertical: frame.fov_vertical,
+            view_space_to_meters: 1.0,
+            flags: frame.flags,
+        })
     }
 }
 

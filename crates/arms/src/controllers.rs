@@ -19,19 +19,29 @@ static FINGERS: Mutex<Option<FingerChannel>> = Mutex::new(None);
 /// The reticle block beside it (where a hand's reticle points, when not along the palm).
 static RETICLES: Mutex<Option<ReticleChannel>> = Mutex::new(None);
 
-/// Opens the hand block beside `channel`; without it, the controllers are never tracked.
+/// Opens the hand block beside `channel`; without it, the controllers are never tracked. A block
+/// already open stays as it is, so each component that reads the controllers opens them.
 pub fn open(channel: &ChannelName) {
-    match HandChannel::open(channel) {
-        Ok(hands) => *CHANNEL.locked() = Some(hands),
-        Err(e) => log!("controllers: hand block unavailable ({e}); hand aim off"),
+    let mut hands = CHANNEL.locked();
+    if hands.is_none() {
+        match HandChannel::open(channel) {
+            Ok(opened) => *hands = Some(opened),
+            Err(e) => log!("controllers: hand block unavailable ({e}); hand aim off"),
+        }
     }
-    match FingerChannel::open(channel) {
-        Ok(fingers) => *FINGERS.locked() = Some(fingers),
-        Err(e) => log!("controllers: finger block unavailable ({e}); fingers as the game animates them"),
+    let mut fingers = FINGERS.locked();
+    if fingers.is_none() {
+        match FingerChannel::open(channel) {
+            Ok(opened) => *fingers = Some(opened),
+            Err(e) => log!("controllers: finger block unavailable ({e}); fingers as the game animates them"),
+        }
     }
-    match ReticleChannel::open(channel) {
-        Ok(reticles) => *RETICLES.locked() = Some(reticles),
-        Err(e) => log!("controllers: reticle block unavailable ({e}); the reticles stay on the palms"),
+    let mut reticles = RETICLES.locked();
+    if reticles.is_none() {
+        match ReticleChannel::open(channel) {
+            Ok(opened) => *reticles = Some(opened),
+            Err(e) => log!("controllers: reticle block unavailable ({e}); the reticles stay on the palms"),
+        }
     }
 }
 
@@ -57,6 +67,24 @@ pub fn aim_reticle(side: usize, direction: Option<[f32; 3]>) {
 pub fn fingers(side: usize) -> Option<FingerPose> {
     let tracked = FINGERS.lock().ok()?.as_mut()?.read(side, MAX_AGE_MS)?;
     Some(crate::fingers::shape(side, tracked))
+}
+
+/// Controller `side`'s aim pose in the headset's tracking space, if tracked.
+pub fn hand(side: usize) -> Option<HandPose> {
+    CHANNEL.lock().ok()?.as_mut()?.read(side, MAX_AGE_MS)
+}
+
+/// Controller `side`'s grip pose in the headset's tracking space, if tracked.
+pub fn grip(side: usize) -> Option<HandPose> {
+    CHANNEL.lock().ok()?.as_mut()?.read_grip(side, MAX_AGE_MS)
+}
+
+/// Both controllers' aim poses and grip poses, by side, each if tracked.
+pub fn aims_and_grips() -> ([Option<HandPose>; 2], [Option<HandPose>; 2]) {
+    let Ok(mut channel) = CHANNEL.lock() else { return ([None; 2], [None; 2]) };
+    let Some(hands) = channel.as_mut() else { return ([None; 2], [None; 2]) };
+    let (left, right) = ((hands.read(LEFT_HAND, MAX_AGE_MS), hands.read_grip(LEFT_HAND, MAX_AGE_MS)), (hands.read(RIGHT_HAND, MAX_AGE_MS), hands.read_grip(RIGHT_HAND, MAX_AGE_MS)));
+    ([left.0, right.0], [left.1, right.1])
 }
 
 /// Controller `side`'s palm ([`HandPose::palm`]) in the headset's tracking space, if tracked.

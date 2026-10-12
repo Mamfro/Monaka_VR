@@ -69,17 +69,36 @@ impl Basis {
     pub const CRYENGINE: Self = Self { right: Axis::PosX, up: Axis::PosZ, forward: Axis::PosY };
 
     /// A vector in this basis expressed canonically (+X right, +Y up, -Z forward).
-    fn canonical(self, v: [f32; 3]) -> [f32; 3] {
+    pub fn canonical(self, v: [f32; 3]) -> [f32; 3] {
         [self.right.pick(v), self.up.pick(v), -self.forward.pick(v)]
     }
 
     /// A canonical vector expressed in this basis.
-    fn express(self, v: [f32; 3]) -> [f32; 3] {
+    pub fn express(self, v: [f32; 3]) -> [f32; 3] {
         let mut out = [0.0; 3];
         self.right.put(&mut out, v[0]);
         self.up.put(&mut out, v[1]);
         self.forward.put(&mut out, -v[2]);
         out
+    }
+
+    /// A placement in a world of this basis, kept as an `origin` and `axis` rows (the placed
+    /// thing's own x, y and z axes: id Tech's and the Void engine's entities, render models and
+    /// bones), as a canonical-world frame (columns: those axes, then the origin). Only the world
+    /// changes: the axes stay the thing's own (a model's bone axes are its own), and the units
+    /// stay the game's. None when not finite.
+    pub fn from_origin_axis(self, origin: [f32; 3], axis: [f32; 9]) -> Option<Mat34> {
+        let [x, y, z, p] = [[axis[0], axis[1], axis[2]], [axis[3], axis[4], axis[5]], [axis[6], axis[7], axis[8]], origin].map(|v| self.canonical(v));
+        let m = [x[0], y[0], z[0], p[0], x[1], y[1], z[1], p[1], x[2], y[2], z[2], p[2]];
+        m.iter().all(|v| v.is_finite()).then_some(m)
+    }
+
+    /// A canonical-world frame as an origin and axis rows in a world of this basis
+    /// ([`Basis::from_origin_axis`]'s inverse).
+    pub fn origin_axis(self, m: &Mat34) -> ([f32; 3], [f32; 9]) {
+        let column = |c: usize| self.express([m[c], m[4 + c], m[8 + c]]);
+        let (x, y, z) = (column(0), column(1), column(2));
+        (column(3), [x[0], x[1], x[2], y[0], y[1], y[2], z[0], z[1], z[2]])
     }
 }
 
@@ -263,6 +282,20 @@ impl ProjectionConvention {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_id_placement_round_trips_with_its_axes_kept() {
+        // id: x forward, y left, z up. Forward is canonical -z, left -x, up +y.
+        assert_eq!(Basis::ID_TECH.canonical([1.0, 0.0, 0.0]), [-0.0, 0.0, -1.0]);
+        assert_eq!(Basis::ID_TECH.canonical([0.0, 1.0, 0.0]), [-1.0, 0.0, -0.0]);
+        let (origin, axis) = ([3.0, -2.0, 1.5], [0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        let m = Basis::ID_TECH.from_origin_axis(origin, axis).unwrap();
+        // The thing's own x axis (id +y, left) is canonical -x, its first column.
+        assert_eq!([m[0], m[4], m[8]], [-1.0, 0.0, -0.0]);
+        let (o, a) = Basis::ID_TECH.origin_axis(&m);
+        assert!(close(&o, &origin) && close(&a, &axis));
+        assert!(Basis::ID_TECH.from_origin_axis([f32::NAN, 0.0, 0.0], axis).is_none());
+    }
 
     fn close(a: &[f32], b: &[f32]) -> bool {
         a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)

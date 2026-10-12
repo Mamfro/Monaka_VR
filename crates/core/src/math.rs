@@ -109,10 +109,29 @@ pub fn length(a: Vec3) -> f32 {
     dot(a, a).sqrt()
 }
 
+/// How far along the segment from `a` to `b` point `p` sits (its nearest point on the line: 0 at
+/// `a`, 1 at `b`, beyond either outside them); none for a segment shorter than a millimetre.
+pub fn segment_share(p: Vec3, a: Vec3, b: Vec3) -> Option<f32> {
+    let d = sub(b, a);
+    let length2 = dot(d, d);
+    (length2 > 1e-6).then(|| dot(sub(p, a), d) / length2).filter(|t| t.is_finite())
+}
+
 /// `a` made one long; none when it is too short to have a direction (1e-6) or not finite.
 pub fn unit(a: Vec3) -> Option<Vec3> {
     let l = length(a);
     (l.is_finite() && l > 1e-6).then(|| scale(a, 1.0 / l))
+}
+
+/// `v` turned by the rotation that takes unit `from` to unit `to` (about the axis square to both);
+/// `v` as it is where they point the same way or exactly opposite.
+pub fn turned(v: Vec3, from: Vec3, to: Vec3) -> Vec3 {
+    let axis = cross(from, to);
+    let (sin, cos) = (length(axis), dot(from, to));
+    let Some(k) = unit(axis).filter(|_| sin > 1e-6) else { return v };
+    let kv = cross(k, v);
+    let kd = dot(k, v) * (1.0 - cos);
+    [0, 1, 2].map(|i| v[i] * cos + kv[i] * sin + k[i] * kd)
 }
 
 /// The inverse turn of a unit quaternion.
@@ -171,6 +190,24 @@ pub fn wrap_degrees(angle: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_point_is_placed_along_a_segment() {
+        let share = |p| super::segment_share(p, [1.0, 0.0, 0.0], [3.0, 0.0, 0.0]);
+        assert_eq!(share([2.0, 5.0, 0.0]), Some(0.5));
+        assert_eq!(share([0.0, 0.0, 0.0]), Some(-0.5));
+        assert_eq!(super::segment_share([0.0; 3], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]), None);
+    }
+
+    #[test]
+    fn a_turn_takes_from_onto_to_and_keeps_lengths() {
+        let (from, to) = ([0.0, 0.0, -1.0], super::unit([0.3, 0.2, -1.0]).unwrap());
+        let onto = super::turned(from, from, to);
+        assert!(onto.iter().zip(to).all(|(a, b)| (a - b).abs() < 1e-6), "{onto:?}");
+        let v = [0.4, -1.0, 0.2];
+        assert!((super::length(super::turned(v, from, to)) - super::length(v)).abs() < 1e-6);
+        assert_eq!(super::turned(v, from, from), v, "no turn");
+    }
+
     #[test]
     fn lean_only_removes_the_necks_turning() {
         // Nodding 30 degrees down about the neck moves the eyes forward and down.

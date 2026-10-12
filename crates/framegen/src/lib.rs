@@ -1,13 +1,21 @@
 //! Frame generation for VR producers: AMD FSR frame generation through the FFX API from a game's
-//! own loader ([`ffx`]), the HUD composer that keeps a HUD out of it ([`hud12`]), motion vectors
-//! onto each eye's own previous frame ([`motion`]), and what both
-//! Dying Light 2 and The Beast feed it from Streamline (the camera in DLSS's constants).
+//! own loader ([`ffx`]), as a ready-made component ([`feature`]), the HUD composer that keeps a
+//! HUD out of it ([`hud12`]), motion vectors onto each eye's own previous frame ([`motion`]),
+//! each eye's inputs from the calls a game makes for its upscaler ([`inputs`]: depth, motion
+//! vectors, how the frame was rendered; from Streamline's calls for DLSS or FSR's dispatch), the
+//! pacing of generated and real pairs ([`pacing`]), FSR upscaling ([`upscale`]), and the game's own
+//! FSR upscaling through its loader imports ([`ffx_imports`]) kept per eye ([`upscale_per_eye`]).
 
+pub mod feature;
 pub mod ffx;
+pub mod ffx_imports;
 pub mod hud12;
+pub mod inputs;
 pub mod motion;
+pub mod pacing;
 pub mod stream;
 pub mod upscale;
+pub mod upscale_per_eye;
 
 pub use stream::{EyeStream, FrameInputs, SLOTS, enable, enabled, eyes_skipped, fitting_stream, free_when_idle, skip_eye};
 

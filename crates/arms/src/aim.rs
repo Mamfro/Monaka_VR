@@ -321,6 +321,7 @@ mod tests {
         licences: &[],
         left_hand_aims: true,
         weapon_ring: true,
+        controls: &[],
     };
 
     #[test]

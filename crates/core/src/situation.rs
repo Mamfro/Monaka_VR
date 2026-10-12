@@ -130,7 +130,13 @@ impl Situations {
 
     /// The frames go to the flat screen: no world is drawn to stand in (a video, nothing drawn).
     pub fn flat(&self, now: u64) -> bool {
-        self.any(&[Situation::Video, Situation::WorldHidden], now)
+        self.flat_reason(now).is_some()
+    }
+
+    /// Why the frames go to the flat screen ([`Situations::flat`]): the first of its situations
+    /// that holds now.
+    pub fn flat_reason(&self, now: u64) -> Option<Situation> {
+        [Situation::Video, Situation::WorldHidden].into_iter().find(|&s| self.active(s, now))
     }
 
     /// The arms go to the game's animation: a cutscene places them, or a climb does (unless the
@@ -197,6 +203,7 @@ mod tests {
         assert!(!s.arms_to_game(10), "a fight's raised hands stay on the controllers");
         s.report(Situation::Video, true, 0, 100);
         assert!(s.flat(10) && s.head_aim_stands_down(10));
+        assert_eq!(s.flat_reason(10), Some(Situation::Video));
         assert!(!s.flat(200), "the reports expired");
         assert_eq!(s.summary(), "a video plays 1, climbing 1, fighting 1");
     }

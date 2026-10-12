@@ -122,8 +122,12 @@ version = "0.1.0"
 dependencies = [
  "monaka_channel",
  "monaka_core",
+ "monaka_framegen",
+ "monaka_fsr11",
+ "monaka_gl",
  "monaka_hook",
  "monaka_producer",
+ "monaka_streamline",
  "monaka_warp",
  "windows",
 ]
@@ -132,6 +136,7 @@ dependencies = [
 name = "monaka_streamline"
 version = "0.1.0"
 dependencies = [
+ "monaka_channel",
  "monaka_core",
  "monaka_hook",
  "monaka_producer",

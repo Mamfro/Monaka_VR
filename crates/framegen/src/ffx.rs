@@ -37,9 +37,39 @@ pub mod create {
 const NO_SWAPCHAIN_CONTEXT_NOTIFY: u32 = 1 << 3;
 /// `FfxApiResourceState`.
 pub mod state {
+    use windows::Win32::Graphics::Direct3D12::*;
+
     pub const COMMON: u32 = 1 << 0;
+    pub const UNORDERED_ACCESS: u32 = 1 << 1;
+    pub const COMPUTE_READ: u32 = 1 << 2;
+    pub const PIXEL_READ: u32 = 1 << 3;
     /// Readable by pixel and compute shaders (`D3D12_RESOURCE_STATE_*_SHADER_RESOURCE`).
-    pub const PIXEL_COMPUTE_READ: u32 = (1 << 2) | (1 << 3);
+    pub const PIXEL_COMPUTE_READ: u32 = PIXEL_READ | COMPUTE_READ;
+    pub const COPY_SRC: u32 = 1 << 4;
+    pub const COPY_DEST: u32 = 1 << 5;
+    pub const GENERIC_READ: u32 = COPY_SRC | COMPUTE_READ;
+    pub const INDIRECT_ARGUMENT: u32 = 1 << 6;
+    pub const PRESENT: u32 = 1 << 7;
+    pub const RENDER_TARGET: u32 = 1 << 8;
+
+    /// The D3D12 state a resource a game described to FFX is in (the D3D12 backend's own mapping),
+    /// `None` for a value that is not one of FFX's states.
+    pub fn d3d12(state: u32) -> Option<D3D12_RESOURCE_STATES> {
+        Some(match state {
+            COMMON => D3D12_RESOURCE_STATE_COMMON,
+            UNORDERED_ACCESS => D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            COMPUTE_READ => D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            PIXEL_READ => D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+            PIXEL_COMPUTE_READ => D3D12_RESOURCE_STATES(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0 | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE.0),
+            COPY_SRC => D3D12_RESOURCE_STATE_COPY_SOURCE,
+            COPY_DEST => D3D12_RESOURCE_STATE_COPY_DEST,
+            GENERIC_READ => D3D12_RESOURCE_STATE_GENERIC_READ,
+            INDIRECT_ARGUMENT => D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+            PRESENT => D3D12_RESOURCE_STATE_PRESENT,
+            RENDER_TARGET => D3D12_RESOURCE_STATE_RENDER_TARGET,
+            _ => return None,
+        })
+    }
 }
 const RESOURCE_TYPE_TEXTURE2D: u32 = 2;
 const USAGE_UAV: u32 = 1 << 1;
@@ -578,6 +608,18 @@ pub(crate) mod tests {
         // (in a game it is the executable's folder).
         unsafe { SetDllDirectoryW(&HSTRING::from(dir.as_path())) }.ok()?;
         Api::load(Some(&dir), &[]).ok()
+    }
+
+    #[test]
+    fn a_games_ffx_states_are_the_d3d12_backends() {
+        let readable = D3D12_RESOURCE_STATES(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0 | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE.0);
+        assert_eq!(state::d3d12(state::PIXEL_COMPUTE_READ), Some(readable));
+        assert_eq!(state::d3d12(state::COMMON), Some(D3D12_RESOURCE_STATE_COMMON));
+        assert_eq!(state::d3d12(state::COMPUTE_READ), Some(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE));
+        assert_eq!(state::d3d12(state::GENERIC_READ), Some(D3D12_RESOURCE_STATE_GENERIC_READ));
+        assert_eq!(state::d3d12(state::UNORDERED_ACCESS), Some(D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+        assert_eq!(state::d3d12(0), None);
+        assert_eq!(state::d3d12(1 << 12), None);
     }
 
     #[test]

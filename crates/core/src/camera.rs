@@ -6,6 +6,7 @@
 //! rigid inverse. Both Dying Light engines store cameras this way; other engines convert first.
 
 use crate::math::{Quat, Vec3, cross, dot, unit};
+use crate::options::Shared;
 use crate::protocol::HeadPose;
 
 /// How the head's position moves the view (the `head_position` option).
@@ -292,6 +293,86 @@ pub fn eye_camera(centre: &Mat34, eye: usize, separation: f32) -> Mat34 {
     offset_right(centre, side * separation)
 }
 
+impl Base {
+    /// The game's camera as it set it, or with `baked` (yaw, pitch; radians) of the head's turn in
+    /// it (head aim fed to the game as input) swapped for the head's current turn.
+    pub fn game_or_swap(baked: Option<[f32; 2]>) -> Base {
+        baked.map_or(Base::Game, |[baked_yaw, baked_pitch]| Base::Swap { baked_yaw, baked_pitch })
+    }
+
+    /// Where the headset's tracking space sits for the game camera `game` taken this way: the frame
+    /// the head's position moves the view in ([`view_centre`]). The camera itself for
+    /// [`Base::Game`]; levelled with the baked yaw turned back out ([`tracking_origin`]) otherwise.
+    pub fn origin(self, game: &Mat34) -> Option<Mat34> {
+        match self {
+            Base::Game => Some(*game),
+            Base::Level { baked_yaw } | Base::Swap { baked_yaw, .. } => tracking_origin(game, baked_yaw),
+        }
+    }
+}
+
+impl HeadPosition {
+    /// The tracking origin `origin` moved by how far this head model draws the head from where
+    /// `pose` tracks it: a controller's pose put through it lands where the eyes drawn from `origin`
+    /// see it ([`tracking_space`]). `origin` itself without a head pose.
+    pub fn drawn_origin(self, origin: &Mat34, pose: &HeadPose) -> Mat34 {
+        if pose.valid == 0 {
+            return *origin;
+        }
+        let drawn = self.position(pose);
+        apply_head(origin, crate::math::IDENTITY, [0, 1, 2].map(|k| drawn[k] - pose.position[k]))
+    }
+}
+
+/// One eye's view of a game camera: the eye's camera, the view centre between the eyes, and the
+/// frustum the eye is drawn with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EyeView {
+    pub camera: Mat34,
+    pub centre: Mat34,
+    pub frustum: Frustum,
+}
+
+impl EyeView {
+    /// Eye `eye` of the game camera `game` (canonical) for the head `pose`, the camera taken as
+    /// `base`: the view centre turned and moved by the head as the head model places it
+    /// ([`view_centre`]; the game's camera itself without a head pose), the eye half the eye
+    /// distance along its right axis ([`eye_camera`]), and its frustum (`centred`: the smallest
+    /// centred one around the headset's, for engines that take only a field of view; the game's
+    /// full angles `game_fov` without a headset). None when the game's camera or field of view is
+    /// not a plausible one ([`plausible_camera`], [`plausible_fov`]).
+    pub fn of(game: &Mat34, base: Base, pose: &HeadPose, eye: usize, shared: &Shared, centred: bool, game_fov: [f32; 2]) -> Option<Self> {
+        if !plausible_camera(game) || !plausible_fov(game_fov) {
+            return None;
+        }
+        let centre = match pose.valid != 0 {
+            true => view_centre(game, base, pose.orientation, shared.head_position.position(pose))?,
+            false => *game,
+        };
+        let camera = eye_camera(&centre, eye, shared.separation_for(pose));
+        let frustum = shared.rendered_frustum(pose, eye, centred, Some(game_fov))?;
+        Some(Self { camera, centre, frustum })
+    }
+}
+
+/// Whether a game camera (canonical) is one to draw from: finite, orthonormal axes, and a position
+/// within ten million units of the origin.
+pub fn plausible_camera(m: &Mat34) -> bool {
+    let axis = |k: usize| [m[k], m[4 + k], m[8 + k]];
+    let (r, u, b) = (axis(0), axis(1), axis(2));
+    all_finite(m)
+        && [m[3], m[7], m[11]].iter().all(|v| v.abs() < 1.0e7)
+        && [r, u, b].iter().all(|a| (dot(*a, *a) - 1.0).abs() < 1.0e-3)
+        && dot(r, u).abs() < 1.0e-3
+        && dot(r, b).abs() < 1.0e-3
+        && dot(u, b).abs() < 1.0e-3
+}
+
+/// Whether full field-of-view angles (radians) are a game's own: between 5 and 175 degrees.
+pub fn plausible_fov(angles: [f32; 2]) -> bool {
+    angles.iter().all(|v| v.is_finite() && *v > 0.09 && *v < 3.05)
+}
+
 /// Where the headset's tracking space sits in the world for a view drawn at `drawn` (a view centre
 /// or an eye, camera-to-world) from the tracked head `orientation` and `position` (as tracked,
 /// before a head model or an eye shift moved the view): the drawn view with the real head taken
@@ -345,6 +426,27 @@ pub fn compose(a: &Mat34, b: &Mat34) -> Mat34 {
     out
 }
 
+/// A 4x4 whose rows are the axes and then the position (row-vector maths, as a game's bind poses
+/// may be kept) as a 3x4.
+pub fn from_rows_4x4(m: &Mat44) -> Mat34 {
+    [m[0], m[4], m[8], m[12], m[1], m[5], m[9], m[13], m[2], m[6], m[10], m[14]]
+}
+
+/// Which of `frame`'s own axes (x, y or z, either way) points nearest `direction`, as a signed
+/// unit axis of the frame (a held weapon's barrel, from where the game points it).
+pub fn nearest_axis(frame: &Mat34, direction: Vec3) -> Option<Vec3> {
+    let (k, along) = (0..3)
+        .map(|k| {
+            let axis = [frame[k], frame[4 + k], frame[8 + k]];
+            (k, dot(axis, direction) / dot(axis, axis).sqrt())
+        })
+        .filter(|(_, c)| c.is_finite())
+        .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))?;
+    let mut axis = [0.0; 3];
+    axis[k] = along.signum();
+    Some(axis)
+}
+
 /// A pure translation.
 pub fn translation(offset: Vec3) -> Mat34 {
     [1.0, 0.0, 0.0, offset[0], 0.0, 1.0, 0.0, offset[1], 0.0, 0.0, 1.0, offset[2]]
@@ -363,6 +465,15 @@ pub fn unapply_3x3(m: &Mat34, v: Vec3) -> Option<Vec3> {
     let columns = [cross(rows[1], rows[2]), cross(rows[2], rows[0]), cross(rows[0], rows[1])];
     let det = dot(rows[0], columns[0]);
     (det.is_finite() && det.abs() > 1e-9).then(|| [0, 1, 2].map(|i| (columns[0][i] * v[0] + columns[1][i] * v[1] + columns[2][i] * v[2]) / det))
+}
+
+/// The inverse of an affine `m` whose 3x3 part may scale or mirror (a game's posed bones can); none
+/// when it is singular.
+pub fn inverse(m: &Mat34) -> Option<Mat34> {
+    let columns = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|axis| unapply_3x3(m, axis));
+    let [Some(x), Some(y), Some(z)] = columns else { return None };
+    let t = unapply_3x3(m, position(m))?;
+    Some([x[0], y[0], z[0], -t[0], x[1], y[1], z[1], -t[1], x[2], y[2], z[2], -t[2]])
 }
 
 /// `m`'s axes (its columns) made a rotation, keeping its x axis and the plane of x and y: a game
@@ -483,6 +594,47 @@ mod tests {
     use super::*;
     use core::f32::consts::FRAC_PI_6;
     use crate::math::{IDENTITY, yaw_rotation};
+
+    #[test]
+    fn row_vector_rows_become_columns_and_the_nearest_axis_is_signed() {
+        // A row-vector transform translating by (1, 2, 3).
+        let b = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 2.0, 3.0, 1.0];
+        assert_eq!(from_rows_4x4(&b), [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 3.0]);
+        // A frame turned a quarter about y: its z axis points along world x.
+        let frame = [0.0, 0.0, 1.0, 5.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0];
+        assert_eq!(nearest_axis(&frame, [0.9, 0.1, 0.0]), Some([0.0, 0.0, 1.0]));
+        assert_eq!(nearest_axis(&frame, [0.0, 0.0, 2.0]), Some([-1.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn an_eye_view_is_the_eye_beside_the_view_centre_with_its_frustum() {
+        let shared = Shared::from_options(&crate::options::Options::parse("eye_separation=0.064"), &crate::manifest::MONAKA);
+        let game = [1.0, 0.0, 0.0, 10.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, -5.0];
+        // No head pose: the game's camera is the view centre, its own field of view the frustum.
+        let [left, right] = [0, 1].map(|eye| EyeView::of(&game, Base::Game, &HeadPose::default(), eye, &shared, true, [1.5, 1.0]).unwrap());
+        assert_eq!(left.centre, game);
+        assert!((left.camera[3] - 9.968).abs() < 1e-5 && (right.camera[3] - 10.032).abs() < 1e-5, "{left:?} {right:?}");
+        assert!((full_angles_of(&left.frustum)[0] - 1.5).abs() < 1e-5 && (full_angles_of(&left.frustum)[1] - 1.0).abs() < 1e-5);
+        // Not a camera, or not a field of view: nothing to draw.
+        let mut skewed = game;
+        skewed[1] = 0.5;
+        assert!(EyeView::of(&skewed, Base::Game, &HeadPose::default(), 0, &shared, true, [1.5, 1.0]).is_none());
+        assert!(EyeView::of(&game, Base::Game, &HeadPose::default(), 0, &shared, true, [0.0, 1.0]).is_none());
+        assert!(!plausible_fov([3.1, 1.0]) && plausible_fov([0.1, 3.0]));
+        assert_eq!(Base::game_or_swap(None), Base::Game);
+        assert_eq!(Base::game_or_swap(Some([0.5, 0.25])), Base::Swap { baked_yaw: 0.5, baked_pitch: 0.25 });
+    }
+
+    fn full_angles_of(f: &Frustum) -> [f32; 2] {
+        [f.right.atan() - f.left.atan(), f.up.atan() - f.down.atan()]
+    }
+
+    #[test]
+    fn a_scaled_frame_inverts() {
+        let m: Mat34 = [0.0, -1.0, 0.0, 5.0, 2.0, 0.0, 0.0, 6.0, 0.0, 0.0, -1.0, 7.0];
+        let back = compose(&inverse(&m).unwrap(), &m);
+        assert!(distance(&back, &IDENTITY_MATRIX) < 1e-6, "{back:?}");
+    }
 
     #[test]
     fn a_scaled_frame_takes_a_vector_back_and_squares_up() {
@@ -724,6 +876,35 @@ mod tests {
         let apart = [right[3] - left[3], right[7] - left[7], right[11] - left[11]];
         assert!(close(apart.iter().map(|v| v * v).sum::<f32>().sqrt(), 0.064) && left[0] == levelled[0]);
         assert!(close(apart[0] / 0.064, levelled[0]) && close(apart[2] / 0.064, levelled[8]), "along the right axis");
+    }
+
+    #[test]
+    fn a_bases_origin_is_where_the_heads_position_moves_the_view() {
+        let yaw = 30f32.to_radians();
+        let game = from_back_up([yaw.sin() * 0.9, 0.43, yaw.cos() * 0.9], [0.0, 1.0, 0.0], [5.0, 1.0, 2.0]).unwrap();
+        let position = [0.03, -0.02, 0.05];
+        for base in [Base::Game, Base::Level { baked_yaw: 0.1 }, Base::Swap { baked_yaw: 0.1, baked_pitch: 0.05 }] {
+            let origin = base.origin(&game).unwrap();
+            let moved = apply_head(&origin, IDENTITY, position);
+            let centre = view_centre(&game, base, half_turn(0.2, -0.1), position).unwrap();
+            assert!((0..3).all(|k| close(centre[k * 4 + 3], moved[k * 4 + 3])), "{base:?}");
+        }
+        assert_eq!(Base::Game.origin(&game), Some(game));
+        assert_eq!(Base::Level { baked_yaw: 0.1 }.origin(&game), tracking_origin(&game, 0.1));
+    }
+
+    #[test]
+    fn the_drawn_origin_is_the_drawn_eyes_tracking_space() {
+        let game = apply_head(&translation([4.0, 1.0, -2.0]), yaw_rotation(0.6), [0.0; 3]);
+        let pose = HeadPose { valid: 1, orientation: half_turn(0.7, -0.4), position: [0.1, 1.6, -0.2], ..HeadPose::default() };
+        let origin = tracking_origin(&game, 0.2).unwrap();
+        for model in [HeadPosition::Off, HeadPosition::Lean, HeadPosition::Full] {
+            let drawn = view_centre(&game, Base::Level { baked_yaw: 0.2 }, pose.orientation, model.position(&pose)).unwrap();
+            let space = tracking_space(&drawn, pose.orientation, pose.position);
+            assert!(distance(&model.drawn_origin(&origin, &pose), &space) < 1e-5, "{model:?}");
+        }
+        assert_eq!(HeadPosition::Full.drawn_origin(&origin, &pose), origin, "the full head is drawn where it is tracked");
+        assert_eq!(HeadPosition::Lean.drawn_origin(&origin, &HeadPose::default()), origin);
     }
 
     #[test]

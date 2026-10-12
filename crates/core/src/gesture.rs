@@ -212,8 +212,8 @@ impl Directed {
     }
 }
 
-/// How a throw leaves the hand: the hand's fastest velocity just before the release, and the way
-/// it went through that moment.
+/// Where a throw is read from the hand's trail: its fastest velocity just before the release, and
+/// the way it went through that moment.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReleaseRules {
     /// The window before the release a throw's peak is looked for in (seconds).
@@ -223,17 +223,17 @@ pub struct ReleaseRules {
     /// The stroke's way is read from this long before the peak to this long after it (seconds).
     pub before: f64,
     pub after: f64,
-    /// The thrown thing leaves this many times the hand's speed: an arm's throw carries its
-    /// forearm's whip, which the controller in the palm does not show.
-    pub gain: f32,
 }
 
 impl ReleaseRules {
     /// A thrown object or weapon.
-    pub const THROW: Self = Self { within: 0.5, span: Trail::DEFAULT_SPAN, before: 0.1, after: 0.04, gain: 1.6 };
+    pub const THROW: Self = Self { within: 0.5, span: Trail::DEFAULT_SPAN, before: 0.1, after: 0.04 };
 }
 
-/// A throw's release: its velocity (gain applied; m/s) and its way (unit).
+/// Straight down, where a hand at rest lets go.
+const DOWN: Vec3 = [0.0, -1.0, 0.0];
+
+/// A throw's release: the hand's velocity (m/s), as fast as its peak, along its way (unit).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Release {
     pub velocity: Vec3,
@@ -241,12 +241,58 @@ pub struct Release {
 }
 
 impl Release {
-    /// The throw `trail` shows at its newest sample, `None` without a stroke.
+    /// The throw `trail` shows at its newest sample ([`Release::from_peak`]), `None` without a
+    /// peak (too few samples).
     pub fn read(trail: &Trail, rules: &ReleaseRules) -> Option<Release> {
         let peak = trail.fastest(rules.within, rules.span)?;
-        let way = trail.stroke(rules.within, rules.span, rules.before, rules.after)?;
-        let speed = length(peak.velocity) * rules.gain;
-        Some(Release { velocity: way.map(|c| c * speed), way })
+        Some(Self::from_peak(peak.velocity, trail.stroke(rules.within, rules.span, rules.before, rules.after)))
+    }
+
+    /// The release of a hand whose fastest velocity lately was `fastest`: as fast as that, the way
+    /// it travelled through that moment (its `stroke`: a short flick stops before the button is let
+    /// go, and what comes after is not the throw), else the way of its fastest, else down.
+    pub fn from_peak(fastest: Vec3, stroke: Option<Vec3>) -> Release {
+        let speed = length(fastest);
+        let way = stroke.unwrap_or(if speed > 0.0 { fastest.map(|c| c / speed) } else { DOWN });
+        Release { velocity: way.map(|c| c * speed), way }
+    }
+
+    /// What the thrown thing leaves with ([`ThrowSpeed`]); `None` for a hand speed not finite.
+    pub fn thrown(&self, speed: &ThrowSpeed) -> Option<Vec3> {
+        speed.thrown(self.velocity)
+    }
+}
+
+/// How fast a thrown thing leaves for the hand's speed: `gain` times it, at most `most` (m/s); a
+/// hand slower than `still` (m/s) is at rest and lets it drop at `drop` (m/s) straight down. An
+/// arm's throw carries its forearm's whip, which the controller in the palm does not show, and a
+/// throw in a room is slower than the game's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThrowSpeed {
+    pub gain: f32,
+    pub most: f32,
+    pub still: f32,
+    pub drop: f32,
+}
+
+impl ThrowSpeed {
+    /// `gain` times the hand's speed, with no limit; a hand at rest gives a throw at rest.
+    pub const fn gain(gain: f32) -> Self {
+        Self { gain, most: f32::INFINITY, still: 0.0, drop: 0.0 }
+    }
+
+    /// What a hand moving at `hand` (m/s) throws at: along it, its speed times the gain, at most
+    /// the most; down for a hand at rest. `None` for a hand speed not finite.
+    pub fn thrown(&self, hand: Vec3) -> Option<Vec3> {
+        let speed = length(hand);
+        if !speed.is_finite() {
+            return None;
+        }
+        if speed < self.still {
+            return Some(DOWN.map(|c| c * self.drop));
+        }
+        let scale = if speed * self.gain > self.most { self.most / speed } else { self.gain };
+        Some(hand.map(|c| c * scale))
     }
 }
 
@@ -449,7 +495,31 @@ mod tests {
         }
         let release = Release::read(&trail, &ReleaseRules::THROW).unwrap();
         assert!(release.way[2] < -0.99, "{release:?}");
-        assert!((release.velocity[2] + 4.0 * 1.6).abs() < 0.05, "{release:?}");
+        let thrown = release.thrown(&ThrowSpeed::gain(1.6)).unwrap();
+        assert!((thrown[2] + 4.0 * 1.6).abs() < 0.05, "{thrown:?}");
+    }
+
+    /// The release as the games wrote it before [`Release`]: the hand's velocity.
+    fn old_throw_velocity(fastest: Vec3, stroke: Option<Vec3>) -> Vec3 {
+        let speed = length(fastest);
+        let way = stroke.unwrap_or(if speed > 0.0 { fastest.map(|c| c / speed) } else { DOWN });
+        way.map(|c| c * speed)
+    }
+
+    #[test]
+    fn the_release_rule_gives_what_each_game_gave() {
+        let hands: [Vec3; 7] = [[0.0; 3], [0.01, 0.02, 0.0], [0.0, 0.0, -1.0], [3.0, 1.0, -4.0], [0.0, 0.0, -5.0], [10.0, -2.0, -30.0], [0.2, 0.3, 0.1]];
+        let strokes = [None, Some([0.0, 0.0, -1.0]), Some([0.6, 0.0, -0.8])];
+        for fastest in hands {
+            for stroke in strokes {
+                let release = Release::from_peak(fastest, stroke);
+                assert_eq!(release.velocity, old_throw_velocity(fastest, stroke), "{fastest:?} {stroke:?}");
+                // The hand's velocity times its gains, component by component.
+                for gain in [1.6, 3.0] {
+                    assert_eq!(release.thrown(&ThrowSpeed::gain(gain)), Some(release.velocity.map(|c| c * gain)));
+                }
+            }
+        }
     }
 
     #[test]

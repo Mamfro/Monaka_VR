@@ -4,7 +4,11 @@
 //! `monaka_pad::feature::gamepad()` among its components; what its own pad reading needs beyond
 //! XInput (a GameInput stand-in reported to the game, a "pad connected" flag the game keeps) is a
 //! small component of its own that `needs` this one.
+//!
+//! The actions provider ([`actions`]): a game's actions pressed by what they mean
+//! ([`crate::actions`]), listed by a game that implements [`Actions`].
 
+use crate::actions::Actions;
 use monaka_core::feature::Feature;
 use monaka_core::manifest::CONTROLLER_PAD;
 use monaka_producer::game::{Component, Game, Lack, On, Start};
@@ -62,6 +66,18 @@ pub fn whole_stick() {
 fn quiet() {
     crate::stop();
     crate::take_right_stick_y(false);
+}
+
+/// The actions provider for game `G` ([`crate::actions`]): from its install, ready-mades press the
+/// game's actions by its bindings ([`Actions`]); at the stop every action still held is let go. A
+/// game lists it beside its gamepad.
+pub const fn actions<G: Actions>() -> Component<G> {
+    Component { name: "actions", install: install_actions::<G>, quiet: crate::actions::let_go_all, release: crate::actions::release, ..Component::NONE }
+}
+
+fn install_actions<G: Actions>(_: &mut Start<'_, G>) -> Result<(), Lack> {
+    crate::actions::install::<G>();
+    Ok(())
 }
 
 fn release() {

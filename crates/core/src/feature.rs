@@ -52,11 +52,14 @@ pub enum Feature {
     Throw,
     /// Crouching by lowering the head.
     Duck,
+    /// Each eye's depth given to the headset, so its own reprojection of a late frame corrects
+    /// the head moving as well as turning.
+    DepthLayer,
 }
 
 impl Feature {
     /// Every feature, in a fixed order.
-    pub const ALL: [Feature; 15] = [
+    pub const ALL: [Feature; 16] = [
         Feature::Stereo,
         Feature::Look,
         Feature::HandRig,
@@ -72,6 +75,7 @@ impl Feature {
         Feature::Bow,
         Feature::Throw,
         Feature::Duck,
+        Feature::DepthLayer,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -91,6 +95,7 @@ impl Feature {
             Feature::Bow => "bow",
             Feature::Throw => "throw",
             Feature::Duck => "duck",
+            Feature::DepthLayer => "depth layer",
         }
     }
 

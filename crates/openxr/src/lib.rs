@@ -201,8 +201,15 @@ pub enum Event {
 }
 
 /// Extensions enabled when the runtime offers them (controller profiles beyond the core ones,
-/// hand tracking for the fingers).
-pub const OPTIONAL_EXTENSIONS: [&std::ffi::CStr; 3] = [sys::VALVE_FRAME_CONTROLLER_INTERACTION, sys::EXT_HAND_TRACKING, sys::EXT_HAND_JOINTS_MOTION_RANGE];
+/// hand tracking for the fingers, depth beside the eye images, eye tracking).
+pub const OPTIONAL_EXTENSIONS: [&std::ffi::CStr; 6] = [
+    sys::VALVE_FRAME_CONTROLLER_INTERACTION,
+    sys::EXT_HAND_TRACKING,
+    sys::EXT_HAND_JOINTS_MOTION_RANGE,
+    sys::KHR_COMPOSITION_LAYER_DEPTH,
+    sys::EXT_EYE_GAZE_INTERACTION,
+    sys::FB_EYE_TRACKING_SOCIAL,
+];
 
 /// `XR_EXT_hand_tracking`'s entry points, when the extension is enabled.
 #[allow(non_snake_case)]
@@ -212,12 +219,21 @@ struct HandFunctions {
     LocateHandJointsEXT: sys::PFN_xrLocateHandJointsEXT,
 }
 
+/// `XR_FB_eye_tracking_social`'s entry points, when the extension is enabled.
+#[allow(non_snake_case)]
+struct EyeTrackerFunctions {
+    CreateEyeTrackerFB: sys::PFN_xrCreateEyeTrackerFB,
+    DestroyEyeTrackerFB: sys::PFN_xrDestroyEyeTrackerFB,
+    GetEyeGazesFB: sys::PFN_xrGetEyeGazesFB,
+}
+
 pub struct Instance {
     handle: sys::Instance,
     fns: Functions,
     hand_fns: Option<HandFunctions>,
-    /// `XR_EXT_hand_joints_motion_range` is enabled.
-    motion_range: bool,
+    eye_fns: Option<EyeTrackerFunctions>,
+    /// The optional extensions enabled (those the runtime offers).
+    enabled: Vec<&'static std::ffi::CStr>,
     // Dropped after `Drop::drop` has destroyed the instance.
     _loader: Loader,
 }
@@ -240,8 +256,9 @@ impl Instance {
         };
         copy_name(&mut info.applicationName, application);
         copy_name(&mut info.engineName, "Monaka VR");
+        let enabled: Vec<&'static std::ffi::CStr> = OPTIONAL_EXTENSIONS.into_iter().filter(|name| offers(name)).collect();
         let mut extensions = vec![sys::KHR_D3D11_ENABLE.as_ptr()];
-        extensions.extend(OPTIONAL_EXTENSIONS.iter().filter(|name| offers(name)).map(|name| name.as_ptr()));
+        extensions.extend(enabled.iter().map(|name| name.as_ptr()));
         let create = sys::InstanceCreateInfo {
             ty: sys::TYPE_INSTANCE_CREATE_INFO,
             next: std::ptr::null(),
@@ -257,9 +274,9 @@ impl Instance {
         let mut handle = sys::NULL_HANDLE;
         // SAFETY: valid create info (pointers outlive the call) and out-pointer.
         check(unsafe { create_instance(&create, &mut handle) }, "xrCreateInstance")?;
-        let enabled = |name: &std::ffi::CStr| offers(name);
         // SAFETY: each field's type is the PFN type of the function it is loaded by name.
-        let hand_fns = enabled(sys::EXT_HAND_TRACKING)
+        let hand_fns = enabled
+            .contains(&sys::EXT_HAND_TRACKING)
             .then(|| unsafe {
                 Some(HandFunctions {
                     CreateHandTrackerEXT: load_fn(loader.get, handle, "xrCreateHandTrackerEXT\0").ok()?,
@@ -268,9 +285,19 @@ impl Instance {
                 })
             })
             .flatten();
-        let motion_range = enabled(sys::EXT_HAND_JOINTS_MOTION_RANGE);
+        // SAFETY: as above.
+        let eye_fns = enabled
+            .contains(&sys::FB_EYE_TRACKING_SOCIAL)
+            .then(|| unsafe {
+                Some(EyeTrackerFunctions {
+                    CreateEyeTrackerFB: load_fn(loader.get, handle, "xrCreateEyeTrackerFB\0").ok()?,
+                    DestroyEyeTrackerFB: load_fn(loader.get, handle, "xrDestroyEyeTrackerFB\0").ok()?,
+                    GetEyeGazesFB: load_fn(loader.get, handle, "xrGetEyeGazesFB\0").ok()?,
+                })
+            })
+            .flatten();
         match Functions::load(loader.get, handle) {
-            Ok(fns) => Ok(Self { handle, fns, hand_fns, motion_range, _loader: loader }),
+            Ok(fns) => Ok(Self { handle, fns, hand_fns, eye_fns, enabled, _loader: loader }),
             Err(e) => {
                 // SAFETY: destroys the instance just created, before the loader is freed.
                 if let Ok(destroy) = unsafe { load_fn::<sys::PFN_xrDestroyInstance>(loader.get, handle, "xrDestroyInstance\0") } {
@@ -368,24 +395,72 @@ impl Instance {
         }
     }
 
-    /// Whether the headset system tracks hands (`XR_EXT_hand_tracking` enabled and supported).
-    pub fn hand_tracking(&self, system: SystemId) -> bool {
-        if self.hand_fns.is_none() {
-            return false;
-        }
-        let mut hands = sys::SystemHandTrackingPropertiesEXT { ty: sys::TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT, next: std::ptr::null_mut(), supportsHandTracking: 0 };
+    /// Whether optional extension `name` ([`OPTIONAL_EXTENSIONS`]) is enabled: the runtime offers it.
+    pub fn has_extension(&self, name: &std::ffi::CStr) -> bool {
+        self.enabled.contains(&name)
+    }
+
+    /// Whether projection layers may carry each eye's depth (`XR_KHR_composition_layer_depth`).
+    pub fn depth_layer(&self) -> bool {
+        self.has_extension(sys::KHR_COMPOSITION_LAYER_DEPTH)
+    }
+
+    /// Asks the system's properties with an extension's properties record chained on them.
+    ///
+    /// # Safety
+    /// `chained` must point to a writable extension properties record (type set, `next` null) that
+    /// outlives the call.
+    unsafe fn system_properties_with(&self, system: SystemId, chained: *mut std::ffi::c_void) -> bool {
         let mut properties = sys::SystemProperties {
             ty: sys::TYPE_SYSTEM_PROPERTIES,
-            next: (&raw mut hands).cast(),
+            next: chained,
             systemId: 0,
             vendorId: 0,
             systemName: [0; sys::MAX_SYSTEM_NAME_SIZE],
             graphicsProperties: Default::default(),
             trackingProperties: Default::default(),
         };
-        // SAFETY: typed out-structs, the chained one outliving the call.
-        let ok = unsafe { (self.fns.GetSystemProperties)(self.handle, system, &mut properties) } >= 0;
+        // SAFETY: typed out-structs, the chained one valid per the caller.
+        unsafe { (self.fns.GetSystemProperties)(self.handle, system, &mut properties) >= 0 }
+    }
+
+    /// Whether the headset system tracks hands (`XR_EXT_hand_tracking` enabled and supported).
+    pub fn hand_tracking(&self, system: SystemId) -> bool {
+        if self.hand_fns.is_none() {
+            return false;
+        }
+        let mut hands = sys::SystemHandTrackingPropertiesEXT { ty: sys::TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT, next: std::ptr::null_mut(), supportsHandTracking: 0 };
+        // SAFETY: a typed properties record that outlives the call.
+        let ok = unsafe { self.system_properties_with(system, (&raw mut hands).cast()) };
         ok && hands.supportsHandTracking != 0
+    }
+
+    /// Whether the headset system gives eye gaze as a pose action (`XR_EXT_eye_gaze_interaction`
+    /// enabled and supported).
+    pub fn eye_gaze(&self, system: SystemId) -> bool {
+        if !self.has_extension(sys::EXT_EYE_GAZE_INTERACTION) {
+            return false;
+        }
+        let mut gaze = sys::SystemEyeGazeInteractionPropertiesEXT {
+            ty: sys::TYPE_SYSTEM_EYE_GAZE_INTERACTION_PROPERTIES_EXT,
+            next: std::ptr::null_mut(),
+            supportsEyeGazeInteraction: 0,
+        };
+        // SAFETY: a typed properties record that outlives the call.
+        let ok = unsafe { self.system_properties_with(system, (&raw mut gaze).cast()) };
+        ok && gaze.supportsEyeGazeInteraction != 0
+    }
+
+    /// Whether the headset system tracks the eyes through Meta's eye tracker
+    /// (`XR_FB_eye_tracking_social` enabled and supported).
+    pub fn eye_tracking_fb(&self, system: SystemId) -> bool {
+        if self.eye_fns.is_none() {
+            return false;
+        }
+        let mut eyes = sys::SystemEyeTrackingPropertiesFB { ty: sys::TYPE_SYSTEM_EYE_TRACKING_PROPERTIES_FB, next: std::ptr::null_mut(), supportsEyeTracking: 0 };
+        // SAFETY: a typed properties record that outlives the call.
+        let ok = unsafe { self.system_properties_with(system, (&raw mut eyes).cast()) };
+        ok && eyes.supportsEyeTracking != 0
     }
 
     pub fn create_session(&self, system: SystemId, device: &ID3D11Device) -> Result<Session<'_>> {
@@ -519,11 +594,21 @@ impl Session<'_> {
 
     /// A swapchain filled by copies (transfer destination) and sampled by the compositor.
     pub fn create_swapchain(&self, format: i64, width: u32, height: u32) -> Result<Swapchain<'_>> {
+        self.swapchain(format, width, height, sys::SWAPCHAIN_USAGE_TRANSFER_DST_BIT | sys::SWAPCHAIN_USAGE_SAMPLED_BIT)
+    }
+
+    /// A depth swapchain (a depth format such as `DXGI_FORMAT_D32_FLOAT`) filled by copies, for
+    /// [`DepthView`]s.
+    pub fn create_depth_swapchain(&self, format: i64, width: u32, height: u32) -> Result<Swapchain<'_>> {
+        self.swapchain(format, width, height, sys::SWAPCHAIN_USAGE_TRANSFER_DST_BIT | sys::SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
+    }
+
+    fn swapchain(&self, format: i64, width: u32, height: u32, usage: sys::Flags64) -> Result<Swapchain<'_>> {
         let info = sys::SwapchainCreateInfo {
             ty: sys::TYPE_SWAPCHAIN_CREATE_INFO,
             next: std::ptr::null(),
             createFlags: 0,
-            usageFlags: sys::SWAPCHAIN_USAGE_TRANSFER_DST_BIT | sys::SWAPCHAIN_USAGE_SAMPLED_BIT,
+            usageFlags: usage,
             format,
             sampleCount: 1,
             width,
@@ -592,7 +677,9 @@ impl Session<'_> {
         struct RawProjection {
             layer: sys::CompositionLayerProjection,
             views: [sys::CompositionLayerProjectionView; 2],
+            depths: [sys::CompositionLayerDepthInfoKHR; 2],
         }
+        let depth_layer = self.instance.depth_layer();
         // Boxed so the pointers handed to the runtime stay put while the lists grow.
         let mut projections: Vec<Box<RawProjection>> = Vec::new();
         let mut quads: Vec<Box<sys::CompositionLayerQuad>> = Vec::new();
@@ -607,6 +694,21 @@ impl Session<'_> {
                         fov: v.fov,
                         subImage: v.swapchain.full_image(),
                     };
+                    let depth = |v: &ProjectionView<'_>| {
+                        let (image, near, far) = match &v.depth {
+                            Some(d) => (d.swapchain.sub_image(d.rect), d.near_z, d.far_z),
+                            None => (v.swapchain.full_image(), 0.0, 0.0),
+                        };
+                        sys::CompositionLayerDepthInfoKHR {
+                            ty: sys::TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR,
+                            next: std::ptr::null(),
+                            subImage: image,
+                            minDepth: 0.0,
+                            maxDepth: 1.0,
+                            nearZ: near,
+                            farZ: far,
+                        }
+                    };
                     let mut raw = Box::new(RawProjection {
                         layer: sys::CompositionLayerProjection {
                             ty: sys::TYPE_COMPOSITION_LAYER_PROJECTION,
@@ -617,7 +719,14 @@ impl Session<'_> {
                             views: std::ptr::null(),
                         },
                         views: [view(&views[0]), view(&views[1])],
+                        depths: [depth(&views[0]), depth(&views[1])],
                     });
+                    // Each eye's depth goes on its view only when the extension is enabled.
+                    for (eye, view) in views.iter().enumerate() {
+                        if depth_layer && view.depth.is_some() {
+                            raw.views[eye].next = (&raw const raw.depths[eye]).cast();
+                        }
+                    }
                     raw.layer.views = raw.views.as_ptr();
                     headers.push((&raw const raw.layer).cast());
                     projections.push(raw);
@@ -786,6 +895,64 @@ impl Session<'_> {
         let valid = sys::SPACE_LOCATION_ORIENTATION_VALID_BIT | sys::SPACE_LOCATION_POSITION_VALID_BIT;
         Ok((location.locationFlags & valid == valid).then_some(location.pose))
     }
+
+    /// Where gaze action space `space` (`XR_EXT_eye_gaze_interaction`) is in `base` at `time`, and
+    /// when the runtime sampled it (0 if it does not say), while the eyes are tracked. The position
+    /// is zero when only the direction is known.
+    pub fn locate_gaze(&self, space: &Space<'_>, base: &Space<'_>, time: Time) -> Result<Option<(Posef, Time)>> {
+        let mut sample = sys::EyeGazeSampleTimeEXT { ty: sys::TYPE_EYE_GAZE_SAMPLE_TIME_EXT, next: std::ptr::null_mut(), time: 0 };
+        let chained = if self.instance.has_extension(sys::EXT_EYE_GAZE_INTERACTION) { (&raw mut sample).cast() } else { std::ptr::null_mut() };
+        let mut location = sys::SpaceLocation { ty: sys::TYPE_SPACE_LOCATION, next: chained, locationFlags: 0, pose: Posef::IDENTITY };
+        // SAFETY: typed out-structs, the chained one outliving the call.
+        check(unsafe { (self.fns().LocateSpace)(space.handle, base.handle, time, &mut location) }, "xrLocateSpace")?;
+        let looking = sys::SPACE_LOCATION_ORIENTATION_VALID_BIT | sys::SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+        if location.locationFlags & looking != looking {
+            return Ok(None);
+        }
+        let mut pose = location.pose;
+        if location.locationFlags & sys::SPACE_LOCATION_POSITION_VALID_BIT == 0 {
+            pose.position = Vector3f::default();
+        }
+        Ok(Some((pose, sample.time)))
+    }
+
+    /// Meta's eye tracker (`XR_FB_eye_tracking_social`); fails without it.
+    pub fn eye_tracker(&self) -> Result<EyeTracker<'_>> {
+        let fns = self.instance.eye_fns.as_ref().ok_or(Error::Unsupported("eye tracking (XR_FB_eye_tracking_social)"))?;
+        let info = sys::EyeTrackerCreateInfoFB { ty: sys::TYPE_EYE_TRACKER_CREATE_INFO_FB, next: std::ptr::null() };
+        let mut handle = 0;
+        // SAFETY: typed in and out.
+        check(unsafe { (fns.CreateEyeTrackerFB)(self.handle, &info, &mut handle) }, "xrCreateEyeTrackerFB")?;
+        Ok(EyeTracker { instance: self.instance, handle })
+    }
+}
+
+/// Both eyes' gaze (`XR_FB_eye_tracking_social`).
+pub struct EyeTracker<'s> {
+    instance: &'s Instance,
+    handle: sys::EyeTrackerFB,
+}
+
+impl EyeTracker<'_> {
+    /// Each eye's gaze pose in `base` at `time` (left, right; `None` for an eye not tracked) and
+    /// when the runtime sampled them.
+    pub fn gazes(&self, base: &Space<'_>, time: Time) -> Result<([Option<Posef>; 2], Time)> {
+        let Some(fns) = self.instance.eye_fns.as_ref() else { return Ok(([None; 2], 0)) };
+        let info = sys::EyeGazesInfoFB { ty: sys::TYPE_EYE_GAZES_INFO_FB, next: std::ptr::null(), baseSpace: base.handle, time };
+        let mut gazes = sys::EyeGazesFB { ty: sys::TYPE_EYE_GAZES_FB, next: std::ptr::null_mut(), gaze: [sys::EyeGazeFB::default(); sys::EYE_POSITION_COUNT_FB], time: 0 };
+        // SAFETY: typed in and out.
+        check(unsafe { (fns.GetEyeGazesFB)(self.handle, &info, &mut gazes) }, "xrGetEyeGazesFB")?;
+        Ok((gazes.gaze.map(|g| (g.isValid != 0).then_some(g.gazePose)), gazes.time))
+    }
+}
+
+impl Drop for EyeTracker<'_> {
+    fn drop(&mut self) {
+        if let Some(fns) = self.instance.eye_fns.as_ref() {
+            // SAFETY: destroys our tracker once.
+            unsafe { (fns.DestroyEyeTrackerFB)(self.handle) };
+        }
+    }
 }
 
 impl Session<'_> {
@@ -824,7 +991,7 @@ impl HandTracker<'_> {
         };
         let info = sys::HandJointsLocateInfoEXT {
             ty: sys::TYPE_HAND_JOINTS_LOCATE_INFO_EXT,
-            next: if self.instance.motion_range { (&raw const range).cast() } else { std::ptr::null() },
+            next: if self.instance.has_extension(sys::EXT_HAND_JOINTS_MOTION_RANGE) { (&raw const range).cast() } else { std::ptr::null() },
             baseSpace: base.handle,
             time,
         };
@@ -963,6 +1130,16 @@ impl Swapchain<'_> {
         }
     }
 
+    /// The part `rect` (left, top, width, height) of the image.
+    fn sub_image(&self, rect: [u32; 4]) -> sys::SwapchainSubImage {
+        let [x, y, width, height] = rect.map(|v| v as i32);
+        sys::SwapchainSubImage {
+            swapchain: self.handle,
+            imageRect: sys::Rect2Di { offset: sys::Offset2Di { x, y }, extent: sys::Extent2Di { width, height } },
+            imageArrayIndex: 0,
+        }
+    }
+
     /// Acquires the next image, waits for it, lets `fill` write it, and releases it.
     pub fn fill(&self, fill: impl FnOnce(&ID3D11Texture2D)) -> Result<()> {
         let fns = &self.instance.fns;
@@ -995,6 +1172,22 @@ pub struct ProjectionView<'a> {
     pub pose: Posef,
     pub fov: Fovf,
     pub swapchain: &'a Swapchain<'a>,
+    /// The eye's depth, for the runtime's reprojection; left out unless the runtime takes depth
+    /// ([`Instance::depth_layer`]).
+    pub depth: Option<DepthView<'a>>,
+}
+
+/// The depth beside one eye's image (`XR_KHR_composition_layer_depth`), over a depth range of 0
+/// to 1.
+pub struct DepthView<'a> {
+    /// A depth swapchain ([`Session::create_depth_swapchain`]).
+    pub swapchain: &'a Swapchain<'a>,
+    /// The part of its image that lines up with the eye image: left, top, width, height.
+    pub rect: [u32; 4],
+    /// The distances in metres at depth 0 (`nearZ`) and at depth 1 (`farZ`): reversed depth has
+    /// the larger first, and either may be infinite.
+    pub near_z: f32,
+    pub far_z: f32,
 }
 
 /// A composition layer for [`Session::end_frame`].

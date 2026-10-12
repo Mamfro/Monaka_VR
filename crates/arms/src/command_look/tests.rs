@@ -1,0 +1,47 @@
+use super::*;
+
+#[test]
+fn the_share_is_swapped_not_accumulated() {
+    let head = Share { yaw: 30f32.to_radians(), pitch: 20f32.to_radians() };
+    // The game's own accumulator (with its unknown offset): yaw 215, pitch 240.
+    let (pitch, yaw) = reshare(240.0, 215.0, Share::default(), head);
+    assert!((yaw - 245.0).abs() < 1e-3 && (pitch - 220.0).abs() < 1e-3, "head left and up: {yaw} {pitch}");
+    // The mouse adds 5 degrees of yaw; the head holds still: only the mouse's turn is new.
+    let (pitch, yaw) = reshare(pitch, yaw + 5.0, head, head);
+    assert!((yaw - 250.0).abs() < 1e-3 && (pitch - 220.0).abs() < 1e-3);
+    // Released: the game's own angles, with the mouse's turn kept.
+    let (pitch, yaw) = reshare(pitch, yaw, head, Share::default());
+    assert!((yaw - 220.0).abs() < 1e-3 && (pitch - 240.0).abs() < 1e-3);
+}
+
+#[test]
+fn a_tilt_is_levelled_a_step_at_a_time() {
+    assert_eq!(LEVEL.step(15.0), -0.25);
+    assert_eq!(LEVEL.step(-15.0), 0.25);
+    assert_eq!(LEVEL.step(0.2), -0.2);
+    assert_eq!(LEVEL.step(0.01), 0.0, "level enough");
+    // A head looking 40 down is past the range: no measure.
+    assert!(own_pitch(-40.0, Share { yaw: 0.0, pitch: -40f32.to_radians() }).is_nan());
+    // A head 10 up with the camera 25 up: the player's own pitch is 15 up (-15 positive down).
+    assert!((own_pitch(25.0, Share { yaw: 0.0, pitch: 10f32.to_radians() }) + 15.0).abs() < 1e-4);
+}
+
+#[test]
+fn a_pause_holds_the_share_and_another_camera_takes_none() {
+    let held = Share { yaw: 0.2, pitch: 0.1 };
+    let head = Share { yaw: 0.5, pitch: -0.1 };
+    assert_eq!(next_share(true, true, false, held, Some(head)), held, "resuming after a pause");
+    assert_eq!(next_share(true, false, false, held, Some(head)), head);
+    assert_eq!(next_share(true, false, false, held, None), held, "no head pose: the share stays");
+    assert_eq!(next_share(true, false, true, held, Some(head)), Share::default(), "another camera has the view");
+    assert_eq!(next_share(false, false, false, held, Some(head)), Share::default(), "handed back");
+}
+
+#[test]
+fn head_share_reads_yaw_and_pitch() {
+    let (y, p) = (30f32.to_radians(), 20f32.to_radians());
+    let (sy, cy) = (y * 0.5).sin_cos();
+    let (sp, cp) = (p * 0.5).sin_cos();
+    let share = head_share([cy * sp, sy * cp, -sy * sp, cy * cp]);
+    assert!((share.yaw - y).abs() < 1e-4 && (share.pitch - p).abs() < 1e-4, "{share:?}");
+}

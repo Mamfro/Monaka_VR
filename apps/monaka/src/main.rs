@@ -10,7 +10,7 @@
 mod screenshot;
 mod theme;
 
-use monaka_launch::games::{self, Game, Kind, Launch, MONAKA, Manifest, Opt, Shown, TABS, Values, number_text};
+use monaka_launch::games::{self, Game, Kind, Launch, MONAKA, Manifest, Opt, PLAY_WITH, Shown, TABS, Values, number_text};
 use monaka_launch::session::{self, Console, Event, State, Stop};
 use monaka_launch::settings::Settings;
 use monaka_launch::{Paths, packs, system};
@@ -20,14 +20,15 @@ use std::sync::mpsc::{self, Receiver};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DT_CALCRECT, DT_NOPREFIX, DT_WORDBREAK, DeleteObject, DrawTextW,
-    FW_NORMAL, FW_SEMIBOLD, GetDC, GetSysColorBrush, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, ReleaseDC, SelectObject,
+    FW_NORMAL, FW_SEMIBOLD, GetDC, GetMonitorInfoW, GetSysColorBrush, HDC, HFONT, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    OUT_DEFAULT_PRECIS, ReleaseDC, SelectObject,
     SetBkColor, SetTextColor, COLOR_WINDOW,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW};
 use windows::Win32::UI::Controls::{
     EM_REPLACESEL, EM_SETSEL, ICC_BAR_CLASSES, ICC_STANDARD_CLASSES, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, NMHDR, TCIF_TEXT, TCITEMW,
-    TCM_DELETEALLITEMS, TCM_GETCURSEL, TCM_INSERTITEMW, TCM_SETCURSEL, TCN_SELCHANGE, TRACKBAR_CLASSW, WC_COMBOBOXW, WC_TABCONTROLW,
+    SetScrollInfo, TCM_DELETEALLITEMS, TCM_GETCURSEL, TCM_INSERTITEMW, TCM_SETCURSEL, TCN_SELCHANGE, TRACKBAR_CLASSW, WC_COMBOBOXW, WC_TABCONTROLW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext};
@@ -38,6 +39,9 @@ use windows::core::{HSTRING, PCWSTR, w};
 const WM_SESSION: u32 = WM_APP + 1;
 /// Tell the player about packs made for a newer Monaka (posted once the window shows).
 const WM_TOO_NEW: u32 = WM_APP + 2;
+/// Make the option controls again (what the player holds changed the aims on offer), after the
+/// control that changed it has finished telling us.
+const WM_REMAKE_OPTIONS: u32 = WM_APP + 3;
 
 /// Where Monaka's releases are, for an update.
 const RELEASES: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/releases");
@@ -58,6 +62,7 @@ const ID_GREY: i32 = 8;
 const ID_RESET: i32 = 9;
 const ID_ADD_PACK: i32 = 10;
 const ID_REMOVE_PACK: i32 = 11;
+const ID_SCROLL: i32 = 12;
 const ID_LABEL: i32 = 200;
 const ID_CONTROL: i32 = 300;
 const ID_VALUE: i32 = 400;
@@ -94,6 +99,9 @@ fn main() {
                 app.screenshot = Some(request.file.clone());
             }
             app.select(selected);
+            if let Some(request) = &screenshot {
+                app.scroll = request.scroll;
+            }
             app.refresh_checks();
         }
     });
@@ -222,8 +230,12 @@ fn help_text(game: &Manifest, values: &Values, opt: &Opt) -> String {
     }
 }
 
-/// How the window names `value` of `opt`: on or off, or a choice's label.
+/// How the window names `value` of `opt`: on or off, or a choice's label; a rule's `!value`, "not"
+/// it.
 fn value_name(opt: &Opt, value: &str) -> String {
+    if let Some(not) = value.strip_prefix('!') {
+        return format!("not {}", value_name(opt, not));
+    }
     match opt.kind {
         Kind::Switch { .. } => (if value == "1" { "on" } else { "off" }).to_owned(),
         Kind::Choice { choices, .. } => choices.iter().find(|(id, _)| *id == value).map_or(value, |(_, name)| name).to_owned(),
@@ -231,11 +243,12 @@ fn value_name(opt: &Opt, value: &str) -> String {
     }
 }
 
-/// "Turning it on", "Turning it off" or "Set to <choice>,".
+/// "Turning it on", "Turning it off", "Set to <choice>," or "Set to anything but <choice>,".
 fn set_to(opt: &Opt, value: &str) -> String {
-    match opt.kind {
-        Kind::Switch { .. } => format!("Turning it {}", value_name(opt, value)),
-        _ => format!("Set to {},", value_name(opt, value)),
+    match (opt.kind, value.strip_prefix('!')) {
+        (Kind::Switch { .. }, _) => format!("Turning it {}", value_name(opt, value)),
+        (_, Some(not)) => format!("Set to anything but {},", value_name(opt, not)),
+        (_, None) => format!("Set to {},", value_name(opt, value)),
     }
 }
 
@@ -358,6 +371,8 @@ struct Fonts {
     small: HFONT,
     title: HFONT,
     big: HFONT,
+    /// A how-to's name on the Controls tab.
+    heading: HFONT,
 }
 
 impl Fonts {
@@ -383,13 +398,13 @@ impl Fonts {
                 )
             }
         };
-        Fonts { normal: font(9, FW_NORMAL.0), small: font(8, FW_NORMAL.0), title: font(16, FW_SEMIBOLD.0), big: font(12, FW_SEMIBOLD.0) }
+        Fonts { normal: font(9, FW_NORMAL.0), small: font(8, FW_NORMAL.0), title: font(16, FW_SEMIBOLD.0), big: font(12, FW_SEMIBOLD.0), heading: font(10, FW_SEMIBOLD.0) }
     }
 }
 
 impl Drop for Fonts {
     fn drop(&mut self) {
-        for font in [self.normal, self.small, self.title, self.big] {
+        for font in [self.normal, self.small, self.title, self.big, self.heading] {
             // SAFETY: deletes fonts this value created, after the controls moved to new ones.
             let _ = unsafe { DeleteObject(HGDIOBJ(font.0)) };
         }
@@ -440,6 +455,21 @@ struct Row {
     help: HWND,
 }
 
+/// One how-to on the Controls tab ([`games::HowTo`]): its name, and its ways as the settings have
+/// them; its options' rows are placed under it.
+struct HowRow {
+    how: &'static games::HowTo,
+    title: HWND,
+    text: HWND,
+}
+
+/// What the option area shows, in order: an option's row, or a how-to (by index).
+#[derive(Clone, Copy)]
+enum Item {
+    Row(usize),
+    How(usize),
+}
+
 /// A session in progress.
 struct Running {
     stop: Stop,
@@ -472,6 +502,8 @@ struct App {
     origin: HWND,
     before: HWND,
     rows: Vec<Row>,
+    /// The game's how-tos, for the Controls tab.
+    hows: Vec<HowRow>,
     /// The option tabs ("Main", "More"): only the strip of tabs; the rows sit under it.
     tabs: HWND,
     steamvr_line: HWND,
@@ -492,8 +524,14 @@ struct App {
     other_session: bool,
     game_up: bool,
     game_installed: bool,
-    /// The smallest client size the layout fits in (pixels).
+    /// The smallest client size the layout fits in (pixels), at most the screen's.
     min_client: (i32, i32),
+    /// How far the option area is scrolled (pixels), when its options do not all fit, and its
+    /// scroll bar.
+    scroll: i32,
+    scrollbar: HWND,
+    /// The client height last asked of the window, so a size the screen cannot give is asked once.
+    asked_height: i32,
     /// `--screenshot`: where the picture goes.
     screenshot: Option<PathBuf>,
     /// Packs made for a newer Monaka still to tell the player about, and those told this run.
@@ -541,6 +579,7 @@ impl App {
             origin: static_text(hwnd, "", ID_GREY),
             before: static_text(hwnd, "", 0),
             rows: Vec::new(),
+            hows: Vec::new(),
             tabs: child(hwnd, WC_TABCONTROLW, "", WS_TABSTOP.0 | WS_CLIPSIBLINGS.0, ID_TABS),
             steamvr_line: static_text(hwnd, "", 0),
             start_steamvr: button(hwnd, "Start SteamVR", ID_START_STEAMVR),
@@ -558,6 +597,10 @@ impl App {
             game_up: false,
             game_installed: true,
             min_client: (0, 0),
+            scroll: 0,
+            // SBS_VERT: a vertical bar.
+            scrollbar: child(hwnd, w!("SCROLLBAR"), "", 1, ID_SCROLL),
+            asked_height: 0,
             screenshot: None,
             too_new: catalogue.too_new.clone(),
             told_too_new: Vec::new(),
@@ -687,15 +730,26 @@ impl App {
             }
             set_font(row.help, self.fonts.small);
         }
+        for how in &self.hows {
+            set_font(how.title, self.fonts.heading);
+            set_font(how.text, self.fonts.normal);
+        }
     }
 
     /// Shows game `index`: its texts and a fresh set of option controls.
     fn select(&mut self, index: usize) {
+        if index != self.selected {
+            self.scroll = 0;
+        }
         self.selected = index.min(self.list.len().saturating_sub(1));
         for row in self.rows.drain(..) {
             for hwnd in [Some(row.label), Some(row.control), row.value, Some(row.help)].into_iter().flatten() {
                 destroy(hwnd);
             }
+        }
+        for how in self.hows.drain(..) {
+            destroy(how.title);
+            destroy(how.text);
         }
         enable(self.remove_pack, self.running.is_none() && self.game().is_some_and(Game::removable));
         let Some(game) = self.game() else {
@@ -722,19 +776,22 @@ impl App {
         // Command-line-only options get no row; a row's control id is its index in `rows`. Monaka's
         // own settings follow the game's options (one the game reads too has Monaka's row only).
         let owned = |owner: &'static Manifest| owner.options.iter().map(move |opt| (owner, opt));
-        let game_rows = owned(game.manifest).filter(|(_, o)| o.shown != Shown::Monaka);
-        for (owner, opt) in game_rows.chain(owned(&MONAKA)).filter(|(_, o)| o.shown != Shown::Line) {
+        // The Rendering tab's options in Monaka's order, every other tab's in the game's.
+        let mut game_rows: Vec<_> = owned(game.manifest).filter(|(_, o)| o.shown != Shown::Monaka).collect();
+        game_rows.sort_by_key(|(_, o)| monaka_core::rendering::place(o));
+        for (owner, opt) in game_rows.into_iter().chain(owned(&MONAKA)).filter(|(_, o)| o.shown != Shown::Line) {
             let i = self.rows.len() as i32;
             let label = static_text(self.hwnd, opt.label, ID_LABEL + i);
             let current = values.text(owner, opt.id);
             let (control, value) = match opt.kind {
-                Kind::Choice { choices, window, .. } => {
+                Kind::Choice { .. } => {
                     let combo = child(self.hwnd, WC_COMBOBOXW, "", WS_TABSTOP.0 | WS_VSCROLL.0 | CBS_DROPDOWNLIST as u32, ID_CONTROL + i);
-                    for (_, choice) in &choices[..window] {
+                    let shown = values.shown_choices(owner, opt);
+                    for (_, choice) in &shown {
                         let text = HSTRING::from(*choice);
                         send(combo, CB_ADDSTRING, 0, text.as_ptr() as isize);
                     }
-                    send(combo, CB_SETCURSEL, choices[..window].iter().position(|(id, _)| *id == current).unwrap_or(0), 0);
+                    send(combo, CB_SETCURSEL, shown.iter().position(|(id, _)| *id == current).unwrap_or(0), 0);
                     (combo, None)
                 }
                 Kind::Switch { .. } => {
@@ -755,8 +812,15 @@ impl App {
             let help = static_text(self.hwnd, opt.help, ID_HELP + i);
             self.rows.push(Row { opt, owner, label, control, value, help });
         }
-        // The tabs this game has options in; a tab it lacks falls back to Main.
-        self.tabs_shown = TABS.iter().map(|(t, _)| *t).filter(|t| self.rows.iter().any(|r| r.opt.shown == *t)).collect();
+        for how in game.manifest.controls {
+            self.hows.push(HowRow { how, title: static_text(self.hwnd, how.action, 0), text: static_text(self.hwnd, "", 0) });
+        }
+        // The tabs this game has options (or how-tos) in, an option a how-to names counting for the
+        // Controls tab; a tab it lacks falls back to Main.
+        let has_hows = !self.hows.is_empty();
+        let tab_of = |row: &Row| if self.tuned(row) { Shown::Controls } else { row.opt.shown };
+        self.tabs_shown =
+            TABS.iter().map(|(t, _)| *t).filter(|t| self.rows.iter().any(|r| tab_of(r) == *t) || (*t == Shown::Controls && has_hows)).collect();
         if !self.tabs_shown.contains(&self.tab) {
             self.tab = Shown::Main;
         }
@@ -776,9 +840,10 @@ impl App {
         let Some(row) = self.rows.get(i) else { return };
         let Some(game) = self.game() else { return };
         let value = match row.opt.kind {
-            Kind::Choice { choices, .. } => {
+            Kind::Choice { .. } => {
                 let index = send(row.control, CB_GETCURSEL, 0, 0);
-                choices.get(index.max(0) as usize).map(|(id, _)| (*id).to_owned()).unwrap_or_default()
+                let shown = self.settings.values(game.id).shown_choices(row.owner, row.opt);
+                shown.get(index.max(0) as usize).map(|(id, _)| (*id).to_owned()).unwrap_or_default()
             }
             Kind::Switch { .. } => (if send(row.control, BM_GETCHECK, 0, 0) == 1 { "1" } else { "0" }).to_owned(),
             Kind::Number { min, step, .. } => {
@@ -792,12 +857,23 @@ impl App {
         };
         let choice = matches!(row.opt.kind, Kind::Choice { .. } | Kind::Switch { .. });
         let saved = if row.owner.id == MONAKA.id { &mut self.settings.monaka } else { self.settings.values.entry(game.id.to_owned()).or_default() };
+        let device = row.opt.id == PLAY_WITH.id;
         saved.set(row.opt.id, value);
         let _ = self.settings.save();
-        if choice {
+        if device {
+            // The aims on offer follow what the player holds: the option controls are made again,
+            // once the drop-down list that changed it is done with this message.
+            // SAFETY: posts to our own window.
+            let _ = unsafe { PostMessageW(Some(self.hwnd), WM_REMAKE_OPTIONS, WPARAM(0), LPARAM(0)) };
+        } else if choice {
             // Another option may come or go with this one ([`games::Opt::when`]).
             self.layout();
         }
+    }
+
+    /// Whether a how-to names `row`'s option: it is shown under that how-to, on the Controls tab.
+    fn tuned(&self, row: &Row) -> bool {
+        self.hows.iter().any(|how| how.how.options.contains(&row.opt.id))
     }
 
     /// Places every control for the current size and DPI.
@@ -844,8 +920,8 @@ impl App {
 
         let label_width = s(180);
         let control_x = x + label_width;
-        // Wide windows leave the controls at a readable width.
-        let control_width = (w - label_width).min(s(460));
+        // Wide windows leave the controls at a readable width, short of the scroll bar.
+        let control_width = (w - label_width - s(22)).min(s(460));
         let value_width = s(48);
         if self.tabs_shown.len() > 1 {
             place(self.tabs, x, y, w, s(30));
@@ -855,53 +931,125 @@ impl App {
         // Rows exist only for a selected game.
         let game = self.game();
         let values = game.map(|g| self.settings.values(g.id)).unwrap_or_default();
-        for row in game.map_or(&[][..], |_| &self.rows[..]) {
-            let game = row.owner;
-            // An option that means nothing with the others' values (the aiming hand without a
-            // pointing controller) is left out.
-            let visible = row.opt.shown == tab && values.applies(game, row.opt);
+        let rows = game.map_or(&[][..], |_| &self.rows[..]);
+        // An option that means nothing with the others' values (the aiming hand without a pointing
+        // controller), or a choice with one choice left to offer, is left out.
+        let offered = |row: &Row| {
+            values.applies(row.owner, row.opt) && (!matches!(row.opt.kind, Kind::Choice { .. }) || values.shown_choices(row.owner, row.opt).len() > 1)
+        };
+        // What the option area shows, in order: on the Controls tab the options no how-to names,
+        // then each how-to with its options under it; on the others, the tab's options.
+        let manifest = game.map_or(&MONAKA, |g| g.manifest);
+        let mut order: Vec<Item> = (0..rows.len()).filter(|&i| rows[i].opt.shown == tab && !self.tuned(&rows[i]) && offered(&rows[i])).map(Item::Row).collect();
+        if tab == Shown::Controls {
+            for (j, how) in self.hows.iter().enumerate() {
+                let under: Vec<Item> =
+                    how.how.options.iter().filter_map(|id| rows.iter().position(|r| r.opt.id == *id)).filter(|&i| offered(&rows[i])).map(Item::Row).collect();
+                // A how-to with nothing to say for these settings (motion controls' ways, played
+                // with a gamepad) and nothing to set is left out.
+                if !under.is_empty() || !values.ways(manifest, how.how).is_empty() {
+                    order.push(Item::How(j));
+                    order.extend(under);
+                }
+            }
+        }
+        for (i, row) in rows.iter().enumerate() {
+            let visible = order.iter().any(|item| matches!(item, Item::Row(r) if *r == i));
             for hwnd in [Some(row.label), Some(row.control), row.value, Some(row.help)].into_iter().flatten() {
                 show(hwnd, visible);
             }
-            if !visible {
-                continue;
+        }
+        for how in &self.hows {
+            show(how.title, false);
+            show(how.text, false);
+        }
+        // A how-to's text leaves room for the scroll bar.
+        let text_width = w - s(22);
+        // Each item's texts brought up to date and its height measured, then the items placed in
+        // the area above the bottom block, scrolled when they do not all fit.
+        let heights: Vec<i32> = order
+            .iter()
+            .map(|item| match *item {
+                Item::How(j) => {
+                    let how = &self.hows[j];
+                    let text = values.ways(manifest, how.how).join("\n");
+                    if text_of(how.text) != text {
+                        set_text(how.text, &text);
+                    }
+                    s(32) + if text.is_empty() { 0 } else { text_height(self.hwnd, self.fonts.normal, &text, text_width) + s(10) }
+                }
+                Item::Row(i) => {
+                    let row = &rows[i];
+                    // The help line says what this option turns off, or why it is off now.
+                    let help_text = help_text(row.owner, &values, row.opt);
+                    if text_of(row.help) != help_text {
+                        set_text(row.help, &help_text);
+                    }
+                    let label_height = text_height(self.hwnd, self.fonts.normal, row.opt.label, label_width - s(12)).max(s(20));
+                    let help = text_height(self.hwnd, self.fonts.small, &help_text, control_width);
+                    (s(28) + help).max(label_height + s(4)) + s(10)
+                }
+            })
+            .collect();
+
+        // Right, from the bottom: state, Start VR, readiness; the options fill what is above.
+        let state_height = s(44);
+        let start_height = s(44);
+        let ready_height = s(28) * 2;
+        let bottom_block = ready_height + s(12) + start_height + s(8) + state_height;
+        let area_top = y;
+        let area_bottom = (height - margin - bottom_block - s(8)).max(area_top + s(60));
+        let content: i32 = heights.iter().sum();
+        let overflow = (content - (area_bottom - area_top)).max(0);
+        self.scroll = self.scroll.clamp(0, overflow);
+        self.set_scrollbar(overflow > 0, content, area_bottom - area_top);
+        place(self.scrollbar, x + w - s(16), area_top, s(16), area_bottom - area_top);
+        y = area_top - self.scroll;
+        for (item, &item_height) in order.iter().zip(&heights) {
+            let top = y;
+            y += item_height;
+            // Scrolled out of the area, an item is hidden rather than drawn over the bottom block.
+            let in_view = top >= area_top && top + item_height <= area_bottom + s(10);
+            let row = match *item {
+                Item::Row(i) => &rows[i],
+                Item::How(j) => {
+                    let how = &self.hows[j];
+                    show(how.title, in_view);
+                    place(how.title, x, top + s(8), text_width, s(22));
+                    let text = text_of(how.text);
+                    show(how.text, in_view && !text.is_empty());
+                    place(how.text, x, top + s(32), text_width, item_height - s(42));
+                    continue;
+                }
+            };
+            for hwnd in [Some(row.label), Some(row.control), row.value, Some(row.help)].into_iter().flatten() {
+                show(hwnd, in_view);
             }
-            // The help line says what this option turns off, or why it is off now; a switch another
-            // option turns off is greyed out, shown off.
-            let help_text = help_text(game, &values, row.opt);
-            if text_of(row.help) != help_text {
-                set_text(row.help, &help_text);
-            }
+            let game = row.owner;
+            // A switch another option turns off is greyed out, shown off.
             if let Kind::Switch { .. } = row.opt.kind {
                 enable(row.control, values.turned_off(game, row.opt.id).is_none());
                 send(row.control, BM_SETCHECK, usize::from(values.switch(game, row.opt.id)), 0);
             }
             // Long labels wrap onto a second line.
             let label_height = text_height(self.hwnd, self.fonts.normal, row.opt.label, label_width - s(12)).max(s(20));
-            place(row.label, x, y + s(4), label_width - s(12), label_height);
+            place(row.label, x, top + s(4), label_width - s(12), label_height);
             match row.opt.kind {
                 // A drop-down list's height is its open list's.
-                Kind::Choice { .. } => place(row.control, control_x, y, control_width, s(240)),
+                Kind::Choice { .. } => place(row.control, control_x, top, control_width, s(240)),
                 Kind::Number { .. } => {
-                    place(row.control, control_x - s(4), y, control_width - value_width, s(28));
+                    place(row.control, control_x - s(4), top, control_width - value_width, s(28));
                     if let Some(value) = row.value {
-                        place(value, control_x + control_width - value_width + s(4), y + s(4), value_width - s(4), s(20));
+                        place(value, control_x + control_width - value_width + s(4), top + s(4), value_width - s(4), s(20));
                     }
                 }
-                Kind::Text | Kind::Size => place(row.control, control_x, y, control_width, s(24)),
-                Kind::Switch { .. } => place(row.control, control_x, y + s(2), control_width, s(22)),
+                Kind::Text | Kind::Size => place(row.control, control_x, top, control_width, s(24)),
+                Kind::Switch { .. } => place(row.control, control_x, top + s(2), control_width, s(22)),
             }
-            let help = text_height(self.hwnd, self.fonts.small, &help_text, control_width);
-            place(row.help, control_x, y + s(28), control_width, help);
-            y += (s(28) + help).max(label_height + s(4)) + s(10);
+            place(row.help, control_x, top + s(28), control_width, item_height - s(38));
         }
 
-        // Right, from the bottom: state, Start VR, readiness.
-        let state_height = s(44);
-        let start_height = s(44);
-        let ready_height = s(28) * 2;
-        let bottom_block = ready_height + s(12) + start_height + s(8) + state_height;
-        let mut b = (height - margin - bottom_block).max(y + s(8));
+        let mut b = area_bottom + s(8);
         let button_width = s(140);
         place(self.steamvr_line, x, b + s(4), w - button_width - s(10), s(20));
         place(self.start_steamvr, x + w - button_width, b, button_width, s(26));
@@ -915,9 +1063,55 @@ impl App {
         b += start_height + s(8);
         place(self.state_line, x, b, w, state_height);
 
-        self.min_client = (s(760), y + s(8) + bottom_block + margin);
-        if height < self.min_client.1 && height > 0 {
+        // Tall enough for every option, as far as the screen goes; past that the options scroll.
+        let fits_all = area_top + content + s(8) + bottom_block + margin;
+        self.min_client = (s(760), fits_all.min(self.screen_client_height()));
+        if height < self.min_client.1 && height > 0 && self.asked_height != self.min_client.1 {
+            self.asked_height = self.min_client.1;
             self.grow_to_fit();
+        }
+    }
+
+    /// The tallest client area the window's screen gives it (its work area, less the frame).
+    fn screen_client_height(&self) -> i32 {
+        let mut window = RECT::default();
+        let mut client = RECT::default();
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        // SAFETY: our window's rectangles and its screen's, read into locals.
+        unsafe {
+            let _ = GetWindowRect(self.hwnd, &mut window);
+            let _ = GetClientRect(self.hwnd, &mut client);
+            let _ = GetMonitorInfoW(MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST), &mut info);
+        }
+        let frame = (window.bottom - window.top) - client.bottom;
+        (info.rcWork.bottom - info.rcWork.top - frame).max(1)
+    }
+
+    /// The scroll bar beside the options: shown while they overflow the area of `page` pixels, over
+    /// `content` pixels, at the current scroll.
+    fn set_scrollbar(&self, shown: bool, content: i32, page: i32) {
+        show(self.scrollbar, shown);
+        if !shown {
+            return;
+        }
+        let info = SCROLLINFO {
+            cbSize: size_of::<SCROLLINFO>() as u32,
+            fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
+            nMin: 0,
+            nMax: content.max(1) - 1,
+            nPage: page.max(1) as u32,
+            nPos: self.scroll,
+            nTrackPos: 0,
+        };
+        // SAFETY: sets our own scroll bar control's range and position.
+        unsafe { SetScrollInfo(self.scrollbar, SB_CTL, &info, true) };
+    }
+
+    /// Scrolls the options to `to` (pixels; clamped as they are placed).
+    fn scroll_to(&mut self, to: i32) {
+        if to != self.scroll {
+            self.scroll = to.max(0);
+            self.layout();
         }
     }
 
@@ -1148,7 +1342,33 @@ impl App {
                     return None;
                 }
                 self.tab = self.tabs_shown.get(send(self.tabs, TCM_GETCURSEL, 0, 0).max(0) as usize).copied().unwrap_or(Shown::Main);
+                self.scroll = 0;
                 self.layout();
+                Some(LRESULT(0))
+            }
+            WM_VSCROLL if HWND(lparam.0 as _) == self.scrollbar => {
+                let line = scale(40, self.dpi);
+                let mut info = SCROLLINFO { cbSize: size_of::<SCROLLINFO>() as u32, fMask: SIF_ALL, ..Default::default() };
+                // SAFETY: reads our own scroll bar control's state into a local.
+                let _ = unsafe { GetScrollInfo(self.scrollbar, SB_CTL, &mut info) };
+                let page = info.nPage as i32;
+                let to = match SCROLLBAR_COMMAND((wparam.0 & 0xffff) as i32) {
+                    SB_LINEUP => self.scroll - line,
+                    SB_LINEDOWN => self.scroll + line,
+                    SB_PAGEUP => self.scroll - page,
+                    SB_PAGEDOWN => self.scroll + page,
+                    SB_THUMBTRACK | SB_THUMBPOSITION => info.nTrackPos,
+                    SB_TOP => 0,
+                    SB_BOTTOM => info.nMax,
+                    _ => self.scroll,
+                };
+                self.scroll_to(to);
+                Some(LRESULT(0))
+            }
+            WM_MOUSEWHEEL => {
+                // A notch scrolls the options three lines.
+                let notches = ((wparam.0 >> 16) as u16 as i16) as i32;
+                self.scroll_to(self.scroll - notches * scale(120, self.dpi) / 120);
                 Some(LRESULT(0))
             }
             WM_HSCROLL => {
@@ -1163,6 +1383,10 @@ impl App {
             }
             WM_TOO_NEW => {
                 self.tell_too_new();
+                Some(LRESULT(0))
+            }
+            WM_REMAKE_OPTIONS => {
+                self.select(self.selected);
                 Some(LRESULT(0))
             }
             WM_TIMER if wparam.0 == TIMER_SCREENSHOT => {

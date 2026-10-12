@@ -34,9 +34,9 @@ use monaka_core::options::{Options, Shared};
 use monaka_core::protocol::ChannelName;
 use monaka_core::situation::Situation;
 use monaka_hook::Hooks;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering::*};
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::*};
+use std::time::{Duration, Instant};
 use monaka_core::sync::Locked;
 
 /// A game's producer: its manifests, its components, and which build this process is.
@@ -162,6 +162,9 @@ pub struct Component<G: Game> {
     pub arm: fn(),
     /// Its work in the game's per-frame hook ([`frame`]).
     pub frame: Option<fn(&G::Frame)>,
+    /// Its work on a timer while it is on, off the game's threads ([`Every`]: counters logged,
+    /// probes polled).
+    pub every: &'static [Every],
     /// The stop's first phase, once it is off ([`on`] answers no): what else stops new work.
     pub quiet: fn(),
     /// The stop's second phase: what it changed in the game put back, the hooks still in.
@@ -198,6 +201,7 @@ impl<G: Game> Component<G> {
         install: nothing::<G>,
         arm: || {},
         frame: None,
+        every: &[],
         quiet: || {},
         give_back: || {},
         let_go: None,
@@ -214,6 +218,66 @@ impl<G: Game> Component<G> {
             i += 1;
         }
         self.games.is_empty()
+    }
+}
+
+/// Timed work of a component: `tick(seconds since its last tick)` every `period`, on the run's one
+/// timer thread, from its arm until the stop begins.
+#[derive(Clone, Copy)]
+pub struct Every {
+    pub period: Duration,
+    pub tick: fn(f64),
+}
+
+impl Every {
+    pub const fn millis(period: u64, tick: fn(f64)) -> Self {
+        Self { period: Duration::from_millis(period), tick }
+    }
+}
+
+/// The timer's finest step: a period shorter than this ticks this often.
+const TIMER_STEP: Duration = Duration::from_millis(50);
+
+/// The run's timer: each armed component's [`Every`], ticked while it is on.
+struct Timer {
+    stopping: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Timer {
+    /// Starts the timer for the components armed in `bits`; none when none has timed work.
+    fn start<G: Game>(bits: u64) -> Option<Timer> {
+        let work: Vec<(usize, Every)> = armed::<G>(bits).into_iter().flat_map(|(place, c)| c.every.iter().map(move |e| (place, *e))).collect();
+        if work.is_empty() {
+            return None;
+        }
+        let stopping = Arc::new(AtomicBool::new(false));
+        let stop = stopping.clone();
+        let thread = std::thread::Builder::new().name("monaka timer".into()).spawn(move || {
+            let mut last: Vec<Instant> = vec![Instant::now(); work.len()];
+            while !stop.load(Acquire) {
+                std::thread::sleep(TIMER_STEP);
+                for ((place, every), last) in work.iter().zip(&mut last) {
+                    let since = last.elapsed();
+                    if since >= every.period && on::<G>(*place) {
+                        (every.tick)(since.as_secs_f64());
+                        *last = Instant::now();
+                    }
+                }
+            }
+        });
+        match thread {
+            Ok(thread) => Some(Timer { stopping, thread }),
+            Err(e) => {
+                log!("no timer thread ({e}): timed work off");
+                None
+            }
+        }
+    }
+
+    fn stop(self) {
+        self.stopping.store(true, Release);
+        let _ = self.thread.join();
     }
 }
 
@@ -427,6 +491,18 @@ pub const fn adjust<const N: usize>(mut options: [Opt; N], changed: Opt) -> [Opt
     panic!("{}", Message::new().push("adjust: no option `").push(changed.id).push("` is offered").text());
 }
 
+/// [`adjust`] for each of `changed` in turn: one game's presentation of several options.
+///
+/// `const ASCENT: [Opt; N] = adjust_all(options::<Ascent, N>("ascent"), &[HEADSET.default_switch(true), PUBLISH.default_switch(true)]);`
+pub const fn adjust_all<const N: usize>(mut options: [Opt; N], changed: &[Opt]) -> [Opt; N] {
+    let mut i = 0;
+    while i < changed.len() {
+        options = adjust(options, changed[i]);
+        i += 1;
+    }
+    options
+}
+
 /// Reads every option `G`'s components that serve `manifest` read: the shared settings and each
 /// component's own (`producer!`'s manifest test: each offered option is read by something).
 pub fn read_all<G: Game>(options: &Options, manifest: &Manifest) {
@@ -463,6 +539,20 @@ pub fn on<G: Game>(place: usize) -> bool {
     place < G::ADAPTER.components.len() && ON.load(Acquire) & (1 << place) != 0
 }
 
+/// Whether a component providing `feature` is on in this run (a ready-made asking whether another
+/// feature it works with runs: the hand rig, for one).
+pub fn feature_on<G: Game>(feature: Feature) -> bool {
+    provided_by_on(G::ADAPTER.components, ON.load(Acquire), feature)
+}
+
+/// Whether one of `components` providing `feature` is on, by the bits of those on (`on`).
+fn provided_by_on<G: Game>(components: &[&Component<G>], on: u64, feature: Feature) -> bool {
+    components.iter().enumerate().any(|(place, component)| component.features.contains(&feature) && on & (1 << place) != 0)
+}
+
+#[cfg(test)]
+mod lift_checks;
+
 /// The game's per-frame hook: each component that is on does its frame's work, in order.
 pub fn frame<G: Game>(frame: &G::Frame) {
     let bits = ON.load(Acquire);
@@ -483,6 +573,7 @@ struct Running {
     available: Available,
     /// The components armed at the start (their [`ON`] bits then), whatever is on now.
     armed: u64,
+    timer: Option<Timer>,
 }
 
 static RUN: Mutex<Option<Running>> = Mutex::new(None);
@@ -593,8 +684,9 @@ pub fn start<G: Game>(session: &'static Session) -> Result<(), Rejection> {
     for line in available.report() {
         log!("features: {line}");
     }
+    let timer = Timer::start::<G>(armed);
     let ledgers = installed.into_iter().map(|(place, _, ledger)| (place, ledger)).collect();
-    *RUN.locked() = Some(Running { hooks: slot, ledgers, available, armed });
+    *RUN.locked() = Some(Running { hooks: slot, ledgers, available, armed, timer });
     Ok(())
 }
 
@@ -611,6 +703,10 @@ fn undo<G: Game>(installed: &mut [(usize, &'static Component<G>, Ledger)]) {
 pub fn stop<G: Game>() -> Result<(), Rejection> {
     let Some(mut run) = RUN.locked().take() else { return Ok(()) };
     let on = armed::<G>(run.armed);
+    // Timed work ends before anything stops.
+    if let Some(timer) = run.timer.take() {
+        timer.stop();
+    }
     // Each component off in turn, newest first: from here its detours stop acting and its frame
     // work stops; then whatever else it does to stop new work.
     for (place, component) in on.iter().rev() {
@@ -669,8 +765,8 @@ mod tests {
     struct Toy;
 
     const EYES: Component<Toy> = Component { name: "eyes", features: &[Feature::Stereo], options: &[EYE_SEPARATION], ..Component::NONE };
-    const ARMS: Component<Toy> = Component {
-        name: "arms",
+    const HAND_RIG: Component<Toy> = Component {
+        name: "hand rig",
         features: &[Feature::HandRig],
         options: &[aim(&[AIM_MOTION, AIM_MOUSE], aims::HAND_RIG)],
         on: |run| On::when(run.is_on(&EYES), "no eyes"),
@@ -681,7 +777,7 @@ mod tests {
 
     impl Game for Toy {
         const MANIFESTS: &'static [Manifest] = &[];
-        const ADAPTER: Adapter<Toy> = Adapter { components: &[&EYES, &ARMS, &FINGERS, &MINE] };
+        const ADAPTER: Adapter<Toy> = Adapter { components: &[&EYES, &HAND_RIG, &FINGERS, &MINE] };
         type Build = ();
         type Frame = ();
         fn prepare(_: &'static Session, _: &'static Manifest, _: &Options) -> Result<(), Rejection> {
@@ -708,6 +804,7 @@ mod tests {
     static MISSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     static FATAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     static REFUSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static TICKS: AtomicU64 = AtomicU64::new(0);
 
     fn call(what: &str) {
         CALLS.lock().unwrap().push(what.to_owned());
@@ -752,6 +849,9 @@ mod tests {
             called("video install")
         },
         arm: || call("video arm"),
+        every: &[Every::millis(0, |_| {
+            TICKS.fetch_add(1, Relaxed);
+        })],
         quiet: || call("video quiet"),
         give_back: || call("video give back"),
         release: || call("video release"),
@@ -807,7 +907,16 @@ mod tests {
         start::<Lived>(session).unwrap();
         frame::<Lived>(&());
         assert!(on::<Lived>(HANDS_AT) && !on::<Lived>(BROKEN_AT));
+        // Timed work ticks while the run is on, and not after the stop.
+        let waited = Instant::now();
+        while TICKS.load(Relaxed) == 0 && waited.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(TIMER_STEP);
+        }
+        assert!(TICKS.load(Relaxed) > 0, "the timer ticks");
         stop::<Lived>().unwrap();
+        let ticked = TICKS.load(Relaxed);
+        std::thread::sleep(TIMER_STEP * 3);
+        assert_eq!(TICKS.load(Relaxed), ticked, "no ticks after the stop");
         assert_eq!(
             calls(),
             [

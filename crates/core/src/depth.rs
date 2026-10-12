@@ -4,6 +4,7 @@
 //! depth value is affine in nearness, so a shader needs only `nearness = a * depth + b`.
 
 use crate::camera::Mat44;
+use crate::protocol::DepthParams;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DepthMapping {
@@ -26,6 +27,31 @@ impl DepthMapping {
     pub fn nearness(&self, depth: f32) -> f32 {
         (self.a * depth + self.b).clamp(0.0, 1.0)
     }
+}
+
+/// How the depth a row-major right-handed perspective `projection` writes maps to distance, for
+/// the headset's depth layer: the near and far planes in metres (the projection is in game units,
+/// `units_per_metre` of them to a metre; the far plane may be infinite) and whether depth is
+/// reversed. Depth `d` lies at distance `P[11] / (d + P[10])`, so the planes are the distances at 0
+/// and 1. `None` for a projection that is not a perspective one or puts a plane behind the eye.
+pub fn depth_params(projection: &Mat44, units_per_metre: f32) -> Option<DepthParams> {
+    let p = projection;
+    let perspective = (p[14] + 1.0).abs() < 1e-3 && p[15].abs() < 1e-3;
+    if !perspective || !p[10].is_finite() || !p[11].is_finite() || p[11].abs() < 1e-9 || !units_per_metre.is_finite() || units_per_metre <= 0.0 {
+        return None;
+    }
+    // One over the distance at depth 0 and 1: zero at infinity, a little below it from rounding.
+    let inverse = [(0.0 + p[10]) / p[11], (1.0 + p[10]) / p[11]];
+    let rounding = 1e-4 * inverse[0].abs().max(inverse[1].abs());
+    let distance = |inverse: f32| match inverse {
+        i if i < -rounding => None,
+        i if i <= 0.0 => Some(f32::INFINITY),
+        i => Some(1.0 / i / units_per_metre),
+    };
+    let (at_0, at_1) = (distance(inverse[0])?, distance(inverse[1])?);
+    let reversed = at_0 > at_1;
+    let params = DepthParams::new(at_0.min(at_1), at_0.max(at_1), reversed);
+    params.is_valid().then_some(params)
 }
 
 /// Pixels a point at the near plane moves in each eye: eyes `ipd/2` either side of a camera with
@@ -133,6 +159,30 @@ mod tests {
         let mapping = DepthMapping::from_projection(&projection(0.0, 0.05), 0.05).unwrap();
         assert_eq!(mapping, DepthMapping { a: 1.0, b: 0.0 });
         assert!(DepthMapping::from_projection(&[1.0; 16], 0.05).is_none(), "not a perspective projection");
+    }
+
+    #[test]
+    fn a_projection_gives_its_planes_in_metres() {
+        let close = |a: f32, b: f32| (a - b).abs() <= 1e-4 * b.abs().max(1.0);
+        // Reverse-Z infinite, near 0.05 game units of a metre each: far infinite at depth 0.
+        let params = depth_params(&projection(0.0, 0.05), 1.0).unwrap();
+        assert_eq!(params, DepthParams::new(0.05, f32::INFINITY, true));
+        assert_eq!(params.distances_at_0_and_1(), (f32::INFINITY, 0.05));
+        // The same in centimetres (100 units to a metre).
+        assert_eq!(depth_params(&projection(0.0, 5.0), 100.0), Some(DepthParams::new(0.05, f32::INFINITY, true)));
+        // Standard depth, finite: near at 0, far at 1.
+        let (n, f) = (0.1f32, 1000.0f32);
+        let standard = depth_params(&projection(f / (n - f), n * f / (n - f)), 1.0).unwrap();
+        assert!(standard.reversed == 0 && close(standard.near, n) && close(standard.far, f), "{standard:?}");
+        // Standard infinite (P10 -1, P11 -near), with a rounding error in P10.
+        let infinite = depth_params(&projection(-0.99999994, -n), 1.0).unwrap();
+        assert!(infinite.reversed == 0 && close(infinite.near, n) && infinite.far > 1e4, "{infinite:?}");
+        // Reversed finite: far at 0, near at 1.
+        let reversed = depth_params(&projection(n / (f - n), n * f / (f - n)), 1.0).unwrap();
+        assert!(reversed.reversed != 0 && close(reversed.near, n) && close(reversed.far, f), "{reversed:?}");
+        assert!(depth_params(&[1.0; 16], 1.0).is_none(), "not a perspective projection");
+        assert!(depth_params(&projection(0.0, 0.05), 0.0).is_none(), "no units");
+        assert!(depth_params(&projection(0.0, -0.05), 1.0).is_none(), "a plane behind the eye");
     }
 
     fn apply(m: &Mat44, v: [f32; 4]) -> [f32; 4] {

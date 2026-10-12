@@ -82,13 +82,16 @@ pub const fn choice(choices: &'static [(&'static str, &'static str)], default: &
 /// Where an option is offered: a tab of the window ([`TABS`]), or the command line only.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Shown {
-    /// What aims, and the resolution.
     Main,
+    /// How the player plays: what they hold ([`PLAY_WITH`]), what aims, and how to do each thing
+    /// in the game ([`HowTo`]), each with the options that change it.
+    Controls,
     Hud,
     /// The arms and hands: finger tracking.
     Skeleton,
-    /// What the game's engine offers (how it renders).
-    Engine,
+    /// How the game renders in VR: the stereo method, frame generation, the upscaler per eye, depth
+    /// to the headset, foveation, the render size ([`crate::rendering::place`] orders them).
+    Rendering,
     /// What only this game has.
     Game,
     /// Monaka's own settings ([`MONAKA`]): the same for every game, saved once.
@@ -98,8 +101,29 @@ pub enum Shown {
 }
 
 /// The window's tabs, in order, and their names; a game shows the ones it has options in.
-pub const TABS: [(Shown, &str); 6] =
-    [(Shown::Main, "Main"), (Shown::Hud, "HUD"), (Shown::Skeleton, "Skeleton"), (Shown::Engine, "Engine"), (Shown::Game, "Game"), (Shown::Monaka, "Monaka")];
+pub const TABS: [(Shown, &str); 7] = [
+    (Shown::Main, "Main"),
+    (Shown::Controls, "Controls"),
+    (Shown::Hud, "HUD"),
+    (Shown::Skeleton, "Skeleton"),
+    (Shown::Rendering, "Rendering"),
+    (Shown::Game, "Game"),
+    (Shown::Monaka, "Monaka"),
+];
+
+/// Whether an option's `value` is what a condition `wanted` asks for: that value, or with a
+/// leading `!` any value but it (`!vr`: any device but VR controllers).
+pub fn matches(value: &str, wanted: &str) -> bool {
+    match wanted.strip_prefix('!') {
+        Some(not) => value != not,
+        None => value == wanted,
+    }
+}
+
+/// A condition's value without its `!`: the value of the option it names.
+pub fn condition_value(wanted: &str) -> &str {
+    wanted.strip_prefix('!').unwrap_or(wanted)
+}
 
 /// One option as the window shows it, the command line takes it (`id=value`) and the producer
 /// reads it (`id=value` in its options file).
@@ -111,7 +135,8 @@ pub struct Opt {
     pub help: &'static str,
     pub kind: Kind,
     pub shown: Shown,
-    /// Offered only while another option (`id`) has this value ([`Values::applies`]).
+    /// Offered only while another option (`id`) has this value ([`Values::applies`]; `!value`:
+    /// any other, [`matches`]).
     pub when: Option<(&'static str, &'static str)>,
     /// Written to the producer's options file (else the launcher consumes it itself: starting the
     /// game, the headset resolution, extra text).
@@ -151,8 +176,9 @@ pub struct SteamFiles {
     pub missing: &'static str,
 }
 
-/// While the option it is declared on has `value`, the switch `target` is off whatever it is set
-/// to, for `reason` (one sentence: the window shows it under both options).
+/// While the option it is declared on has `value` (`!value`: any other, [`matches`]), the switch
+/// `target` is off whatever it is set to, for `reason` (one sentence: the window shows it under
+/// both options).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TurnsOff {
     pub value: &'static str,
@@ -270,6 +296,36 @@ pub const GAME_OPTION: &str = "game";
 pub const OTHER_GAME: &str = "other";
 pub const OTHER_GAME_OPTION: &str = "game_other";
 
+/// One thing the Controls tab says how to do in the game ("Tools and weapons wheels"): the ways
+/// that hold with the player's settings, and under them the options that change it. Nothing here
+/// rebinds anything: it tells the player what the game and Monaka already do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HowTo {
+    pub action: &'static str,
+    /// Each a sentence or two, shown while its conditions hold, in order.
+    pub ways: &'static [Way],
+    /// The options that change it (their ids), shown under it.
+    pub options: &'static [&'static str],
+}
+
+/// One way to do a [`HowTo`]: its text, shown while every condition `(option id, value)` holds
+/// ([`matches`]: `!value` is any other).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Way {
+    pub text: &'static str,
+    pub when: &'static [(&'static str, &'static str)],
+}
+
+/// A way shown whatever the settings.
+pub const fn always(text: &'static str) -> Way {
+    Way { text, when: &[] }
+}
+
+/// A way shown while every condition holds.
+pub const fn way(text: &'static str, when: &'static [(&'static str, &'static str)]) -> Way {
+    Way { text, when }
+}
+
 /// One game, as its crate declares it.
 #[derive(Debug, PartialEq)]
 pub struct Manifest {
@@ -303,9 +359,35 @@ pub struct Manifest {
     /// With motion controls, the weapon in the aiming hand gets a ring where it points (not for
     /// a sword, which aims nowhere).
     pub weapon_ring: bool,
+    /// How to do things in the game, for the Controls tab, in the order shown.
+    pub controls: &'static [HowTo],
 }
 
 impl Manifest {
+    /// A game's manifest before its own fields: started by hand (`launch` manual), no refused
+    /// arguments, no licences to show, neither hand aims nor a weapon ring for the viewer. A game
+    /// writes its own and takes the rest by struct update (`..Manifest::GAME`); [`Manifest::check`]
+    /// refuses one that leaves its own empty.
+    pub const GAME: Manifest = Manifest {
+        id: "",
+        name: "",
+        status: Status::Experimental,
+        executables: &[],
+        steam_app: 0,
+        producer: "",
+        log: "",
+        options_file: "",
+        run_prefix: "",
+        launch: Launch::Manual,
+        refused_arguments: &[],
+        before: "",
+        options: &[],
+        licences: &[],
+        left_hand_aims: false,
+        weapon_ring: false,
+        controls: &[],
+    };
+
     pub fn option(&self, id: &str) -> Option<&Opt> {
         self.options.iter().find(|o| o.id.eq_ignore_ascii_case(id))
     }
@@ -343,8 +425,15 @@ impl Manifest {
             if let Some(value) = raw(cause.id) {
                 values.set(cause.id, value);
             }
-            (values.text(self, cause.id) == rule.value).then_some((cause, rule))
+            matches(&values.text(self, cause.id), rule.value).then_some((cause, rule))
         })
+    }
+
+    /// Whether option `id` exists and `value` is one of its values as written.
+    fn takes(&self, id: &str, value: &str) -> bool {
+        let mut values = Values::default();
+        values.set(id, value);
+        self.option(id).is_some() && values.text(self, id) == value
     }
 
     /// Whether this pack serves any game on its engine ([`ANY_EXECUTABLE`]).
@@ -367,6 +456,11 @@ impl Manifest {
     /// Checks the table is well formed: every default offered and in range, the launch options
     /// only where the launcher may start the game. The reason when it is not.
     pub fn check(&self) -> Result<(), String> {
+        for (field, value) in [("id", self.id), ("name", self.name), ("log", self.log), ("options_file", self.options_file), ("run_prefix", self.run_prefix)] {
+            if value.is_empty() {
+                return Err(format!("{}: no {field}", self.id));
+            }
+        }
         if !self.producer.starts_with("monaka_") {
             return Err(format!("{}: producer {} is not monaka_*", self.id, self.producer));
         }
@@ -418,10 +512,27 @@ impl Manifest {
             if target.turns_off.is_some() || rule.target == opt.id {
                 return Err(format!("{}.{}: turns off {}, which turns off another option", self.id, opt.id, rule.target));
             }
-            let mut values = Values::default();
-            values.set(opt.id, rule.value);
-            if values.text(self, opt.id) != rule.value {
+            if !self.takes(opt.id, condition_value(rule.value)) {
                 return Err(format!("{}.{}: turns {} off at {}, not one of its values", self.id, opt.id, rule.target, rule.value));
+            }
+        }
+        let mut tuned: Vec<&str> = Vec::new();
+        for how in self.controls {
+            for way in how.ways {
+                for (id, value) in way.when {
+                    if !self.takes(id, condition_value(value)) {
+                        return Err(format!("{}: \"{}\" waits on {id}={value}, not an option's value", self.id, how.action));
+                    }
+                }
+            }
+            for id in how.options {
+                if self.option(id).is_none() {
+                    return Err(format!("{}: \"{}\" shows unknown option {id}", self.id, how.action));
+                }
+                if tuned.contains(id) {
+                    return Err(format!("{}: option {id} is under two controls", self.id));
+                }
+                tuned.push(id);
             }
         }
         for opt in self.options {
@@ -466,7 +577,20 @@ impl Values {
 
     /// Whether `opt` means anything with these values (its [`Opt::when`] holds).
     pub fn applies(&self, game: &Manifest, opt: &Opt) -> bool {
-        opt.when.is_none_or(|(id, value)| self.text(game, id) == value)
+        opt.when.is_none_or(|(id, value)| matches(&self.text(game, id), value))
+    }
+
+    /// The choices of `opt` the window offers with these values: its window's, less the aims the
+    /// device in hand cannot make ([`aim_fits`]).
+    pub fn shown_choices(&self, game: &Manifest, opt: &Opt) -> Vec<(&'static str, &'static str)> {
+        let Kind::Choice { choices, window, .. } = opt.kind else { return Vec::new() };
+        let device = self.text(game, PLAY_WITH.id);
+        choices[..window.min(choices.len())].iter().copied().filter(|(id, _)| opt.id != AIM_ID || aim_fits(&device, id)).collect()
+    }
+
+    /// The texts of `how`'s ways that hold with these values, in order.
+    pub fn ways(&self, game: &Manifest, how: &HowTo) -> Vec<&'static str> {
+        how.ways.iter().filter(|w| w.when.iter().all(|(id, value)| matches(&self.text(game, id), value))).map(|w| w.text).collect()
     }
 
     /// The value of `id` as text, its default when unset or invalid.
@@ -479,7 +603,17 @@ impl Values {
                 (if on { "1" } else { "0" }).to_owned()
             }
             Kind::Choice { choices, default, .. } => {
-                raw.and_then(|r| choices.iter().find(|(id, _)| id.eq_ignore_ascii_case(r))).map_or(default, |(id, _)| id).to_owned()
+                let chosen = raw.and_then(|r| choices.iter().find(|(id, _)| id.eq_ignore_ascii_case(r))).map_or(default, |(id, _)| id);
+                // An aim the device in hand cannot make gives way to the default, else the first
+                // that it can.
+                if id == AIM_ID {
+                    let device = self.text(game, PLAY_WITH.id);
+                    if !aim_fits(&device, chosen) {
+                        let fallback = if aim_fits(&device, default) { Some(default) } else { choices.iter().map(|(id, _)| *id).find(|id| aim_fits(&device, id)) };
+                        return fallback.unwrap_or(chosen).to_owned();
+                    }
+                }
+                chosen.to_owned()
             }
             Kind::Number { min, max, default, .. } => {
                 let n = raw.and_then(|r| r.parse::<f64>().ok()).filter(|n| (min..=max).contains(n)).unwrap_or(default);
@@ -672,15 +806,47 @@ pub mod aims {
     pub const OFF: &str = "off";
 }
 
-/// The `aim` option over `choices` (from [`AIM_MOTION`] and friends), `default` one of them.
+/// The `aim` option's id.
+pub const AIM_ID: &str = "aim";
+
+/// The `aim` option over `choices` (from [`AIM_MOTION`] and friends), `default` one of them. The
+/// window offers the ones the device in hand can make ([`aim_fits`]), and none when that leaves
+/// one.
 pub const fn aim(choices: &'static [(&'static str, &'static str)], default: &'static str) -> Opt {
-    opt("aim", "Aim", "What points your weapon.", choice(choices, default))
+    opt(AIM_ID, "Aim", "What points your weapon.", choice(choices, default)).on(Shown::Controls)
+}
+
+/// What the player holds ([`PLAY_WITH`]).
+pub mod plays {
+    pub const VR: &str = "vr";
+    pub const KEYBOARD: &str = "keyboard";
+    pub const GAMEPAD: &str = "gamepad";
+}
+
+/// What the player plays with: the VR controllers, or a mouse and keyboard or a gamepad of their
+/// own. The first option of the Controls tab: what aims ([`aim_fits`]) and how each thing is done
+/// ([`HowTo`]) follow it. Away from the VR controllers they are not the game's gamepad.
+pub const PLAY_WITH: Opt = opt(
+    "play_with",
+    "Play with",
+    "What you hold while you play.",
+    choice(&[(plays::VR, "VR controllers"), (plays::KEYBOARD, "Mouse and keyboard"), (plays::GAMEPAD, "Gamepad")], plays::VR),
+)
+.on(Shown::Controls)
+.launcher()
+.turns_off("!vr", "controller_pad", "Your VR controllers are not the game's gamepad while you play with something else.");
+
+/// Whether `device` ([`PLAY_WITH`]) can make aim `aim`: motion controls and a pointing controller
+/// need the VR controllers; the look and the mouse or stick aim with anything.
+pub fn aim_fits(device: &str, aim: &str) -> bool {
+    device != plays::KEYBOARD && device != plays::GAMEPAD || !matches!(aim, aims::HAND_RIG | aims::CONTROLLER)
 }
 
 /// Which controller a pointing aim follows. Only for `aim=controller`: with motion controls the
 /// weapon is in the games' right hand, so the right controller aims.
 pub const AIM_HAND: Opt =
     opt("aim_hand", "Aiming hand", "The controller that aims.", choice(&[("right", "Right"), ("left", "Left")], "right"))
+        .on(Shown::Controls)
         .only_when("aim", "controller")
         .owned_by(Feature::Look);
 
@@ -709,11 +875,18 @@ pub const RENDER_SIZES: &[(&str, &str)] = &[
     ("game", "The game's own"),
 ];
 
-/// The resolution each eye renders at while VR runs (the launcher settles it into `eye_size`);
-/// `help` says what matters in this game.
-pub const fn render_size(help: &'static str) -> Opt {
-    opt("render_size", "Headset resolution", help, choice(RENDER_SIZES, "headset")).launcher()
-}
+/// The resolution each eye renders at while VR runs (the launcher settles it into `eye_size`).
+pub const RENDER_SIZE: Opt = opt(
+    "render_size",
+    "Headset resolution",
+    "The resolution each eye renders at while VR runs: the headset's is sharper, a smaller one runs faster.",
+    choice(RENDER_SIZES, "headset"),
+)
+.on(Shown::Rendering)
+.launcher();
+
+/// A render size of the player's own, beside [`render_size`].
+pub const OWN_EYE_SIZE: Opt = line("eye_size", "Render size (WxH)", "A render size of your own; replaces render_size.", Kind::Size).launcher();
 
 /// The HUD's pieces on the hands instead of in front of the eyes.
 pub const WORLD_HUD: Opt =
@@ -734,7 +907,7 @@ pub const OTHER_BUILDS: Opt = opt(
     "Runs even if your game version isn't the one Monaka was built for. Features may not work and the game may crash.",
     Kind::Switch { default: false },
 )
-.on(Shown::Engine);
+.on(Shown::Game);
 
 /// The d-pad directions (`left,right`, ...) that open a choice the game keeps open only while the
 /// d-pad is held: on a controller without a d-pad, pushed through the viewer's d-pad layer they
@@ -746,7 +919,7 @@ pub const fn dpad_hold(directions: &'static [&'static str]) -> Opt {
         "For controllers without a d-pad (Quest): a d-pad menu stays open until you pick with A, B, X or Y.",
         Kind::Switch { default: true },
     )
-    .on(Shown::Game)
+    .on(Shown::Controls)
     .launcher()
     .viewer_args("1", directions)
 }
@@ -761,7 +934,7 @@ pub const fn menu_reach(help: &'static str) -> Opt {
         help,
         choice(&[("same", "Pick with that hand's stick"), ("other", "Pick with the other hand's stick"), ("off", "Off")], "same"),
     )
-    .on(Shown::Game)
+    .on(Shown::Controls)
     .launcher()
     .only_when("dpad_hold", "1")
     .viewer_args("*", &["--menu-reach"])
@@ -775,7 +948,7 @@ pub const MENU_REACH_DEPTH: Opt = opt(
     "How far behind your head a hand reaches before its menu opens.",
     Kind::Number { min: 5.0, max: 40.0, step: 1.0, default: 15.0 },
 )
-.on(Shown::Game)
+.on(Shown::Controls)
 .launcher()
 .only_when("dpad_hold", "1")
 .viewer_args("*", &["--menu-reach-depth"]);
@@ -788,7 +961,7 @@ pub const CONTROLLER_PROXY: Opt = opt(
     "Your controllers act like another kind, to try its layout: Quest's have no d-pad or View button, Index's no d-pad. Your left grip stands in for the Quest thumbrest or the Index trackpad touch.",
     choice(&[("off", "Off"), ("touch", "Quest controllers"), ("index", "Valve Index controllers")], "off"),
 )
-.on(Shown::Engine)
+.on(Shown::Controls)
 .launcher()
 .viewer_args("*", &["--act-like"]);
 
@@ -815,19 +988,71 @@ pub const EYE_SEPARATION: Opt =
 /// The character walks where the player steps (`monaka_arms::roomscale`).
 pub const ROOM_SCALE: Opt =
     opt("room_scale", "Room-scale movement", "Your real steps and leans move your character; walls and enemies still stop it.", Kind::Switch { default: true })
-        .on(Shown::Game)
+        .on(Shown::Controls)
         .only_when("aim", "hand_rig")
         .owned_by(Feature::RoomScale);
+
+/// How the right stick turns the player where a producer turns it itself
+/// (`monaka_core::pad::StickTurn::from_options`). A game that offers it may narrow when it shows.
+pub const TURN: Opt =
+    opt("turn", "Turning", "How the right stick turns you.", choice(&[("smooth", "Smooth"), ("snap", "Snap (30 degrees)")], "smooth")).on(Shown::Controls);
 
 /// The VR controllers as the game's gamepad (`monaka_pad`).
 pub const CONTROLLER_PAD: Opt =
     opt("controller_pad", "Controllers as gamepad", "Your VR controllers' sticks and buttons work as the game's gamepad.", Kind::Switch { default: true })
-        .on(Shown::Game)
+        .on(Shown::Controls)
         .owned_by(Feature::Gamepad);
+
+// ---- How to do things, for the Controls tab ----
+//
+// What Monaka itself does the same in every game, written once; a game lists these among its own
+// ([`Manifest::controls`]) with the options they name.
+
+/// The game's buttons on what the player holds: the VR controllers as an Xbox pad (the game's own
+/// prompts name its buttons), and the d-pad of controllers without one. Names `controller_pad` and
+/// `controller_proxy`.
+pub const HOW_BUTTONS: HowTo = HowTo {
+    action: "The game's buttons",
+    ways: &[
+        way(
+            "Your VR controllers are the game's gamepad, so its button prompts mean these: the triggers are its triggers, the grips its bumpers (LB, RB), A and B are on the right controller, X and Y on the left, and the menu button is Start.",
+            &[("play_with", plays::VR), ("controller_pad", "1")],
+        ),
+        way(
+            "No d-pad on your controllers? On Quest, rest your left thumb on the thumbrest: the right stick is then the d-pad and the menu button is View. On Index, touch the left trackpad and push the right stick for the d-pad; pressing the right trackpad is View.",
+            &[("play_with", plays::VR), ("controller_pad", "1")],
+        ),
+        way("Your VR controllers are not the game's gamepad.", &[("play_with", plays::VR), ("controller_pad", "0")]),
+        way("Your mouse and keyboard work as in the game; its own controls menu lists them.", &[("play_with", plays::KEYBOARD)]),
+        way("Your gamepad works as in the game; its own controls menu lists the buttons.", &[("play_with", plays::GAMEPAD)]),
+    ],
+    options: &["controller_pad", "controller_proxy"],
+};
+
+/// Walking in the room, with motion controls. Names `room_scale`.
+pub const HOW_WALK: HowTo = HowTo {
+    action: "Walk",
+    ways: &[
+        way("Walk in your room: your character follows your steps and leans. Walls and enemies still stop it.", &[("aim", aims::HAND_RIG), ("room_scale", "1")]),
+        way("Push the left stick to walk further.", &[("play_with", plays::VR)]),
+    ],
+    options: &["room_scale"],
+};
+
+/// Each eye's depth goes to the headset beside its image, for the runtime's own reprojection of
+/// late frames; off for an A/B check against colour only.
+pub const HEADSET_DEPTH: Opt = opt(
+    "headset_depth",
+    "Depth to headset",
+    "Gives the headset each eye's depth, so when the game falls behind, the headset's own frame smoothing handles you moving your head, not only turning it.",
+    Kind::Switch { default: true },
+)
+.on(Shown::Rendering)
+.owned_by(Feature::DepthLayer);
 
 /// Every shared option a part of a game's code honours (each with its owner): a game offers these
 /// constants, never an option of its own under one of their ids.
-pub const SHARED: &[Opt] = &[AIM_HAND, FINGER_TRACKING, BINARY_FINGERS, WORLD_HUD, HUD_SIZE, HUD_DISTANCE, HEAD_MOVEMENT, LATENCY, EYE_SEPARATION, ROOM_SCALE, CONTROLLER_PAD];
+pub const SHARED: &[Opt] = &[AIM_HAND, FINGER_TRACKING, BINARY_FINGERS, WORLD_HUD, HUD_SIZE, HUD_DISTANCE, HEAD_MOVEMENT, LATENCY, EYE_SEPARATION, ROOM_SCALE, CONTROLLER_PAD, HEADSET_DEPTH];
 
 /// The owner of the shared option `id` ([`SHARED`]), for an option read back from a pack's text.
 pub fn shared_owner(id: &str) -> Option<Feature> {
@@ -881,6 +1106,7 @@ pub const MONAKA: Manifest = Manifest {
     licences: &[],
     left_hand_aims: false,
     weapon_ring: false,
+    controls: &[],
 };
 
 /// Extra `key=value` producer options, appended to the options file (the game's config lists them).
@@ -911,10 +1137,11 @@ mod tests {
         launch: Launch::Auto { settle_seconds: 5 },
         refused_arguments: &[],
         before: "",
-        options: &[aim(&[AIM_MOTION, AIM_LOOK, AIM_POINT, AIM_MOUSE], "hand_rig"), AIM_HAND, render_size(""), HUD_SIZE.default_number(0.36), FINGER_TRACKING, LATENCY, EXTRA, LAUNCH, settle(60.0, 5.0)],
+        options: &[aim(&[AIM_MOTION, AIM_LOOK, AIM_POINT, AIM_MOUSE], "hand_rig"), AIM_HAND, RENDER_SIZE, HUD_SIZE.default_number(0.36), FINGER_TRACKING, LATENCY, EXTRA, LAUNCH, settle(60.0, 5.0)],
         licences: &[],
         left_hand_aims: true,
         weapon_ring: true,
+        controls: &[],
     };
 
     const ANY: Manifest = Manifest {
@@ -1000,6 +1227,62 @@ mod tests {
         assert!(Manifest { options: READS, launch: Launch::Manual, ..TEST }.check().is_ok());
         const CHANGED: &[Opt] = &[DISABLE_VIEW_BOBBING.default_switch(false)];
         assert!(Manifest { options: CHANGED, launch: Launch::Manual, ..TEST }.check().unwrap_err().contains("disable_view_bobbing"));
+    }
+
+    /// A game with the Controls tab: what the player holds, the aims, the pad, and its how-tos.
+    const PLAYS: Manifest = Manifest {
+        options: &[PLAY_WITH, aim(&[AIM_MOTION, AIM_LOOK, AIM_POINT, AIM_MOUSE], aims::HAND_RIG), CONTROLLER_PAD, CONTROLLER_PROXY, ROOM_SCALE],
+        launch: Launch::Manual,
+        controls: &[HOW_BUTTONS, HOW_WALK],
+        ..TEST
+    };
+
+    #[test]
+    fn what_the_player_holds_decides_the_aims_and_the_pad() {
+        PLAYS.check().unwrap();
+        let aim = PLAYS.option("aim").unwrap();
+        let mut values = Values::default();
+        assert_eq!(values.shown_choices(&PLAYS, aim).len(), 4);
+        assert!(values.switch(&PLAYS, "controller_pad"));
+        // A mouse and keyboard make neither motion controls nor a pointing controller: the aim the
+        // player set gives way to the first the device makes, and their VR controllers are no pad.
+        values.set_checked(&PLAYS, "play_with", "keyboard").unwrap();
+        assert_eq!(values.shown_choices(&PLAYS, aim).iter().map(|(id, _)| *id).collect::<Vec<_>>(), [aims::HEAD, aims::OFF]);
+        assert_eq!(values.text(&PLAYS, "aim"), aims::HEAD);
+        values.set_checked(&PLAYS, "aim", "off").unwrap();
+        assert_eq!(values.text(&PLAYS, "aim"), aims::OFF);
+        assert!(!values.switch(&PLAYS, "controller_pad"));
+        assert!(values.producer_lines(&PLAYS).contains(&"controller_pad=0".to_owned()));
+        assert!(!values.producer_lines(&PLAYS).iter().any(|l| l.starts_with("play_with")), "the launcher's own");
+        // Back on the VR controllers, the aim set is theirs again.
+        values.set_checked(&PLAYS, "aim", "controller").unwrap();
+        assert_eq!(values.text(&PLAYS, "aim"), aims::HEAD);
+        values.set("play_with", "vr");
+        assert_eq!(values.text(&PLAYS, "aim"), aims::CONTROLLER);
+        // A game without the choice aims as it always did.
+        assert_eq!(values.text(&TEST, "aim"), aims::CONTROLLER);
+    }
+
+    #[test]
+    fn a_how_to_shows_the_ways_that_hold() {
+        let mut values = Values::default();
+        let buttons = values.ways(&PLAYS, &HOW_BUTTONS);
+        assert!(buttons.len() == 2 && buttons[0].contains("bumpers") && buttons[1].contains("thumbrest"), "{buttons:?}");
+        assert_eq!(values.ways(&PLAYS, &HOW_WALK).len(), 2);
+        values.set("room_scale", "0");
+        assert_eq!(values.ways(&PLAYS, &HOW_WALK), ["Push the left stick to walk further."]);
+        values.set("play_with", "gamepad");
+        assert!(values.ways(&PLAYS, &HOW_BUTTONS)[0].starts_with("Your gamepad"));
+        assert!(values.ways(&PLAYS, &HOW_WALK).is_empty());
+        assert!(matches("keyboard", "!vr") && !matches("vr", "!vr") && matches("vr", "vr"));
+        // Every option a how-to names is the game's, under one how-to only; every condition one of
+        // its values.
+        let unknown = Manifest { options: &[PLAY_WITH, CONTROLLER_PAD], ..PLAYS };
+        assert!(unknown.check().unwrap_err().contains("unknown option"));
+        const TWICE: &[HowTo] = &[HOW_WALK, HowTo { action: "Again", ways: &[], options: &["room_scale"] }];
+        assert!(Manifest { controls: TWICE, ..PLAYS }.check().unwrap_err().contains("under two controls"));
+        const ODD: &[HowTo] = &[HowTo { action: "Odd", ways: &[way("x", &[("play_with", "!feet")])], options: &[] }];
+        assert!(Manifest { controls: ODD, ..PLAYS }.check().unwrap_err().contains("play_with=!feet"));
     }
 
     #[test]

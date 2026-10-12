@@ -7,12 +7,27 @@
 //!
 //! Every frame is row-major 3x4 in one right-handed space (a left-handed engine mirrors its frames
 //! before and after).
+//!
+//! On a [`Skeleton`] (the hand rig's provider) a game says once where its fingers are
+//! ([`ChainSource`]), and [`place`] puts a hand's tracked fingers on an update's frames: each hand
+//! is found once per skeleton as a small skeleton of its own (the wrist and everything under it),
+//! its reference the engine's rest poses where it keeps them and the pose first seen elsewhere,
+//! and posed in the wrist's own frame (a scale in the world matrices, as one engine squashes its
+//! arms toward the camera, cancels there). A game with fingers and no hand rig says where they are
+//! by [`FingerRig`] and calls [`frame`].
 
 use crate::fingers::{self, Finger, FingerJoints, Hand};
+use crate::melee::Held;
 use crate::skeleton::finger_chains;
-use monaka_core::camera::{self, Mat34, position};
+use crate::{Frames, Skeleton, Snapshot};
+use monaka_core::camera::{self, IDENTITY_MATRIX, Mat34, position};
 use monaka_core::math::{Vec3, cross, distance, dot, sub, unit};
-use monaka_core::protocol::FingerPose;
+use monaka_core::protocol::{FingerPose, LEFT_HAND, RIGHT_HAND};
+use monaka_core::sync::Locked;
+use monaka_producer::game::Game;
+use monaka_producer::log;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, Mutex};
 
 /// Which bones are a skeleton's hands and fingers, by index.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -45,6 +60,19 @@ impl FingerNames {
     pub fn name(&self, side: usize, finger: usize, n: usize) -> String {
         self.bone.replace("{side}", self.sides[side]).replace("{finger}", self.fingers[finger]).replace("{n}", &n.to_string())
     }
+
+    /// Side `side`'s wrist and fingers (three bones each), looked up by `find`.
+    pub fn side(&self, side: usize, find: impl Fn(&str) -> Option<usize>) -> Result<(usize, [Vec<usize>; 5]), String> {
+        let wrist = find(self.wrists[side]).ok_or_else(|| format!("no bone {}", self.wrists[side]))?;
+        let mut fingers: [Vec<usize>; 5] = Default::default();
+        for (finger, bones) in fingers.iter_mut().enumerate() {
+            for n in 1..=3 {
+                let name = self.name(side, finger, n);
+                bones.push(find(&name).ok_or_else(|| format!("no bone {name}"))?);
+            }
+        }
+        Ok((wrist, fingers))
+    }
 }
 
 impl Chains {
@@ -52,13 +80,7 @@ impl Chains {
     pub fn named(names: &FingerNames, find: impl Fn(&str) -> Option<usize>) -> Result<Chains, String> {
         let mut chains = Chains::default();
         for side in 0..2 {
-            chains.wrists[side] = find(names.wrists[side]).ok_or_else(|| format!("no bone {}", names.wrists[side]))?;
-            for finger in 0..5 {
-                for n in 1..=3 {
-                    let name = names.name(side, finger, n);
-                    chains.fingers[side][finger].push(find(&name).ok_or_else(|| format!("no bone {name}"))?);
-                }
-            }
+            (chains.wrists[side], chains.fingers[side]) = names.side(side, &find)?;
         }
         Ok(chains)
     }
@@ -269,6 +291,235 @@ impl FingerJoints for Joints<'_> {
             }
         }
     }
+}
+
+// ---- On a game's skeleton ----
+
+/// Where a skeleton's finger bones are, as a game says once.
+#[derive(Clone, Copy, Debug)]
+pub enum ChainSource {
+    /// By name ([`FingerNames`]).
+    Named(FingerNames),
+    /// By index ([`ChainTable`]).
+    Table(&'static ChainTable),
+    /// By the skeleton's shape ([`Chains::by_shape`]), under the wrists the hand rig found
+    /// ([`Frames::wrists`]): for a skeleton that names nothing.
+    Shape,
+}
+
+/// A skeleton's hands and finger bones by element, left then right: each finger's curled bones
+/// from the hand out ([`Chains::fingers`]); a side with no fingers listed has none.
+#[derive(Clone, Copy, Debug)]
+pub struct ChainTable {
+    pub wrists: [i32; 2],
+    pub fingers: [[&'static [i32]; 5]; 2],
+}
+
+/// A wrist and its fingers' curled bones, by element.
+type SideChains = (usize, [Vec<usize>; 5]);
+
+impl ChainSource {
+    /// Side `side`'s wrist and its fingers' curled bones (elements), or why not. `None`: not yet
+    /// (the shape's wrists are not found this update).
+    fn side(&self, skeleton: &dyn Skeleton, frames: &Frames, parents: &[i32], side: usize) -> Option<Result<SideChains, String>> {
+        Some(match self {
+            ChainSource::Named(names) => {
+                let all: Vec<String> = (0..skeleton.count()).map(|e| skeleton.name(e)).collect();
+                names.side(side, |wanted| all.iter().position(|n| n == wanted))
+            }
+            ChainSource::Table(table) => table.side(side),
+            ChainSource::Shape => {
+                let (wrist, forearm) = frames.wrists[side]?;
+                Chains::by_shape(parents, frames.animated, [wrist; 2], [forearm; 2]).map(|chains| (wrist, chains.fingers[side].clone()))
+            }
+        })
+    }
+}
+
+impl ChainTable {
+    fn side(&self, side: usize) -> Result<SideChains, String> {
+        let index = |e: i32| usize::try_from(e).map_err(|_| format!("element {e} in the finger table"));
+        let mut fingers: [Vec<usize>; 5] = Default::default();
+        for (finger, bones) in fingers.iter_mut().enumerate() {
+            *bones = self.fingers[side][finger].iter().map(|&b| index(b)).collect::<Result<_, _>>()?;
+        }
+        Ok((index(self.wrists[side])?, fingers))
+    }
+}
+
+/// `root` and everything under it, parents first (whatever order the skeleton keeps them in).
+fn under(parents: &[i32], root: usize) -> Vec<usize> {
+    let mut out = vec![root];
+    let mut k = 0;
+    while k < out.len() && out.len() <= parents.len() {
+        let parent = out[k];
+        out.extend((0..parents.len()).filter(|&e| e != parent && parents[e] == parent as i32));
+        k += 1;
+    }
+    out
+}
+
+/// One hand as a skeleton of its own: its elements (the wrist first, parents before children) and
+/// its finger rig.
+struct HandBones {
+    elements: Vec<usize>,
+    rig: Rig,
+}
+
+/// Hand `side` of `skeleton`, its fingers as `source` says. `None`: not yet.
+fn hand_bones(skeleton: &dyn Skeleton, frames: &Frames, source: &ChainSource, side: usize) -> Option<Result<HandBones, String>> {
+    let parents: Vec<i32> = (0..skeleton.count()).map(|e| skeleton.parent(e)).collect();
+    Some(source.side(skeleton, frames, &parents, side)?.and_then(|(wrist, fingers)| hand_from(skeleton, frames, &parents, side, wrist, &fingers)))
+}
+
+fn hand_from(skeleton: &dyn Skeleton, frames: &Frames, parents: &[i32], side: usize, wrist: usize, fingers: &[Vec<usize>; 5]) -> Result<HandBones, String> {
+    if fingers.iter().all(Vec::is_empty) {
+        return Err("no fingers listed".to_owned());
+    }
+    if wrist >= frames.animated.len() {
+        return Err(format!("no wrist element {wrist}"));
+    }
+    let elements = under(parents, wrist);
+    let local = |e: usize| elements.iter().position(|&x| x == e);
+    let local_parents: Vec<i32> = elements
+        .iter()
+        .enumerate()
+        .map(|(i, &e)| if i == 0 { -1 } else { usize::try_from(parents[e]).ok().and_then(local).map_or(-1, |p| p as i32) })
+        .collect();
+    let asked: Vec<i32> = elements[1..].iter().map(|&e| e as i32).collect();
+    let kept = skeleton.rests_under(wrist as i32, &asked);
+    let mut seen = 0;
+    let mut rest = vec![IDENTITY_MATRIX];
+    for (i, &e) in elements.iter().enumerate().skip(1) {
+        let matrix = match kept.get(i - 1).copied().flatten() {
+            Some(matrix) => matrix,
+            None => {
+                seen += 1;
+                let parent = elements[local_parents[i] as usize];
+                let back = camera::inverse(&frames.animated[parent]).ok_or_else(|| format!("element {parent} as first seen has no inverse"))?;
+                camera::compose(&back, &frames.animated[e])
+            }
+        };
+        if !matrix.iter().all(|v| v.is_finite()) {
+            return Err(format!("element {e} has no rest pose"));
+        }
+        rest.push(matrix);
+    }
+    let mut chains = Chains::default();
+    chains.fingers[side] = fingers.each_ref().map(|bones| bones.iter().filter_map(|&b| local(b)).collect());
+    if chains.fingers[side].iter().zip(fingers).any(|(found, listed)| found.len() != listed.len()) {
+        return Err(format!("a finger bone is not under the wrist {wrist}"));
+    }
+    let rig = Rig::discover(&local_parents, rest, &chains)?;
+    log!(
+        "fingers: the {} hand's fingers found on wrist {wrist} ({} elements; rest poses: {} the game's, {seen} as first seen)",
+        side_name(side),
+        elements.len(),
+        elements.len() - 1 - seen
+    );
+    Ok(HandBones { elements, rig })
+}
+
+fn side_name(side: usize) -> &'static str {
+    if side == LEFT_HAND { "left" } else { "right" }
+}
+
+/// A skeleton's hand found (or found missing), by skeleton, element count and side.
+struct Known {
+    skeleton: usize,
+    count: i32,
+    side: usize,
+    hand: Option<Arc<HandBones>>,
+}
+
+static KNOWN: Mutex<Vec<Known>> = Mutex::new(Vec::new());
+/// Updates each hand's fingers were put on tracking.
+static PLACED: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+/// Hand `side` of `skeleton`, found once.
+fn known(skeleton: &dyn Skeleton, frames: &Frames, source: &ChainSource, side: usize) -> Option<Arc<HandBones>> {
+    let (id, count) = (skeleton.id(), skeleton.count());
+    if let Some(k) = KNOWN.locked().iter().find(|k| k.skeleton == id && k.count == count && k.side == side) {
+        return k.hand.clone();
+    }
+    let hand = match hand_bones(skeleton, frames, source, side)? {
+        Ok(hand) => Some(Arc::new(hand)),
+        Err(why) => {
+            log!("fingers: the {} hand stays as the game animates it: {why}", side_name(side));
+            None
+        }
+    };
+    let mut known = KNOWN.locked();
+    if known.len() >= 16 {
+        known.clear();
+    }
+    known.push(Known { skeleton: id, count, side, hand: hand.clone() });
+    hand
+}
+
+/// Puts hand `side`'s fingers on `tracked` in `frames` (the rig's frames of `skeleton`, the hand
+/// where the rig put it): each knuckle and what hangs from it moves, the hand does not. False (and
+/// `frames` untouched) when the hand has no fingers found or the pose is not usable.
+pub fn place(skeleton: &dyn Skeleton, frames: &mut Frames, source: &ChainSource, side: usize, tracked: &FingerPose) -> bool {
+    let Some(hand) = known(skeleton, frames, source, side) else { return false };
+    if hand.elements.iter().any(|&e| e >= frames.now.len()) {
+        return false;
+    }
+    let world = frames.now[hand.elements[0]];
+    let Some(back) = camera::inverse(&world) else { return false };
+    let mut local: Vec<Mat34> = hand.elements.iter().map(|&e| camera::compose(&back, &frames.now[e])).collect();
+    local[0] = IDENTITY_MATRIX;
+    let before = local.clone();
+    if !hand.rig.apply(&mut local, side, *tracked) {
+        return false;
+    }
+    for (i, &e) in hand.elements.iter().enumerate().skip(1) {
+        if local[i] != before[i] {
+            frames.now[e] = camera::compose(&world, &local[i]);
+        }
+    }
+    if PLACED[side].fetch_add(1, Relaxed) == 0 {
+        log!("fingers: the {} hand's fingers follow finger tracking", side_name(side));
+    }
+    true
+}
+
+/// How often each hand's fingers were put on tracking.
+pub fn summary() -> String {
+    format!("fingers: placed from tracking {} times (left), {} (right)", PLACED[LEFT_HAND].load(Relaxed), PLACED[RIGHT_HAND].load(Relaxed))
+}
+
+/// End-of-run line, when fingers were placed at all.
+pub fn report() {
+    if PLACED.iter().any(|p| p.load(Relaxed) > 0) {
+        log!("{}", summary());
+    }
+}
+
+/// A game with tracked fingers and no hand rig: where its fingers are.
+pub trait FingerRig: Game {
+    const CHAINS: ChainSource;
+    /// The kind of what hand `side` holds now: a hand that grips it keeps the game's grip
+    /// ([`Held::grips`]).
+    fn held(_side: usize) -> Held {
+        Held::Nothing
+    }
+}
+
+/// A finger update of game `G` on `skeleton` (no hand rig): the skeleton read, each free hand's
+/// tracked fingers put on, the bones they changed written. False when nothing was written.
+pub fn frame<G: FingerRig>(skeleton: &dyn Skeleton) -> bool {
+    let Some(animated) = Snapshot::take(skeleton) else { return false };
+    let mut frames = Frames::new(&animated);
+    let mut placed = false;
+    for side in [LEFT_HAND, RIGHT_HAND] {
+        if !G::held(side).grips()
+            && let Some(tracked) = crate::controllers::fingers(side)
+        {
+            placed |= place(skeleton, &mut frames, &G::CHAINS, side, &tracked);
+        }
+    }
+    placed && !frames.flush(skeleton).is_empty()
 }
 
 #[cfg(test)]

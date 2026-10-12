@@ -1,12 +1,13 @@
 [package]
 name = "monaka_streamline"
-description = "NVIDIA Streamline as a game's renderer calls it for DLSS: the layouts of its tags, camera constants and viewports, for producers that hook those calls."
+description = "NVIDIA Streamline as a game's renderer calls it for DLSS: the layouts of its tags, camera constants and viewports, its imports hooked for producers, and DLSS per eye."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+monaka_channel.workspace = true
 monaka_core.workspace = true
 monaka_hook.workspace = true
 monaka_producer.workspace = true

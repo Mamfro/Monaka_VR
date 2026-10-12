@@ -10,6 +10,7 @@
 
 use monaka_channel::d3d12::barrier;
 use monaka_channel::d3d12::compute::{self, DescriptorHeap, Table, srv_desc, uav_desc};
+use monaka_streamline::per_eye::{MotionRebase, Rebase};
 use std::ffi::c_void;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
@@ -147,6 +148,26 @@ impl MotionFix {
             barrier(list, &output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, READABLE);
         }
         Ok(())
+    }
+}
+
+/// The rebase per-eye DLSS records ([`monaka_streamline::per_eye`]).
+pub fn rebase(device: &ID3D12Device) -> Result<Box<dyn MotionRebase>, String> {
+    Ok(Box::new(MotionFix::new(device)?))
+}
+
+impl MotionRebase for MotionFix {
+    fn output(&mut self, width: u32, height: u32) -> Result<ID3D12Resource, String> {
+        MotionFix::output(self, width, height)
+    }
+
+    fn record(&mut self, list: &ID3D12GraphicsCommandList, depth: &ID3D12Resource, motion: &ID3D12Resource, rebase: &Rebase) -> Result<(), String> {
+        let constants = Constants { game_to_prev: rebase.game_to_prev, same_to_prev: rebase.same_to_prev, size: [0; 2], mvec_scale: rebase.mvec_scale, object_scale: rebase.object_scale, pad: [0.0; 3] };
+        MotionFix::record(self, list, depth, motion, &constants)
+    }
+
+    fn readable(&self) -> D3D12_RESOURCE_STATES {
+        READABLE
     }
 }
 

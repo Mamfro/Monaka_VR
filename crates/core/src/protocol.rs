@@ -18,8 +18,9 @@ pub struct Luid {
 
 /// Eye gaze in head-relative OpenXR VIEW coordinates: +X right, +Y up, forward -Z.
 ///
-/// Eye tracking is not ported; this record exists only because it is part of [`HeadPose`]'s
-/// layout. The Rust side always leaves it invalid (zeroed).
+/// The viewer fills it in with each head pose when the headset tracks the eyes (OpenXR's eye gaze
+/// interaction, or the vendor's eye tracking); otherwise it stays [`EyeGaze::NONE`]. A gaze that is
+/// valid but old (by `received_tick`) is a stale sample, not a live one.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EyeGaze {
@@ -321,15 +322,72 @@ pub const FENCE_MAGIC: u32 = 0x4656_4c44;
 /// 2: per-slot sequences, five slots. The reader takes the newest finished pair, not only the
 /// newest: with a GPU running frames behind, the newest pair is still unfinished whenever the
 /// reader looks, and most pairs would never be shown.
-pub const FENCE_VERSION: u32 = 2;
+/// 3: each eye's depth beside its image, when the producer sends it ([`FenceDepth`]).
+pub const FENCE_VERSION: u32 = 3;
 pub const FENCE_SLOTS: usize = 5;
 pub const NO_SLOT: u32 = u32::MAX;
+
+/// How a depth image maps to distance: the near and far planes' distances in metres (`far` may be
+/// infinite), and whether depth runs from 1 at the near plane to 0 at the far one (reversed) rather
+/// than from 0 to 1.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DepthParams {
+    pub near: f32,
+    pub far: f32,
+    pub reversed: u32,
+    pub _reserved: u32,
+}
+
+impl DepthParams {
+    pub fn new(near: f32, far: f32, reversed: bool) -> Self {
+        Self { near, far, reversed: reversed as u32, _reserved: 0 }
+    }
+
+    /// A positive, finite near plane in front of a farther (or infinite) far plane.
+    pub fn is_valid(&self) -> bool {
+        self.near > 0.0 && self.near.is_finite() && self.far > self.near
+    }
+
+    /// The distances at depth 0 and at depth 1 (OpenXR's `nearZ` and `farZ` for a depth range of
+    /// 0 to 1): reversed depth swaps them, so an infinite far plane is the distance at 0.
+    pub fn distances_at_0_and_1(&self) -> (f32, f32) {
+        if self.reversed != 0 { (self.far, self.near) } else { (self.near, self.far) }
+    }
+}
+
+/// The depth one fence slot holds beside its eye images.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DepthSlot {
+    /// The pair this depth belongs to: when it is not the slot's pair, the pair came without depth.
+    pub sequence: u64,
+    pub params: DepthParams,
+    /// Per eye, the part of the depth texture that lines up with the eye image: left, top, width,
+    /// height, in texels.
+    pub rects: [[u32; 4]; 2],
+}
+
+/// The depth part of the fence header: per slot a depth texture for each eye, made by the producer
+/// when it first sends depth (and made anew when the depth's size or format changes).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FenceDepth {
+    /// Which set of textures `textures` names: 0 for none yet, one more each time they are made.
+    pub generation: u32,
+    /// The depth textures' typeless `DXGI_FORMAT` ([`depth_slot_format`]).
+    pub format: u32,
+    pub width: u32,
+    pub height: u32,
+    pub textures: [[u64; 2]; FENCE_SLOTS],
+    pub slots: [DepthSlot; FENCE_SLOTS],
+}
 
 /// Header of the D3D12-to-D3D11 fence stereo channel: [`FENCE_SLOTS`] slots of paired eye textures
 /// and two shared fences. Handle values are valid in the producer process; the reader duplicates
 /// them.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FenceHeader {
     pub magic: u32,
     pub version: u32,
@@ -350,6 +408,7 @@ pub struct FenceHeader {
     /// The pair each slot holds or is being written with (0: none yet), and its tick.
     pub slot_sequences: [u64; FENCE_SLOTS],
     pub slot_ticks: [u64; FENCE_SLOTS],
+    pub depth: FenceDepth,
 }
 
 impl FenceHeader {
@@ -374,12 +433,34 @@ pub mod dxgi_format {
     pub const R8G8B8A8_UNORM_SRGB: u32 = 29;
     pub const B8G8R8A8_UNORM: u32 = 87;
     pub const B8G8R8A8_UNORM_SRGB: u32 = 91;
+    pub const R32G8X24_TYPELESS: u32 = 19;
+    pub const D32_FLOAT_S8X24_UINT: u32 = 20;
+    pub const R32_FLOAT_X8X24_TYPELESS: u32 = 21;
+    pub const R32_TYPELESS: u32 = 39;
+    pub const D32_FLOAT: u32 = 40;
+    pub const R32_FLOAT: u32 = 41;
+    pub const D24_UNORM_S8_UINT: u32 = 45;
+    pub const R16_TYPELESS: u32 = 53;
+    pub const D16_UNORM: u32 = 55;
+    pub const R16_UNORM: u32 = 56;
 }
 
 /// Formats a D3D12 producer may publish through the fence channel (the game's back buffer format).
 pub fn fence_format_ok(format: u32) -> bool {
     use dxgi_format::*;
     matches!(format, R8G8B8A8_UNORM | B8G8R8A8_UNORM | R10G10B10A2_UNORM)
+}
+
+/// The typeless format of the fence channel's depth textures for a game depth texture of `format`:
+/// its depth plane is copied as it is, so 32-bit float depth (with or without stencil) travels as
+/// R32 and 16-bit depth as R16. 24-bit depth is not copyable that way; `None`.
+pub fn depth_slot_format(format: u32) -> Option<u32> {
+    use dxgi_format::*;
+    match format {
+        R32_TYPELESS | D32_FLOAT | R32_FLOAT | R32G8X24_TYPELESS | D32_FLOAT_S8X24_UINT | R32_FLOAT_X8X24_TYPELESS => Some(R32_TYPELESS),
+        R16_TYPELESS | D16_UNORM | R16_UNORM => Some(R16_TYPELESS),
+        _ => None,
+    }
 }
 
 /// A validated channel name and the names of the objects that belong to it.
@@ -532,11 +613,11 @@ mod tests {
         assert_eq!(offset_of!(KeyedHeader, tick), 32);
     }
 
-    /// Version 2's layout (version 1, the C++ producer's, was 128 bytes with three slots: its
-    /// channels are refused by the version check).
+    /// Version 3's layout: version 2's 240 bytes, then the depth part (version 1, the C++
+    /// producer's, was 128 bytes with three slots; older channels are refused by the version check).
     #[test]
     fn fence_header_layout() {
-        assert_eq!(size_of::<FenceHeader>(), 240);
+        assert_eq!(size_of::<FenceHeader>(), 616);
         assert_eq!(offset_of!(FenceHeader, adapter), 24);
         assert_eq!(offset_of!(FenceHeader, textures), 32);
         assert_eq!(offset_of!(FenceHeader, produced), 112);
@@ -548,6 +629,43 @@ mod tests {
         assert_eq!(offset_of!(FenceHeader, reader_claim), 152);
         assert_eq!(offset_of!(FenceHeader, slot_sequences), 160);
         assert_eq!(offset_of!(FenceHeader, slot_ticks), 200);
+        assert_eq!(offset_of!(FenceHeader, depth), 240);
+        assert_eq!(size_of::<FenceDepth>(), 376);
+        assert_eq!(offset_of!(FenceDepth, textures), 16);
+        assert_eq!(offset_of!(FenceDepth, slots), 96);
+        assert_eq!(size_of::<DepthSlot>(), 56);
+        assert_eq!(offset_of!(DepthSlot, params), 8);
+        assert_eq!(offset_of!(DepthSlot, rects), 24);
+        assert_eq!(size_of::<DepthParams>(), 16);
+        assert_eq!(offset_of!(DepthParams, reversed), 8);
+    }
+
+    #[test]
+    fn depth_params_give_the_distances_at_0_and_1() {
+        let standard = DepthParams::new(0.1, 1000.0, false);
+        assert!(standard.is_valid());
+        assert_eq!(standard.distances_at_0_and_1(), (0.1, 1000.0));
+        // Reversed depth is 1 at the near plane: the far plane is at 0, even when infinite.
+        let reversed = DepthParams::new(0.05, f32::INFINITY, true);
+        assert!(reversed.is_valid());
+        assert_eq!(reversed.distances_at_0_and_1(), (f32::INFINITY, 0.05));
+        assert!(!DepthParams::new(0.0, 100.0, false).is_valid(), "no near plane");
+        assert!(!DepthParams::new(10.0, 1.0, false).is_valid(), "far before near");
+        assert!(!DepthParams::new(f32::NAN, 100.0, false).is_valid());
+        assert!(!DepthParams::default().is_valid(), "zeroed shared memory is no depth");
+    }
+
+    #[test]
+    fn depth_slot_formats() {
+        use dxgi_format::*;
+        for format in [D32_FLOAT, R32_TYPELESS, R32_FLOAT, D32_FLOAT_S8X24_UINT, R32G8X24_TYPELESS, R32_FLOAT_X8X24_TYPELESS] {
+            assert_eq!(depth_slot_format(format), Some(R32_TYPELESS), "{format}");
+        }
+        for format in [D16_UNORM, R16_TYPELESS, R16_UNORM] {
+            assert_eq!(depth_slot_format(format), Some(R16_TYPELESS), "{format}");
+        }
+        assert_eq!(depth_slot_format(D24_UNORM_S8_UINT), None);
+        assert_eq!(depth_slot_format(R8G8B8A8_UNORM), None);
     }
 
     #[test]

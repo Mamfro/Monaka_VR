@@ -498,4 +498,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// The HUD pieces a producer may publish beside its channel (the viewer's panels).
-const PANELS: [&str; 6] = ["minimap", "quests", "weapon", "health", "tool", "layer"];
+const PANELS: [&str; 7] = ["minimap", "quests", "weapon", "health", "tool", "weapon_left", "layer"];

@@ -1,12 +1,17 @@
 //! NVIDIA Streamline as a game's renderer calls it for DLSS: the layouts of what it passes
 //! (`slSetTagForFrame`'s tags, `slSetConstants`' camera, viewport handles) and the functions'
 //! types, for producers that hook those calls in the renderer's import table (Dying Light 2, The
-//! Beast).
+//! Beast). The hooks themselves, with the game's handlers in them: [`imports`]. DLSS with a
+//! history per eye (its own viewport, its own clip-to-previous, its motion vectors rebased):
+//! [`per_eye`].
 //!
 //! The layouts of Streamline 2.9 (Dying Light 2) and 2.8 (The Beast): every structure starts with a 32-byte header (next, GUID, version); a
 //! ViewportHandle's id at +32; a Resource's type +32 (a byte), native object +40, state +64; a
 //! ResourceTag (64 bytes): resource +32, buffer type +40. Reads go through [`monaka_hook::mem`], so a
 //! bad pointer reads as nothing rather than faulting.
+
+pub mod imports;
+pub mod per_eye;
 
 use monaka_core::Aligned16;
 use monaka_core::depth::multiply;
@@ -62,6 +67,12 @@ pub unsafe fn hook_inputs(hooks: &mut Hooks, renderer: &Module, tag: (&Original<
 /// way, The Beast the id in Streamline's viewport handle.
 pub fn eye_viewport(id: u32, eye: u32) -> u32 {
     (id & 0x3fff_ffff) | (eye << 30)
+}
+
+/// [`eye_viewport`] where the id may already be an eye's: `None` for an eye other than 1 or 2, or
+/// an id already using the top bits (left as it is).
+pub fn own_eye_viewport(id: u32, eye: u32) -> Option<u32> {
+    ((1..=2).contains(&eye) && id < 0x4000_0000).then(|| eye_viewport(id, eye))
 }
 
 /// `sl::Feature` values.
@@ -121,6 +132,17 @@ impl Tag {
         // a tag is read inside that call and not kept beyond it.
         unsafe { ID3D12Resource::from_raw_borrowed(&self.raw) }
     }
+
+    /// The tagged texture's size (width, height).
+    pub fn size(&self) -> Option<(u32, u32)> {
+        // SAFETY: reads a descriptor of the tagged texture, live for the game's call.
+        self.texture().map(|t| unsafe { t.GetDesc() }).map(|d| (d.Width as u32, d.Height))
+    }
+}
+
+/// The size of the first 2D texture tagged as buffer type `kind` in `tags`.
+pub fn tagged_size(tags: &[Tag], kind: u32) -> Option<(u32, u32)> {
+    tags.iter().find(|t| t.kind == kind && t.resource_type == RESOURCE_TEX2D)?.size()
 }
 
 /// The tags in the game's array of `count` (resources without a native object left out).
@@ -310,6 +332,9 @@ mod tests {
         assert_eq!(eye_viewport(5, 1), 5 | (1 << 30));
         assert_eq!(eye_viewport(5, 2), 5 | (2 << 30));
         assert_eq!(eye_viewport(0x4000_0005, 2), 0x8000_0005);
+        assert_eq!(own_eye_viewport(5, 1), Some(5 | (1 << 30)));
+        assert_eq!(own_eye_viewport(5, 0), None, "eyes are 1 and 2");
+        assert_eq!(own_eye_viewport(0x4000_0001, 1), None, "an id already an eye's");
     }
 
     #[test]

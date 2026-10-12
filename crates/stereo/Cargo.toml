@@ -9,8 +9,12 @@ license.workspace = true
 [dependencies]
 monaka_core.workspace = true
 monaka_channel.workspace = true
+monaka_framegen.workspace = true
+monaka_fsr11.workspace = true
+monaka_gl.workspace = true
 monaka_hook.workspace = true
 monaka_producer.workspace = true
+monaka_streamline.workspace = true
 monaka_warp.workspace = true
 
 [dependencies.windows]

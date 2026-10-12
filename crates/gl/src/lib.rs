@@ -3,6 +3,9 @@
 //! through `WGL_NV_DX_interop2`; from there the keyed channel, the alternate-eye publisher and the
 //! depth warp work as for a Direct3D game.
 //!
+//! A [`Canvas`] is a framebuffer of our own the game's own draw calls can be run into (a HUD piece
+//! cut out of its 2D layer), captured the same way.
+//!
 //! Everything here runs on the game's render thread with its GL context current (inside its
 //! `SwapBuffers`, see `monaka_hook::Hooks::import`). GL state the copy touches (framebuffer
 //! bindings, read buffer, scissor test, sRGB writes) is saved and put back.
@@ -13,8 +16,11 @@ use std::fmt;
 use windows::Win32::Graphics::Direct3D11::{D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM;
 use windows::Win32::Graphics::OpenGL::{
-    GL_BACK, GL_COLOR_BUFFER_BIT, GL_NEAREST, GL_SCISSOR_TEST, GL_TEXTURE_2D, glDeleteTextures, glDisable, glEnable, glGenTextures,
-    glGetIntegerv, glIsEnabled, glReadBuffer, wglGetCurrentContext, wglGetProcAddress,
+    GL_BACK, GL_COLOR_BUFFER_BIT, GL_COLOR_CLEAR_VALUE, GL_COLOR_WRITEMASK, GL_DEPTH_BUFFER_BIT, GL_DEPTH_CLEAR_VALUE, GL_DEPTH_WRITEMASK,
+    GL_NEAREST, GL_RGBA, GL_RGBA8, GL_SCISSOR_TEST, GL_STENCIL_BUFFER_BIT, GL_STENCIL_CLEAR_VALUE, GL_STENCIL_WRITEMASK, GL_TEXTURE_2D,
+    GL_TEXTURE_BINDING_2D, GL_UNSIGNED_BYTE, GL_VIEWPORT, glBindTexture, glClear, glClearColor, glClearDepth, glClearStencil,
+    glColorMask, glDeleteTextures, glDepthMask, glDisable, glEnable, glGenTextures, glGetBooleanv, glGetDoublev, glGetFloatv,
+    glGetIntegerv, glIsEnabled, glReadBuffer, glStencilMask, glTexImage2D, glViewport, wglGetCurrentContext, wglGetProcAddress,
 };
 use windows::core::{Interface, PCSTR};
 
@@ -27,6 +33,9 @@ const GL_COLOR_ATTACHMENT0: u32 = 0x8CE0;
 const GL_FRAMEBUFFER_COMPLETE: u32 = 0x8CD5;
 const GL_FRAMEBUFFER_SRGB: u32 = 0x8DB9;
 const WGL_ACCESS_WRITE_DISCARD_NV: u32 = 0x0002;
+const GL_RENDERBUFFER: u32 = 0x8D41;
+const GL_DEPTH24_STENCIL8: u32 = 0x88F0;
+const GL_DEPTH_STENCIL_ATTACHMENT: u32 = 0x821A;
 
 #[derive(Debug)]
 pub enum Error {
@@ -60,6 +69,11 @@ type BindFramebuffer = unsafe extern "system" fn(u32, u32);
 type FramebufferTexture2D = unsafe extern "system" fn(u32, u32, u32, u32, i32);
 type CheckFramebufferStatus = unsafe extern "system" fn(u32) -> u32;
 type BlitFramebuffer = unsafe extern "system" fn(i32, i32, i32, i32, i32, i32, i32, i32, u32, u32);
+type GenRenderbuffers = unsafe extern "system" fn(i32, *mut u32);
+type DeleteRenderbuffers = unsafe extern "system" fn(i32, *const u32);
+type BindRenderbuffer = unsafe extern "system" fn(u32, u32);
+type RenderbufferStorage = unsafe extern "system" fn(u32, u32, i32, i32);
+type FramebufferRenderbuffer = unsafe extern "system" fn(u32, u32, u32, u32);
 type DxOpenDevice = unsafe extern "system" fn(*mut c_void) -> *mut c_void;
 type DxCloseDevice = unsafe extern "system" fn(*mut c_void) -> i32;
 type DxRegisterObject = unsafe extern "system" fn(*mut c_void, *mut c_void, u32, u32, u32) -> *mut c_void;
@@ -75,6 +89,11 @@ pub struct Functions {
     framebuffer_texture_2d: FramebufferTexture2D,
     check_framebuffer_status: CheckFramebufferStatus,
     blit_framebuffer: BlitFramebuffer,
+    gen_renderbuffers: GenRenderbuffers,
+    delete_renderbuffers: DeleteRenderbuffers,
+    bind_renderbuffer: BindRenderbuffer,
+    renderbuffer_storage: RenderbufferStorage,
+    framebuffer_renderbuffer: FramebufferRenderbuffer,
     open_device: DxOpenDevice,
     close_device: DxCloseDevice,
     register_object: DxRegisterObject,
@@ -111,6 +130,11 @@ impl Functions {
             framebuffer_texture_2d: load("glFramebufferTexture2D")?,
             check_framebuffer_status: load("glCheckFramebufferStatus")?,
             blit_framebuffer: load("glBlitFramebuffer")?,
+            gen_renderbuffers: load("glGenRenderbuffers")?,
+            delete_renderbuffers: load("glDeleteRenderbuffers")?,
+            bind_renderbuffer: load("glBindRenderbuffer")?,
+            renderbuffer_storage: load("glRenderbufferStorage")?,
+            framebuffer_renderbuffer: load("glFramebufferRenderbuffer")?,
             open_device: load("wglDXOpenDeviceNV")?,
             close_device: load("wglDXCloseDeviceNV")?,
             register_object: load("wglDXRegisterObjectNV")?,
@@ -282,6 +306,152 @@ impl Bridge {
     }
 }
 
+/// A framebuffer of our own: a colour texture (RGBA8) with a depth-stencil buffer, so the game's
+/// own draws (masks included) can be run into it ([`Canvas::draw`]) and it can be captured like any
+/// framebuffer ([`Bridge::capture`] of [`Canvas::framebuffer`]).
+pub struct Canvas {
+    gl: Functions,
+    texture: u32,
+    depth_stencil: u32,
+    framebuffer: u32,
+    width: u32,
+    height: u32,
+}
+
+/// GL state a canvas changes around the game's draws, put back after.
+struct Bound {
+    draw: i32,
+    viewport: [i32; 4],
+    scissor: bool,
+}
+
+impl Canvas {
+    /// A canvas of `width` x `height`; a GL context must be current.
+    pub fn new(width: u32, height: u32) -> Result<Self> {
+        if !monaka_core::protocol::dimensions_ok(width, height) {
+            return Err(Error::Failed("canvas size"));
+        }
+        let gl = Functions::load()?;
+        // SAFETY: creates GL objects with the context current; the texture and draw framebuffer
+        // bindings are put back.
+        unsafe {
+            let mut previous = 0i32;
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &mut previous);
+            let mut texture = 0u32;
+            glGenTextures(1, &mut texture);
+            let mut bound_texture = 0i32;
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &mut bound_texture);
+            glBindTexture(GL_TEXTURE_2D, texture);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8 as i32, width as i32, height as i32, 0, GL_RGBA, GL_UNSIGNED_BYTE, std::ptr::null());
+            glBindTexture(GL_TEXTURE_2D, bound_texture as u32);
+            let mut depth_stencil = 0u32;
+            (gl.gen_renderbuffers)(1, &mut depth_stencil);
+            (gl.bind_renderbuffer)(GL_RENDERBUFFER, depth_stencil);
+            (gl.renderbuffer_storage)(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, width as i32, height as i32);
+            let mut framebuffer = 0u32;
+            (gl.gen_framebuffers)(1, &mut framebuffer);
+            (gl.bind_framebuffer)(GL_DRAW_FRAMEBUFFER, framebuffer);
+            (gl.framebuffer_texture_2d)(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+            (gl.framebuffer_renderbuffer)(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, depth_stencil);
+            let complete = (gl.check_framebuffer_status)(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+            (gl.bind_framebuffer)(GL_DRAW_FRAMEBUFFER, previous as u32);
+            let canvas = Self { gl, texture, depth_stencil, framebuffer, width, height };
+            if !complete {
+                canvas.release();
+                return Err(Error::Failed("the canvas framebuffer is incomplete"));
+            }
+            Ok(canvas)
+        }
+    }
+
+    pub fn framebuffer(&self) -> u32 {
+        self.framebuffer
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    fn bind(&self, viewport: [i32; 4]) -> Bound {
+        let mut bound = Bound { draw: 0, viewport: [0; 4], scissor: false };
+        // SAFETY: state queries into locals and a bind of our own framebuffer, context current.
+        unsafe {
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &mut bound.draw);
+            glGetIntegerv(GL_VIEWPORT, bound.viewport.as_mut_ptr());
+            bound.scissor = glIsEnabled(GL_SCISSOR_TEST) != 0;
+            (self.gl.bind_framebuffer)(GL_DRAW_FRAMEBUFFER, self.framebuffer);
+            glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+            glDisable(GL_SCISSOR_TEST);
+        }
+        bound
+    }
+
+    fn unbind(&self, bound: Bound) {
+        // SAFETY: puts back what `bind` read, context current.
+        unsafe {
+            (self.gl.bind_framebuffer)(GL_DRAW_FRAMEBUFFER, bound.draw as u32);
+            glViewport(bound.viewport[0], bound.viewport[1], bound.viewport[2], bound.viewport[3]);
+            if bound.scissor {
+                glEnable(GL_SCISSOR_TEST);
+            }
+        }
+    }
+
+    /// Clears the canvas to `rgba`, its depth to 1 and its stencil to 0, whatever write masks the
+    /// game has set; every state touched is put back.
+    pub fn clear(&self, rgba: [f32; 4]) {
+        let bound = self.bind([0, 0, self.width as i32, self.height as i32]);
+        // SAFETY: state queries into locals, a clear of our own framebuffer, the state put back.
+        unsafe {
+            let mut colour_mask = [0u8; 4];
+            let mut depth_mask = 0u8;
+            let mut stencil_mask = 0i32;
+            let mut colour = [0.0f32; 4];
+            let mut depth = 0.0f64;
+            let mut stencil = 0i32;
+            glGetBooleanv(GL_COLOR_WRITEMASK, colour_mask.as_mut_ptr());
+            glGetBooleanv(GL_DEPTH_WRITEMASK, &mut depth_mask);
+            glGetIntegerv(GL_STENCIL_WRITEMASK, &mut stencil_mask);
+            glGetFloatv(GL_COLOR_CLEAR_VALUE, colour.as_mut_ptr());
+            glGetDoublev(GL_DEPTH_CLEAR_VALUE, &mut depth);
+            glGetIntegerv(GL_STENCIL_CLEAR_VALUE, &mut stencil);
+            glColorMask(1, 1, 1, 1);
+            glDepthMask(1);
+            glStencilMask(u32::MAX);
+            glClearColor(rgba[0], rgba[1], rgba[2], rgba[3]);
+            glClearDepth(1.0);
+            glClearStencil(0);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+            glColorMask(colour_mask[0], colour_mask[1], colour_mask[2], colour_mask[3]);
+            glDepthMask(depth_mask);
+            glStencilMask(stencil_mask as u32);
+            glClearColor(colour[0], colour[1], colour[2], colour[3]);
+            glClearDepth(depth);
+            glClearStencil(stencil);
+        }
+        self.unbind(bound);
+    }
+
+    /// Runs `draw` (the game's own draw calls) into the canvas with `viewport` (x, y, width,
+    /// height, from the bottom; it may reach past the canvas, so a part of what the game draws
+    /// fills it) and no scissor; the game's framebuffer, viewport and scissor are put back after.
+    pub fn draw(&self, viewport: [i32; 4], draw: impl FnOnce()) {
+        let bound = self.bind(viewport);
+        draw();
+        self.unbind(bound);
+    }
+
+    /// Frees the GL objects; call with the GL context current.
+    pub fn release(self) {
+        // SAFETY: deletes the objects this canvas created, context current.
+        unsafe {
+            (self.gl.delete_framebuffers)(1, &self.framebuffer);
+            (self.gl.delete_renderbuffers)(1, &self.depth_stencil);
+            glDeleteTextures(1, &self.texture);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,5 +532,40 @@ mod tests {
             assert_ne!(glIsEnabled(GL_SCISSOR_TEST), 0);
         }
         bridge.release();
+    }
+
+    #[test]
+    fn a_canvas_takes_part_of_a_draw_and_puts_the_state_back() {
+        gl_context();
+        let (device, context, _) = create_device(None).unwrap();
+        let canvas = Canvas::new(32, 32).unwrap();
+        unsafe {
+            glViewport(1, 2, 3, 4);
+            glEnable(GL_SCISSOR_TEST);
+        }
+        canvas.clear([0.0, 0.0, 1.0, 1.0]);
+        // A full-viewport red triangle, the viewport twice the canvas and starting left of it:
+        // the canvas shows the viewport's middle, all red.
+        canvas.draw([-16, -16, 64, 64], || unsafe {
+            glBegin(GL_TRIANGLES);
+            glColor4f(1.0, 0.0, 0.0, 1.0);
+            glVertex2f(-1.0, -1.0);
+            glVertex2f(3.0, -1.0);
+            glVertex2f(-1.0, 3.0);
+            glEnd();
+        });
+        unsafe {
+            let mut viewport = [0i32; 4];
+            glGetIntegerv(GL_VIEWPORT, viewport.as_mut_ptr());
+            assert_eq!(viewport, [1, 2, 3, 4]);
+            assert_ne!(glIsEnabled(GL_SCISSOR_TEST), 0);
+            glDisable(GL_SCISSOR_TEST);
+        }
+        let mut bridge = Bridge::new(&device).unwrap();
+        let texture = bridge.capture(canvas.framebuffer(), 32, 32).unwrap().clone();
+        unsafe { glFinish() };
+        assert_eq!(read_pixel(&device, &context, &texture, 16, 16).unwrap(), [255, 0, 0, 255]);
+        bridge.release();
+        canvas.release();
     }
 }

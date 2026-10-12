@@ -1,4 +1,4 @@
-//! `monaka --screenshot FILE.bmp [--game ID] [--tab NAME] [--theme dark|light]`: draws the window off-screen without ever
+//! `monaka --screenshot FILE.bmp [--game ID] [--tab NAME] [--scroll PIXELS] [--theme dark|light]`: draws the window off-screen without ever
 //! activating it, saves it as a BMP and quits. For checking the layout (and README pictures)
 //! while a game runs: nothing takes the game's focus, so it doesn't pause.
 
@@ -16,8 +16,10 @@ use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
 pub struct Request {
     pub file: PathBuf,
     pub game: Option<String>,
-    /// The options tab to show (Main, HUD, Skeleton, Engine, Game, Monaka).
+    /// The options tab to show (Main, Controls, HUD, Skeleton, Rendering, Game, Monaka).
     pub tab: Option<String>,
+    /// `--scroll`: how far the options are scrolled, when they overflow.
+    pub scroll: i32,
     /// `--theme`: dark or light whatever Windows' app mode says.
     pub dark: Option<bool>,
 }
@@ -26,7 +28,8 @@ pub fn request() -> Option<Request> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
     let dark = after("--theme").map(|t| t.eq_ignore_ascii_case("dark"));
-    Some(Request { file: PathBuf::from(after("--screenshot")?), game: after("--game"), tab: after("--tab"), dark })
+    let scroll = after("--scroll").and_then(|s| s.parse().ok()).unwrap_or(0);
+    Some(Request { file: PathBuf::from(after("--screenshot")?), game: after("--game"), tab: after("--tab"), scroll, dark })
 }
 
 /// Saves the whole window (frame included) as a 32-bit BMP.

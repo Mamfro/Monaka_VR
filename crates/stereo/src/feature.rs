@@ -3,13 +3,13 @@
 //! over the channel), for any game drawing one eye per frame. A game lists
 //! `monaka_stereo::feature::present()` among its components and says, once, what its loop adds
 //! ([`Presents::LOOP`]: its D3D version, its eye-view counter, its own steps around each present);
-//! its eye cameras are a component of its own that `needs` this one and reads
+//! its eye site (`crate::eye_site::EyeSite`, installed with the loop: [`Loop::eye_site`]) reads
 //! [`Driver::pending`] for the eye and pose to draw. An engine with a present call of its own
 //! hooks that and calls [`Driver::around_present`] from it ([`Entry::Game`]).
 
 use crate::alternate::AlternatePublisher;
 use crate::alternate12::AlternatePublisher12;
-use crate::driver::{Driver, Install, Publisher};
+use crate::driver::{Driver, Flat, FlatPicture, Install, Publisher};
 use crate::present::PresentFn;
 use monaka_channel::pose::PoseChannel;
 use monaka_core::protocol::HeadPose;
@@ -59,10 +59,16 @@ pub struct Loop<G: Game> {
     pub before: Option<fn(&Driver, &IDXGISwapChain, u64) -> bool>,
     pub after: Option<fn(&Driver, u64, &HeadPose)>,
     pub adjust_pose: Option<fn(u64, &mut HeadPose)>,
-    pub menu: Option<fn() -> bool>,
+    /// Whether the frame about to present goes to the flat screen, and why ([`Driver::detect_flat`]):
+    /// the game's own detector, beside the run's situations.
+    pub flat: Option<fn() -> Option<Flat>>,
     pub in_turn: bool,
     pub pose_each_frame: Option<fn() -> bool>,
     pub finish: Option<fn(&Driver)>,
+    /// The game's eye site, installed with the loop (`crate::eye_site::EyeSite::install`).
+    pub eye_site: Option<crate::eye_site::InstallFn<G>>,
+    /// D3D11: a flat frame's own shape ([`crate::driver::Install::flat_picture`]).
+    pub flat_picture: Option<FlatPicture>,
 }
 
 impl<G: Game> Loop<G> {
@@ -79,10 +85,12 @@ impl<G: Game> Loop<G> {
             before: None,
             after: None,
             adjust_pose: None,
-            menu: None,
+            flat: None,
             in_turn: false,
             pose_each_frame: None,
             finish: None,
+            eye_site: None,
+            flat_picture: None,
         }
     }
 }
@@ -112,8 +120,11 @@ fn install<G: Presents>(start: &mut Start<'_, G>) -> Result<(), Lack> {
         Graphics::D3D11 => Publisher::D3D11(AlternatePublisher::new(channel.clone(), shared.schedule)),
         Graphics::D3D12 => Publisher::D3D12 { publisher: AlternatePublisher12::new(channel.clone(), shared.schedule), queue: G::LOOP.queue.unwrap_or(crate::queue12::game_queue) },
     };
-    let Loop { entry, work, frame_end, report, before, after, adjust_pose, menu, in_turn, pose_each_frame, finish, .. } = G::LOOP;
-    DRIVER.install(Install { shared, publisher, poses, frame_end, report, work, before, after, adjust_pose, menu, in_turn, pose_each_frame, finish });
+    let Loop { entry, work, frame_end, report, before, after, adjust_pose, flat, in_turn, pose_each_frame, finish, flat_picture, .. } = G::LOOP;
+    DRIVER.install(Install { shared, publisher, poses, frame_end, report, work, before, after, adjust_pose, menu: None, in_turn, pose_each_frame, finish, flat_picture });
+    if let Some(flat) = flat {
+        DRIVER.detect_flat(flat);
+    }
     // SAFETY: Present is DXGI's, found on a probe swapchain; ExecuteCommandLists is D3D12's, found
     // on a queue of our own; each detour has its target's signature.
     unsafe {
@@ -123,6 +134,9 @@ fn install<G: Presents>(start: &mut Start<'_, G>) -> Result<(), Lack> {
         if graphics == Graphics::D3D12 && G::LOOP.queue.is_none() {
             crate::queue12::hook(start.hooks)?;
         }
+    }
+    if let Some(eye_site) = G::LOOP.eye_site {
+        eye_site(start)?;
     }
     Ok(())
 }
