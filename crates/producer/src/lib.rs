@@ -19,8 +19,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
+use monaka_core::sync::Locked;
 
 pub mod game;
+pub mod research;
 pub mod ledger;
 pub mod situation;
 
@@ -91,7 +93,7 @@ pub fn enable_hooks(slot: &Mutex<Option<Hooks>>, mut hooks: Hooks) -> Result<(),
         let _ = hooks.disable();
         return Err(e.into());
     }
-    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(hooks);
+    *slot.locked() = Some(hooks);
     Ok(())
 }
 
@@ -99,7 +101,7 @@ pub fn enable_hooks(slot: &Mutex<Option<Hooks>>, mut hooks: Hooks) -> Result<(),
 /// someone else stacked on top of ours stays in their chain and only forwards from then on
 /// (logged, not a failure); anything else, or detours that keep running, fails the stop.
 pub fn remove_hooks(slot: &Mutex<Option<Hooks>>, idle_ms: u64) -> Result<(), Rejection> {
-    if let Some(mut hooks) = slot.lock().unwrap_or_else(|e| e.into_inner()).take()
+    if let Some(mut hooks) = slot.locked().take()
         && let Err(e) = hooks.disable()
     {
         match e {

@@ -15,6 +15,7 @@
 
 pub mod aim;
 pub mod controllers;
+pub mod feature;
 pub mod finger_rig;
 pub mod fingers;
 pub mod melee;
@@ -24,13 +25,14 @@ pub mod roomscale;
 pub mod skeleton;
 pub mod traverse;
 
-use monaka_core::camera::{self as cam, Mat34, apply_head, compose, rigid_inverse, translation};
-use monaka_core::math::{Vec3, yaw, yaw_rotation};
+use monaka_core::camera::{self as cam, Mat34, apply_head, compose, position, rigid_inverse, translation};
+use monaka_core::math::{Vec3, unit, yaw, yaw_rotation};
 use monaka_core::protocol::{HandPose, HeadPose, LEFT_HAND, RIGHT_HAND};
 use monaka_core::reach::{apply, arm_moves, spin_about, twist_between};
 use monaka_producer::log;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::*};
+use monaka_core::sync::Locked;
 
 /// A game's skeleton: its elements (bones, helpers and, in some games, mesh parts) by index, each
 /// with a world matrix (row-major 3x4, camera-to-world convention: columns right, up, back,
@@ -135,7 +137,7 @@ static FLIP: Mutex<Option<[f32; 9]>> = Mutex::new(None);
 /// pose without left and right alike (Dishonored 2 with the pistol drawn) never measures it, and
 /// its off hand stays where the game animates it.
 pub fn declare_mirror(flip: [f32; 9]) {
-    *FLIP.lock().unwrap_or_else(|e| e.into_inner()) = Some(flip);
+    *FLIP.locked() = Some(flip);
 }
 /// A measurement of [`FLIP`] and how many updates in a row gave it: it is kept after [`FLIP_AGREEING`].
 static FLIP_VOTE: Mutex<([f32; 9], u32)> = Mutex::new(([0.0; 9], 0));
@@ -396,15 +398,6 @@ fn note_two_handed(both: bool, distance: f32) {
 /// How much of the elbow's bend direction comes from the hand's pose ([`monaka_core::reach::hand_pole`]);
 /// the rest is the default, down and out.
 const ELBOW_FROM_HAND: f32 = 0.75;
-
-fn unit(v: Vec3) -> Option<Vec3> {
-    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    (length.is_finite() && length > 1e-6).then(|| v.map(|x| x / length))
-}
-
-fn position(m: &Mat34) -> [f32; 3] {
-    [m[3], m[7], m[11]]
-}
 
 /// What one update puts the arms on.
 pub struct Pose {

@@ -11,6 +11,7 @@ use monaka_producer::log;
 use monaka_producer::situation::{self, Situation};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering::*};
+use monaka_core::sync::Locked;
 
 /// Both animated wrists above this (metres, camera space, y up), or one above [`ENTER_ONE_Y`],
 /// hand the arms to the game...
@@ -144,7 +145,7 @@ pub fn update(wrists: [[f32; 3]; 2], game: &Mat34) -> f32 {
     let (weight, switched) = state.step(now, wrists, fighting, reported);
     CLIMB_SHARE.store((1.0 - weight).to_bits(), Relaxed);
     if switched && state.game {
-        *WALL.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *WALL.locked() = None;
     }
     if state.game && wrists.iter().all(|w| w[1] > ENTER_Y) {
         note_wall(wrists, game);

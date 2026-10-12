@@ -6,6 +6,7 @@ pub use monaka_core::situation::{Situation, Situations};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
+use monaka_core::sync::Locked;
 
 static SITUATIONS: Mutex<Situations> = Mutex::new(Situations::new());
 static CLOCK: OnceLock<Instant> = OnceLock::new();
@@ -19,7 +20,7 @@ pub fn now() -> u64 {
 }
 
 fn with<R>(f: impl FnOnce(&mut Situations) -> R) -> R {
-    f(&mut SITUATIONS.lock().unwrap_or_else(|e| e.into_inner()))
+    f(&mut SITUATIONS.locked())
 }
 
 /// The situations the running game's components report; `None` before a run.
@@ -29,13 +30,13 @@ static REFUSED: [AtomicU32; Situation::ALL.len()] = [const { AtomicU32::new(0) }
 /// The run's game reports these and no others (`game::start`, from its components' `reports`):
 /// what a component says it reports is what its code reports, or the log shows the difference.
 pub fn accept(reports: Vec<Situation>) {
-    *ACCEPTED.lock().unwrap_or_else(|e| e.into_inner()) = Some(reports);
+    *ACCEPTED.locked() = Some(reports);
 }
 
 /// The game says whether `situation` holds now, good for `fresh_ms` ([`Situations::report`]). A
 /// situation the game does not list among its reports is refused (logged once).
 pub fn report(situation: Situation, active: bool, fresh_ms: u64) {
-    let accepted = ACCEPTED.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_none_or(|reports| reports.contains(&situation));
+    let accepted = ACCEPTED.locked().as_ref().is_none_or(|reports| reports.contains(&situation));
     if !accepted {
         if REFUSED[situation.index()].fetch_add(1, Relaxed) == 0 {
             crate::log!("situation: {} reported, but no component of the game lists it among its reports; refused", situation.label());

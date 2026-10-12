@@ -31,6 +31,7 @@ use monaka_producer::log;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering::*};
 use std::time::Instant;
+use monaka_core::sync::Locked;
 
 /// Set while the head aims; cleared at stop, after which [`release`] gives the game back its own
 /// view.
@@ -227,7 +228,7 @@ fn give_stick() {
 /// Starts steering the game's aim (see [`MouseAim`]).
 pub fn start(aim: MouseAim) {
     let MouseAim { scale, usual_scale, stick_speed, native_stick, power_aim, rig, pointer, left_weapon } = aim;
-    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = STATE.locked();
     state.usual = usual_scale;
     state.pointer = pointer;
     state.left_weapon = left_weapon;
@@ -278,7 +279,7 @@ pub fn start(aim: MouseAim) {
 }
 
 pub fn summary() -> String {
-    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let state = STATE.locked();
     format!(
         "head aim: {:?}, scale {:?} degrees per count, {} builds aimed by the left hand, {}",
         state.calibration,
@@ -303,7 +304,7 @@ pub fn on_build(camera: [f32; 2], pose: &HeadPose) -> Option<[f32; 2]> {
     if !AIMING.load(Acquire) {
         return None;
     }
-    let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = STATE.locked();
     // A release that came in since the check above has taken the share back: queue nothing more.
     if !AIMING.load(Acquire) {
         return None;
@@ -565,7 +566,7 @@ fn fail(why: &str) -> Calibration {
 pub fn release(ms: u64) -> bool {
     let back = {
         // Under the lock, so no build is between its check and its queueing.
-        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = STATE.locked();
         AIMING.store(false, Release);
         give_stick();
         monaka_pad::gate_left_trigger(false);

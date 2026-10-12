@@ -31,6 +31,7 @@ pub mod scan;
 pub mod sha256;
 pub mod situation;
 pub mod swing;
+pub mod sync;
 pub mod ticket;
 pub mod trail;
 pub mod x64;

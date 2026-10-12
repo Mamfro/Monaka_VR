@@ -7,6 +7,7 @@ use crate::pe::{Error, Result};
 use crate::x64::{self, Instruction};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use crate::sync::Locked;
 
 /// One section of the image, with its bytes as they are laid out from its RVA.
 pub struct Section<'a> {
@@ -380,11 +381,11 @@ impl<'a> Code<'a> {
     /// The functions that refer to the UTF-16 string `text`, each once, in address order, with
     /// one reference site each.
     pub fn functions_referring_to_wide(&self, text: &str) -> Vec<(u32, u32)> {
-        if let Some(known) = self.wide.lock().unwrap_or_else(|e| e.into_inner()).get(text) {
+        if let Some(known) = self.wide.locked().get(text) {
             return known.clone();
         }
         self.prefetch_wide(&[text]);
-        self.wide.lock().unwrap_or_else(|e| e.into_inner()).get(text).cloned().unwrap_or_default()
+        self.wide.locked().get(text).cloned().unwrap_or_default()
     }
 
     /// Where `strings` are referred to from data: an 8-aligned pointer to one of them, as
@@ -417,7 +418,7 @@ impl<'a> Code<'a> {
         }
         let all: Vec<u32> = strings.iter().flat_map(|(_, at)| at.iter().copied()).collect();
         let references = self.references(&all);
-        let mut cache = self.wide.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = self.wide.locked();
         for (text, at) in strings {
             let sites: Vec<(u32, u32)> = references.iter().filter(|(target, _)| at.contains(target)).copied().collect();
             let mut functions: Vec<(u32, u32)> = sites.into_iter().filter_map(|(_, site)| Some((self.function(site)?, site))).collect();

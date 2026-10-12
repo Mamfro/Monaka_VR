@@ -85,6 +85,47 @@ pub fn distance(a: Vec3, b: Vec3) -> f32 {
     ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2) + (b[2] - a[2]).powi(2)).sqrt()
 }
 
+pub fn add(a: Vec3, b: Vec3) -> Vec3 {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+pub fn sub(a: Vec3, b: Vec3) -> Vec3 {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+pub fn scale(a: Vec3, s: f32) -> Vec3 {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+
+pub fn dot(a: Vec3, b: Vec3) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+pub fn cross(a: Vec3, b: Vec3) -> Vec3 {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+pub fn length(a: Vec3) -> f32 {
+    dot(a, a).sqrt()
+}
+
+/// `a` made one long; none when it is too short to have a direction (1e-6) or not finite.
+pub fn unit(a: Vec3) -> Option<Vec3> {
+    let l = length(a);
+    (l.is_finite() && l > 1e-6).then(|| scale(a, 1.0 / l))
+}
+
+/// The inverse turn of a unit quaternion.
+pub fn conjugate(q: Quat) -> Quat {
+    [-q[0], -q[1], -q[2], q[3]]
+}
+
+/// `a` then `b` in the frame `a` gives (Hamilton product `a * b`).
+pub fn multiply(a: Quat, b: Quat) -> Quat {
+    let ([ax, ay, az, aw], [bx, by, bz, bw]) = (a, b);
+    [aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx, aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz]
+}
+
 /// A head pose from the two located eye views: orientation from the left view, position halfway
 /// between the eyes, IPD as the distance between them.
 pub fn head_from_views(orientation: Quat, eye_positions: [Vec3; 2], fov: [[f32; 4]; 2]) -> HeadPose {

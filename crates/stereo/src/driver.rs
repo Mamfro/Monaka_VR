@@ -34,6 +34,7 @@ use std::sync::Mutex;
 use windows::Win32::Graphics::Direct3D12::ID3D12CommandQueue;
 use windows::Win32::Graphics::Dxgi::{IDXGISwapChain, IDXGISwapChain3};
 use windows::core::{HRESULT, Interface};
+use monaka_core::sync::Locked;
 
 /// A swapchain narrower than this is not the game's (a probe, an overlay).
 const MIN_GAME_WIDTH: u32 = 640;
@@ -150,8 +151,8 @@ impl Driver {
     pub fn install(&self, install: Install) {
         let synthetic: Option<Synthetic> = install.shared.synthetic_head().map(|pose| Box::new(move || pose) as Synthetic);
         self.head.open(install.poses, synthetic);
-        *self.settings.lock().unwrap_or_else(|e| e.into_inner()) = Some(install.shared);
-        let mut cell = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        *self.settings.locked() = Some(install.shared);
+        let mut cell = self.state.locked();
         cell.0 = Some(State {
             shared: install.shared,
             publisher: install.publisher,
@@ -179,7 +180,7 @@ impl Driver {
 
     /// The D3D11 publisher, for a game's own publishing path (none on D3D12 or before install).
     pub fn with_publisher11<R>(&self, f: impl FnOnce(&mut AlternatePublisher) -> R) -> Option<R> {
-        let mut cell = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cell = self.state.locked();
         match cell.0.as_mut().map(|s| &mut s.publisher) {
             Some(Publisher::D3D11(publisher)) => Some(f(publisher)),
             _ => None,
@@ -212,7 +213,7 @@ impl Driver {
         if !self.capture.load(Acquire) || self.eye.load(Acquire) < 0 {
             return None;
         }
-        *self.pending.lock().unwrap_or_else(|e| e.into_inner())
+        *self.pending.locked()
     }
 
     /// Whether eye cameras are being written.
@@ -260,7 +261,7 @@ impl Driver {
     /// The settings the driver was installed with (safe to ask from a report or any hook: it
     /// never waits on the publisher's state).
     pub fn shared(&self) -> Option<Shared> {
-        *self.settings.lock().unwrap_or_else(|e| e.into_inner())
+        *self.settings.locked()
     }
 
     /// The default pose report: the eye distance used, and each eye's field of view as rendered,
@@ -278,7 +279,7 @@ impl Driver {
 
     /// Pairs published, failures, presents, unpaired right eyes: the tail of a run's summary.
     pub fn summary(&self) -> String {
-        let cell = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let cell = self.state.locked();
         let (pairs, failures) = match cell.0.as_ref().map(|s| &s.publisher) {
             Some(Publisher::D3D11(p)) => (p.pairs(), p.failures()),
             Some(Publisher::D3D12 { publisher, .. }) => (publisher.pairs(), publisher.failures()),
@@ -350,7 +351,7 @@ impl Driver {
         {
             return;
         }
-        let mut cell = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cell = self.state.locked();
         let Some(state) = cell.0.as_mut() else { return };
         let report_fn = state.report;
         let report = |pose: &mut HeadPose| match report_fn {
@@ -385,7 +386,7 @@ impl Driver {
         if n.is_multiple_of(600) {
             let (name, counter) = state.work;
             let work = counter.load(Relaxed);
-            let mut mark = self.rate_mark.lock().unwrap_or_else(|e| e.into_inner());
+            let mut mark = self.rate_mark.locked();
             log!("present {n}: {} {name} over the last {} presents (1 per present keeps the eyes in step)", work - mark.0, n - mark.1);
             *mark = (work, n);
         }
@@ -396,7 +397,7 @@ impl Driver {
             // The stop gave everything back while this present was in the game's own call.
             return;
         }
-        let mut cell = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cell = self.state.locked();
         let Some(state) = cell.0.as_mut() else { return };
         // Both eyes of a pair are drawn from one head pose, sampled for its left-eye frame.
         if Schedule::starts_pair(n) {
@@ -418,7 +419,7 @@ impl Driver {
             after(self, n, &pose);
         }
         let eye = Schedule::camera_eye(n);
-        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(Pending { eye, pose });
+        *self.pending.locked() = Some(Pending { eye, pose });
         self.eye.store(eye as i32, Release);
     }
 
@@ -427,12 +428,12 @@ impl Driver {
     /// hold the game's present thread; [`Driver::release`] closes it once the hooks are off.
     pub fn finish(&self) {
         self.finished.store(true, Release);
-        self.pending.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.pending.locked().take();
         let finish = self.state.lock().ok().and_then(|cell| cell.0.as_ref().and_then(|s| s.finish));
         if let Some(finish) = finish {
             finish(self);
         }
-        let mut cell = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cell = self.state.locked();
         if let Some(Publisher::D3D11(publisher)) = cell.0.as_mut().map(|s| &mut s.publisher) {
             publisher.drop_eyes();
         }
@@ -440,7 +441,7 @@ impl Driver {
 
     /// Lets go of the channels (after the hooks are off, on the loader thread).
     pub fn release(&self) {
-        let mut cell = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cell = self.state.locked();
         if let Some(mut state) = cell.0.take()
             && let Publisher::D3D12 { publisher, .. } = &mut state.publisher
         {

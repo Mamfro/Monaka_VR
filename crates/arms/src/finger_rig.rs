@@ -10,8 +10,8 @@
 
 use crate::fingers::{self, Finger, FingerJoints, Hand};
 use crate::skeleton::finger_chains;
-use monaka_core::camera::{self, Mat34};
-use monaka_core::math::Vec3;
+use monaka_core::camera::{self, Mat34, position};
+use monaka_core::math::{Vec3, cross, distance, dot, sub, unit};
 use monaka_core::protocol::FingerPose;
 
 /// Which bones are a skeleton's hands and fingers, by index.
@@ -119,37 +119,14 @@ pub struct Rig {
     used: [Vec<usize>; 2],
 }
 
-fn unit(v: Vec3) -> Option<Vec3> {
-    let n = v.iter().map(|v| v * v).sum::<f32>().sqrt();
-    (n.is_finite() && n > 1e-5).then(|| v.map(|v| v / n))
-}
-
-fn cross(a: Vec3, b: Vec3) -> Vec3 {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
-}
-
-fn dot(a: Vec3, b: Vec3) -> f32 {
-    (0..3).map(|i| a[i] * b[i]).sum()
-}
-
-fn distance(a: Vec3, b: Vec3) -> f32 {
-    (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f32>().sqrt()
-}
-
 fn direction(m: &Mat34, v: Vec3) -> Vec3 {
     std::array::from_fn(|r| (0..3).map(|c| m[r * 4 + c] * v[c]).sum())
-}
-
-/// A frame's position.
-pub fn position(m: &Mat34) -> Vec3 {
-    [m[3], m[7], m[11]]
 }
 
 /// Anatomical palm axes: back from the middle knuckle toward the wrist, up toward the index (thumb)
 /// side of the knuckles, right their cross product; at the wrist. Finger flexion does not set
 /// these axes.
 pub fn palm_frame(wrist: Mat34, middle: Mat34, index: Mat34, pinky: Mat34) -> Option<Mat34> {
-    let sub = |a: Vec3, b: Vec3| std::array::from_fn(|i| a[i] - b[i]);
     let normalize = |v: Vec3| {
         let n = dot(v, v).sqrt();
         (n.is_finite() && n > 0.001).then(|| v.map(|x| x / n))

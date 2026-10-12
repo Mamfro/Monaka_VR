@@ -8,6 +8,7 @@
 use std::fmt::Debug;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU8, Ordering::*};
+use monaka_core::sync::Locked;
 
 /// Something in the game a run can change and give back: a console variable, a field in memory,
 /// a value an engine call sets.
@@ -161,7 +162,7 @@ impl GameThreadLedger {
         if stage != ASKED && stage != RESTORE {
             return None;
         }
-        let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ledger = self.ledger.locked();
         if stage == ASKED {
             apply(&mut ledger);
             self.stage.store(APPLIED, Release);

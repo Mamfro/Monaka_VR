@@ -6,6 +6,7 @@ use crate::shared::{Create, SharedBlock};
 use crate::{ChannelName, Error, Result};
 use monaka_core::protocol::{HeadPose, PoseBlock, RenderedPair};
 use std::sync::Mutex;
+use monaka_core::sync::Locked;
 
 const WAIT_MS: u32 = 2;
 
@@ -68,31 +69,31 @@ impl HeadSource {
     }
 
     pub fn open(&self, channel: Option<PoseChannel>, synthetic: Option<Synthetic>) {
-        *self.channel.lock().unwrap_or_else(|e| e.into_inner()) = channel;
-        *self.synthetic.lock().unwrap_or_else(|e| e.into_inner()) = synthetic;
+        *self.channel.locked() = channel;
+        *self.synthetic.locked() = synthetic;
     }
 
     pub fn close(&self) {
-        self.channel.lock().unwrap_or_else(|e| e.into_inner()).take();
-        self.synthetic.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.channel.locked().take();
+        self.synthetic.locked().take();
     }
 
     /// Whether the viewer's pose channel is open.
     pub fn connected(&self) -> bool {
-        self.channel.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+        self.channel.locked().is_some()
     }
 
     /// The current head pose: the synthetic one when set, else the viewer's latest valid one.
     pub fn current(&self) -> Option<HeadPose> {
-        if let Some(synthetic) = self.synthetic.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if let Some(synthetic) = self.synthetic.locked().as_ref() {
             return Some(synthetic());
         }
-        self.channel.lock().unwrap_or_else(|e| e.into_inner()).as_mut()?.read_head()
+        self.channel.locked().as_mut()?.read_head()
     }
 
     /// The poses a published pair was rendered with; write it before publishing the images.
     pub fn write_pair(&self, sequence: u64, eyes: [HeadPose; 2]) -> bool {
-        self.channel.lock().unwrap_or_else(|e| e.into_inner()).as_mut().is_some_and(|c| c.write_pair(&RenderedPair { sequence, eyes }))
+        self.channel.locked().as_mut().is_some_and(|c| c.write_pair(&RenderedPair { sequence, eyes }))
     }
 }
 

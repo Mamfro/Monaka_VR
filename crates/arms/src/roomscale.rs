@@ -19,6 +19,7 @@
 
 use crate::traverse;
 use monaka_core::camera::Mat34;
+use monaka_core::math::dot;
 use monaka_core::options::{Options, Shared};
 use monaka_producer::log;
 use std::sync::Mutex;
@@ -169,10 +170,6 @@ fn turned_anchor(anchor: [f32; 2], head: [f32; 3], old: ([f32; 3], [f32; 3]), ne
     };
     let turned = [along(new.0), along(new.1)];
     if turned.iter().all(|c| c.is_finite()) { [head[0] - turned[0], head[2] - turned[1]] } else { anchor }
-}
-
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 /// The velocity to follow with this step of the player's character (world x and z, m/s): zero

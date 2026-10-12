@@ -5,8 +5,8 @@
 //! knuckle's curl axis swapped for the tracked bend. Whatever the game animated (a grip, a fist)
 //! goes; the hand itself stays where the rig put it.
 
-use monaka_core::camera::{Mat34, compose};
-use monaka_core::math::Vec3;
+use monaka_core::camera::{Mat34, compose, position};
+use monaka_core::math::{Vec3, cross, dot, unit};
 use monaka_core::protocol::{FingerPose, LEFT_HAND, RIGHT_HAND};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -119,19 +119,6 @@ fn apply_rotation(m: &Mat34, v: Vec3) -> Vec3 {
     [0, 1, 2].map(|r| m[4 * r] * v[0] + m[4 * r + 1] * v[1] + m[4 * r + 2] * v[2])
 }
 
-fn cross(a: Vec3, b: Vec3) -> Vec3 {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
-}
-
-fn dot(a: Vec3, b: Vec3) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn unit(v: Vec3) -> Option<Vec3> {
-    let l = dot(v, v).sqrt();
-    (l > 1e-4 && l.is_finite()).then(|| v.map(|c| c / l))
-}
-
 /// How far `rest` (a bone's rest pose against the bone before it) curls the bone about `curl`:
 /// the angle its `along` axis is turned through about `curl`.
 fn rest_curl(rest: &Mat34, along: Vec3, curl: Vec3) -> f32 {
@@ -151,7 +138,7 @@ pub fn apply(joints: &mut dyn FingerJoints, hand: &Hand, tracked: &FingerPose) {
             let bend = bends.get(k).copied().filter(|b| b.is_finite()).unwrap_or(0.0).clamp(BACK, IN);
             // Down the bone: toward the next knuckle, or the end joint riding this one.
             let next = finger.knuckles.get(k + 1).copied().or_else(|| finger.followers.iter().find(|f| f.1 == bone).map(|f| f.0));
-            let along = next.and_then(|n| joints.rest_between(bone, n)).and_then(|r| unit([r[3], r[7], r[11]])).unwrap_or(hand.along);
+            let along = next.and_then(|n| joints.rest_between(bone, n)).and_then(|r| unit(position(&r))).unwrap_or(hand.along);
             let local = compose(&rest, &turn(hand.curl, bend - rest_curl(&rest, along, hand.curl)));
             previous = compose(&previous, &local);
             if !previous.iter().all(|v| v.is_finite()) {

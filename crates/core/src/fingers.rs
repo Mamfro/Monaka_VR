@@ -2,7 +2,7 @@
 //! for a producer's hand skeleton. Per finger: how far each of its three knuckles bends toward
 //! the palm, from the hand out, and how far the first one spreads it toward the thumb.
 
-use crate::math::{Quat, Vec3, rotate};
+use crate::math::{Quat, Vec3, conjugate, multiply, rotate};
 
 /// OpenXR's hand joints (`XrHandJointEXT`): palm, wrist, then each finger from its base.
 pub const JOINT_COUNT: usize = 26;
@@ -13,16 +13,6 @@ const FINGERS: [[usize; 5]; 4] = [[6, 7, 8, 9, 10], [11, 12, 13, 14, 15], [16, 1
 pub const THUMB_FINGER: usize = 0;
 /// Fingers in [`crate::protocol::FingerPose::fingers`]: thumb, index, middle, ring, little.
 pub const FINGER_COUNT: usize = 5;
-
-fn conjugate(q: Quat) -> Quat {
-    [-q[0], -q[1], -q[2], q[3]]
-}
-
-/// `a` then `b` in the frame `a` gives (Hamilton product `a * b`).
-fn multiply(a: Quat, b: Quat) -> Quat {
-    let ([ax, ay, az, aw], [bx, by, bz, bw]) = (a, b);
-    [aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx, aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz]
-}
 
 /// How the bone after a joint turns from the bone before it, in the earlier bone's frame
 /// (OpenXR joint axes: -Z along the bone toward the tip, +Y out of the back of the hand): its bend

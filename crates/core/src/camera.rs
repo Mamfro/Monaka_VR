@@ -5,7 +5,7 @@
 //! +Y up, looking down -Z), so a head pose composes directly onto it; the view matrix is the
 //! rigid inverse. Both Dying Light engines store cameras this way; other engines convert first.
 
-use crate::math::{Quat, Vec3};
+use crate::math::{Quat, Vec3, cross, unit};
 use crate::protocol::HeadPose;
 
 /// How the head's position moves the view (the `head_position` option).
@@ -69,6 +69,33 @@ pub fn apply_head(camera: &Mat34, orientation: Quat, position: Vec3) -> Mat34 {
         out[row * 4 + 3] = camera[row * 4 + 3] + axes[0] * position[0] + axes[1] * position[1] + axes[2] * position[2];
     }
     out
+}
+
+/// A frame's position.
+pub fn position(m: &Mat34) -> Vec3 {
+    [m[3], m[7], m[11]]
+}
+
+/// The unit quaternion (xyzw) of a frame's rotation: [`rotation`]'s inverse (Shepperd's method,
+/// from the largest diagonal term, stable at any angle).
+pub fn quaternion(m: &Mat34) -> Quat {
+    let at = |i: usize, j: usize| m[i * 4 + j];
+    let trace = at(0, 0) + at(1, 1) + at(2, 2);
+    let q = if trace > 0.0 {
+        let s = (trace + 1.0).sqrt() * 2.0;
+        [(at(2, 1) - at(1, 2)) / s, (at(0, 2) - at(2, 0)) / s, (at(1, 0) - at(0, 1)) / s, s / 4.0]
+    } else if at(0, 0) > at(1, 1) && at(0, 0) > at(2, 2) {
+        let s = (1.0 + at(0, 0) - at(1, 1) - at(2, 2)).sqrt() * 2.0;
+        [s / 4.0, (at(0, 1) + at(1, 0)) / s, (at(0, 2) + at(2, 0)) / s, (at(2, 1) - at(1, 2)) / s]
+    } else if at(1, 1) > at(2, 2) {
+        let s = (1.0 + at(1, 1) - at(0, 0) - at(2, 2)).sqrt() * 2.0;
+        [(at(0, 1) + at(1, 0)) / s, s / 4.0, (at(1, 2) + at(2, 1)) / s, (at(0, 2) - at(2, 0)) / s]
+    } else {
+        let s = (1.0 + at(2, 2) - at(0, 0) - at(1, 1)).sqrt() * 2.0;
+        [(at(0, 2) + at(2, 0)) / s, (at(1, 2) + at(2, 1)) / s, s / 4.0, (at(1, 0) - at(0, 1)) / s]
+    };
+    // One of the two signs: w not negative.
+    if q[3] < 0.0 { q.map(|v| -v) } else { q }
 }
 
 /// World-to-camera matrix of a rigid camera-to-world matrix.
@@ -192,11 +219,6 @@ pub fn tracking_origin(camera: &Mat34, baked_yaw: f32) -> Option<Mat34> {
 /// made orthonormal: what `FromForwardUpPos`-style setters are given (their "forward" is the back
 /// axis). `None` for degenerate axes.
 pub fn from_back_up(back: Vec3, up: Vec3, position: Vec3) -> Option<Mat34> {
-    let unit = |v: Vec3| {
-        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-        (l > 1e-6 && l.is_finite()).then(|| v.map(|c| c / l))
-    };
-    let cross = |a: Vec3, b: Vec3| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
     let z = unit(back)?;
     let x = unit(cross(up, z))?;
     let y = cross(z, x);
@@ -218,8 +240,9 @@ pub fn swap_head_aim(camera: &Mat34, baked_yaw: f32, baked_pitch: f32, orientati
     swap_head(camera, baked_yaw, baked_pitch, orientation, [0.0; 3])
 }
 
-/// [`swap_head_aim`] with the head's position as well: `position` (metres) taken in the frame
-/// turned by the yaw only, as [`apply_head`] takes a head's position in the frame it turns.
+/// [`swap_head_aim`] with the head's position as well: `position` (metres, in the headset's
+/// tracking space) taken in the body's frame ([`tracking_origin`]), not turned by the head: a lean
+/// to the right goes to the body's right whichever way the head looks.
 pub fn swap_head(camera: &Mat34, baked_yaw: f32, baked_pitch: f32, orientation: Quat, position: Vec3) -> Option<Mat34> {
     let pitch = (-camera[6]).clamp(-1.0, 1.0).asin() - baked_pitch;
     let (head_yaw, head_pitch) = pointing_yaw_pitch(orientation);
@@ -230,7 +253,12 @@ pub fn swap_head(camera: &Mat34, baked_yaw: f32, baked_pitch: f32, orientation: 
     let (b, c2) = (roll * 0.5).sin_cos();
     // Pitch about the yawed +X, then roll about the pitched -Z axis.
     let q = [c2 * a, -a * b, c1 * b, c1 * c2];
-    Some(apply_head(&yawed, q, position))
+    let mut centre = apply_head(&yawed, q, [0.0; 3]);
+    let moved = apply_head(&tracking_origin(camera, baked_yaw)?, crate::math::IDENTITY, position);
+    for row in 0..3 {
+        centre[row * 4 + 3] = moved[row * 4 + 3];
+    }
+    Some(centre)
 }
 
 /// How a game camera is taken before the head pose goes on it, for [`view_centre`].
@@ -617,6 +645,18 @@ mod tests {
     }
 
     #[test]
+    fn a_frames_quaternion_gives_its_rotation_back() {
+        for q in [[0.0, 0.0, 0.0, 1.0], half_turn(0.7, -0.3), half_turn(3.0, 1.2), [1.0, 0.0, 0.0, 0.0], [0.0, 0.70710677, 0.0, -0.70710677]] {
+            let r = rotation(q);
+            let m = [r[0], r[1], r[2], 1.0, r[3], r[4], r[5], 2.0, r[6], r[7], r[8], 3.0];
+            let back = rotation(quaternion(&m));
+            assert!(r.iter().zip(back).all(|(a, b)| (a - b).abs() < 1e-5), "{q:?}");
+            assert!(quaternion(&m)[3] >= 0.0);
+        }
+        assert_eq!(position(&translation([1.0, 2.0, 3.0])), [1.0, 2.0, 3.0]);
+    }
+
+    #[test]
     fn view_centres_take_the_game_camera_three_ways() {
         let yaw = 30f32.to_radians();
         let game = from_back_up([yaw.sin() * 0.9, 0.43, yaw.cos() * 0.9], [0.0, 1.0, 0.0], [5.0, 1.0, 2.0]).unwrap();
@@ -627,13 +667,21 @@ mod tests {
         assert_eq!(levelled, apply_head(&tracking_origin(&game, 0.1).unwrap(), head, position));
         let swapped = view_centre(&game, Base::Swap { baked_yaw: 0.1, baked_pitch: 0.05 }, head, position).unwrap();
         let unmoved = swap_head_aim(&game, 0.1, 0.05, head).unwrap();
-        // Turned as without a position, moved by it in the yawed (level) frame.
-        let yawed = turn(&level(&game).unwrap(), pointing_yaw_pitch(head).0 - 0.1);
-        let moved = apply_head(&yawed, IDENTITY, position);
+        // Turned as without a position, moved by it in the body's frame (the head's turn left out).
+        let body = tracking_origin(&game, 0.1).unwrap();
+        let moved = apply_head(&body, IDENTITY, position);
         for row in 0..3 {
             assert_eq!(swapped[row * 4..row * 4 + 3], unmoved[row * 4..row * 4 + 3]);
-            assert!(close(swapped[row * 4 + 3] - unmoved[row * 4 + 3], moved[row * 4 + 3] - yawed[row * 4 + 3]));
+            assert!(close(swapped[row * 4 + 3] - unmoved[row * 4 + 3], moved[row * 4 + 3] - body[row * 4 + 3]));
         }
+        // A lean to the right with the head turned a quarter left still goes to the body's right.
+        let level_game = level(&game).unwrap();
+        let quarter_left = [0.0, std::f32::consts::FRAC_PI_4.sin(), 0.0, std::f32::consts::FRAC_PI_4.cos()];
+        let leaned = swap_head(&level_game, 0.0, 0.0, quarter_left, [0.1, 0.0, 0.0]).unwrap();
+        let still = swap_head(&level_game, 0.0, 0.0, quarter_left, [0.0; 3]).unwrap();
+        let shift = [0, 1, 2].map(|k| leaned[k * 4 + 3] - still[k * 4 + 3]);
+        let body_right = [level_game[0], level_game[4], level_game[8]];
+        assert!((0..3).all(|k| close(shift[k], 0.1 * body_right[k])), "{shift:?} against {body_right:?}");
         // The eyes straddle the centre along its right axis.
         let [left, right] = [0, 1].map(|eye| eye_camera(&levelled, eye, 0.064));
         let apart = [right[3] - left[3], right[7] - left[7], right[11] - left[11]];

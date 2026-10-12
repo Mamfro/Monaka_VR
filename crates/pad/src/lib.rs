@@ -26,6 +26,7 @@ use monaka_hook::{Hooks, InFlight, Original};
 use monaka_producer::{Rejection, log};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::*};
+use monaka_core::sync::Locked;
 
 /// XInput's `XINPUT_STATE`.
 #[repr(C)]
@@ -258,11 +259,11 @@ static REWRITE: Mutex<Option<fn(&mut Gamepad)>> = Mutex::new(None);
 /// a producer that turns the sticks from the game camera's heading into the player's. `None`
 /// stops it.
 pub fn rewrite(rewrite: Option<fn(&mut Gamepad)>) {
-    *REWRITE.lock().unwrap_or_else(|e| e.into_inner()) = rewrite;
+    *REWRITE.locked() = rewrite;
 }
 
 fn rewritten(pad: &mut Gamepad) {
-    if let Some(rewrite) = *REWRITE.lock().unwrap_or_else(|e| e.into_inner()) {
+    if let Some(rewrite) = *REWRITE.locked() {
         rewrite(pad);
     }
 }
@@ -325,7 +326,7 @@ const XINPUT_DLLS: [&str; 3] = ["XInput1_4.dll", "XInput1_3.dll", "XInput9_1_0.d
 
 fn open_block(channel: &ChannelName) -> Result<(), Rejection> {
     let block = HandChannel::open(channel).map_err(|e| Rejection::not_ready(format!("controller pad: hand block: {e}")))?;
-    *CHANNEL.lock().unwrap_or_else(|e| e.into_inner()) = Some(block);
+    *CHANNEL.locked() = Some(block);
     Ok(())
 }
 
@@ -469,7 +470,7 @@ pub fn announce() {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
     });
-    *ANNOUNCER.lock().unwrap_or_else(|e| e.into_inner()) = Some(watcher);
+    *ANNOUNCER.locked() = Some(watcher);
 }
 
 /// Tells the game's windows a device came with `WM_DEVICECHANGE`: posts "device nodes changed" and
@@ -527,14 +528,14 @@ pub fn stop() {
     if let Ok(mut flick) = FLICK.lock() {
         flick.1 = 0;
     }
-    if let Some(watcher) = ANNOUNCER.lock().unwrap_or_else(|e| e.into_inner()).take() {
+    if let Some(watcher) = ANNOUNCER.locked().take() {
         let _ = watcher.join();
     }
 }
 
 /// Closes the hand block after the hooks are off.
 pub fn release() {
-    *CHANNEL.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *CHANNEL.locked() = None;
 }
 
 /// The VR pad, while the viewer keeps it fresh.

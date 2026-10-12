@@ -18,7 +18,8 @@
 //! - [`reach_share`]: how far a hand has crossed from its own place to another's.
 
 use crate::math::{Quat, Vec3, rotate, wrap_radians};
-use crate::trail::{Motion, Trail, dot, length};
+use crate::math::{dot, length};
+use crate::trail::{Motion, Trail};
 
 /// One hand brought within `near` of another (or of anything it reaches for) and taken past `away`
 /// within `within`: a reload's "hand to the gun and away". Not again for `cooldown`.

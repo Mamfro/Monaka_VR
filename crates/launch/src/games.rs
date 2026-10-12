@@ -18,6 +18,7 @@ use monaka_core::manifest::aims;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use monaka_core::sync::Locked;
 
 /// The headset size the producer should render at, when the player asked for one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -199,14 +200,14 @@ static CURRENT: Mutex<Option<&'static [Game]>> = Mutex::new(None);
 
 /// The games on offer for this launcher ([`catalogue`] with [`Paths::locate`]), read once.
 pub fn list() -> &'static [Game] {
-    let mut current = CURRENT.lock().unwrap_or_else(|e| e.into_inner());
+    let mut current = CURRENT.locked();
     current.get_or_insert_with(|| catalogue(&Paths::locate()).games)
 }
 
 /// Reads the games again (after a pack is added or removed) and returns them with the problems.
 pub fn rescan(paths: &Paths) -> Catalogue {
     let catalogue = catalogue(paths);
-    *CURRENT.lock().unwrap_or_else(|e| e.into_inner()) = Some(catalogue.games);
+    *CURRENT.locked() = Some(catalogue.games);
     catalogue
 }
 
@@ -255,6 +256,45 @@ pub fn eye_size(values: &Values, game: &Manifest) -> EyeSize {
 /// folders of files other games bring, the licences, the viewer's arguments and the notes.
 pub fn plan(values: &Values, game: &Manifest, eye: Option<(u32, u32)>) -> Plan {
     plan_with(values, game, eye, find_steam_files)
+}
+
+/// What the launcher makes of `args` (`id=value`, as `monaka_play` takes them) for `game`, each
+/// checked against its options: for a game crate's launch tests (a bad argument panics).
+pub fn values_of(game: &Manifest, args: &[&str]) -> Values {
+    let mut values = Values::default();
+    for arg in args {
+        let (id, value) = arg.split_once('=').unwrap_or_else(|| panic!("{arg} is not id=value"));
+        values.set_checked(game, id, value).unwrap_or_else(|why| panic!("{why}"));
+    }
+    values
+}
+
+/// The options file a run of `game` with `values` writes (no eye size settled): for a game
+/// crate's launch tests.
+pub fn options_file(game: &Manifest, values: &Values) -> String {
+    let plan = plan(values, game, None);
+    let (name, text) = plan.files.into_iter().next().unwrap_or_else(|| panic!("{} writes no options file", game.id));
+    assert_eq!(name, game.options_file);
+    text
+}
+
+/// The viewer's arguments for a run of `game` with `args`, without the held d-pad menus (checked
+/// on their own): for a game crate's launch tests.
+pub fn viewer_args_of(game: &Manifest, args: &[&str]) -> Vec<String> {
+    let mut v = plan(&values_of(game, args), game, None).viewer_args;
+    if let Some(at) = v.iter().position(|a| a == "--dpad-hold") {
+        v.drain(at..at + 2);
+    }
+    v
+}
+
+/// Panics unless every line the defaults of each of `manifests` write is one of its options: for
+/// a game crate's launch tests.
+pub fn defaults_are_options(manifests: &[Manifest]) {
+    for game in manifests {
+        let defaults = options_file(game, &Values::default());
+        assert!(defaults.lines().all(|l| l.split_once('=').is_some_and(|(k, _)| game.option(k).is_some())), "{}: {defaults}", game.id);
+    }
 }
 
 /// [`plan`] with `find` in place of looking through the Steam libraries for another game's files

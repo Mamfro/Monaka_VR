@@ -28,7 +28,7 @@
 use crate::ledger::Ledger;
 use crate::{Rejection, Session, enable_hooks, log, remove_hooks};
 use monaka_core::feature::{Available, Feature, Features, Message, fault, repeated, same_str};
-use monaka_core::manifest::{Kind, Manifest, Opt, opt};
+use monaka_core::manifest::{EXTRA, Kind, Manifest, OTHER_BUILDS, Opt, opt};
 use monaka_core::options::{Options, Shared};
 use monaka_core::protocol::ChannelName;
 use monaka_core::situation::Situation;
@@ -36,6 +36,7 @@ use monaka_hook::Hooks;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::*};
 use std::time::Instant;
+use monaka_core::sync::Locked;
 
 /// A game's producer: its manifests, its components, and which build this process is.
 pub trait Game: Sized + 'static {
@@ -112,7 +113,7 @@ pub struct Component<G: Game> {
     /// It needs the run's channel (publishing, the pose channel, the controllers).
     pub needs_channel: bool,
     /// Reads its own options (also what the manifest test calls, to prove each option is read).
-    pub settings: fn(&Options),
+    pub settings: fn(&Options, &Manifest),
     /// Whether it is on for this run (its `needs` already on).
     pub on: fn(&Run<'_, G>) -> On,
     /// Makes it for this run: its state, its hooks into `start.hooks`, its game changes into
@@ -152,7 +153,7 @@ impl<G: Game> Component<G> {
         games: &[],
         needs: &[],
         needs_channel: false,
-        settings: |_| {},
+        settings: |_, _| {},
         on: always::<G>,
         install: nothing::<G>,
         arm: || {},
@@ -174,6 +175,14 @@ impl<G: Game> Component<G> {
         }
         self.games.is_empty()
     }
+}
+
+/// The research probes as a ready-made component: the options every game's probes ride on (other
+/// builds, extra key=value options). A game adds its probes' hooks, threads and reports by struct
+/// update (`Component { install: install_probes, ..probes() }`); each probe checks its own option
+/// ([`crate::research::Research`]).
+pub const fn probes<G: Game>() -> Component<G> {
+    Component { name: "probes", options: &[OTHER_BUILDS, EXTRA], ..Component::NONE }
 }
 
 /// What a component's condition sees.
@@ -363,26 +372,26 @@ pub const fn adjust<const N: usize>(mut options: [Opt; N], changed: Opt) -> [Opt
 pub fn read_all<G: Game>(options: &Options, manifest: &Manifest) {
     Shared::from_options(options, manifest);
     for component in G::ADAPTER.components.iter().filter(|c| c.serves(manifest.id)) {
-        (component.settings)(options);
+        (component.settings)(options, manifest);
     }
 }
 
 /// Which components are on, one bit each by their place in the adapter.
 static ON: AtomicU64 = AtomicU64::new(0);
 
-/// The place of the component named `name` in `G`'s adapter, found at compile time (a name the
-/// adapter does not list does not build), for [`on`]:
+/// The place of `component` in `G`'s adapter, found at compile time (one the adapter does not
+/// list does not build), for [`on`]:
 ///
-/// `const FINGERS: usize = place::<Kcd>("fingers");`
-pub const fn place<G: Game>(name: &str) -> usize {
+/// `const FINGERS_AT: usize = place::<Kcd>(&FINGERS);`
+pub const fn place<G: Game>(component: &Component<G>) -> usize {
     let mut i = 0;
     while i < G::ADAPTER.components.len() {
-        if same_str(G::ADAPTER.components[i].name, name) {
+        if same_str(G::ADAPTER.components[i].name, component.name) {
             return i;
         }
         i += 1;
     }
-    panic!("{}", Message::new().push("the adapter lists no component named `").push(name).push("`").text());
+    panic!("{}", Message::new().push("the adapter does not list `").push(component.name).push("`").text());
 }
 
 /// Whether the component at `place` ([`place`]) is on in this run: one atomic, for a detour or a
@@ -514,7 +523,7 @@ pub fn start<G: Game>(session: &'static Session) -> Result<(), Rejection> {
     for line in available.report() {
         log!("features: {line}");
     }
-    *RUN.lock().unwrap_or_else(|e| e.into_inner()) = Some(Running { hooks: slot, ledger, available, armed });
+    *RUN.locked() = Some(Running { hooks: slot, ledger, available, armed });
     Ok(())
 }
 
@@ -529,7 +538,7 @@ fn undo<G: Game>(installed: &[(usize, &'static Component<G>)], ledger: &mut Ledg
 
 /// Stops the run (`producer!`'s `MonakaStop`).
 pub fn stop<G: Game>() -> Result<(), Rejection> {
-    let Some(mut run) = RUN.lock().unwrap_or_else(|e| e.into_inner()).take() else { return Ok(()) };
+    let Some(mut run) = RUN.locked().take() else { return Ok(()) };
     let on = armed::<G>(run.armed);
     // Each component off in turn, newest first: from here its detours stop acting and its frame
     // work stops; then whatever else it does to stop new work.
@@ -550,7 +559,7 @@ pub fn stop<G: Game>() -> Result<(), Rejection> {
             && let Err(refused) = let_go()
         {
             log!("{}: has not let go: {}", component.name, refused.reason);
-            *RUN.lock().unwrap_or_else(|e| e.into_inner()) = Some(run);
+            *RUN.locked() = Some(run);
             return Err(refused);
         }
     }
@@ -686,9 +695,9 @@ mod tests {
         }
     }
 
-    const VIDEO_AT: usize = place::<Lived>("video");
-    const HANDS_AT: usize = place::<Lived>("hands");
-    const BROKEN_AT: usize = place::<Lived>("broken");
+    const VIDEO_AT: usize = place::<Lived>(&VIDEO);
+    const HANDS_AT: usize = place::<Lived>(&HANDS);
+    const BROKEN_AT: usize = place::<Lived>(&BROKEN);
 
     /// One test, the scenarios in turn: the run's state is the process's own.
     #[test]

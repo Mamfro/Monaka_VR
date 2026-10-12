@@ -12,7 +12,7 @@
 //! previous update; the view must turn that share back out ([`BakedYaw`]) before applying the
 //! current head pose, or a head turn counts twice.
 
-use core::f32::consts::{PI, TAU};
+use crate::math::wrap_radians;
 
 /// How a game stores look angles.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -73,7 +73,7 @@ impl HeadAim {
         // send the targets a full turn off: the game would turn the character all the way round
         // to them.
         let head_yaw = match self.yaw_share / c.yaw_per_radian {
-            last if last.is_finite() => last + (head_yaw - last + PI).rem_euclid(TAU) - PI,
+            last if last.is_finite() => last + wrap_radians(head_yaw - last),
             _ => head_yaw,
         };
         let head = head_pitch * c.pitch_per_radian;

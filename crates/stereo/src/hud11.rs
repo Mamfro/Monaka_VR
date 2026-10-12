@@ -35,6 +35,7 @@ use windows::Win32::Graphics::Dxgi::IDXGISwapChain;
 use windows::core::Interface;
 
 pub use monaka_core::hud::{Placement as HudPlacement, Rect};
+use monaka_core::sync::Locked;
 
 type DrawIndexedFn = unsafe extern "system" fn(*mut c_void, u32, u32, i32);
 type DrawFn = unsafe extern "system" fn(*mut c_void, u32, u32);
@@ -167,12 +168,12 @@ pub fn frame_end(chain: &IDXGISwapChain) {
         if let Ok(device) = chain.GetDevice::<ID3D11Device>()
             && let Ok(context) = device.GetImmediateContext()
             && let Some(i) = context_slot(context.as_raw() as usize)
-            && let Some(moved) = MOVED.lock().unwrap_or_else(|e| e.into_inner())[i].take()
+            && let Some(moved) = MOVED.locked()[i].take()
         {
             put_back(&context, &moved);
         }
     }
-    let mut frame = FRAME.lock().unwrap_or_else(|e| e.into_inner());
+    let mut frame = FRAME.locked();
     let scene = SCENE_SEEN.swap(false, AcqRel);
     if probing() {
         log!(
@@ -216,7 +217,7 @@ fn before_targets(context: *mut c_void, count: u32, views: *const *mut c_void) {
         let was_on = CONTEXT_ON[i].swap(on, AcqRel);
         if was_on
             && !on
-            && let Some(moved) = MOVED.lock().unwrap_or_else(|e| e.into_inner())[i].take()
+            && let Some(moved) = MOVED.locked()[i].take()
         {
             put_back(ctx, &moved);
         }
@@ -260,7 +261,7 @@ fn before_draw(context: *mut c_void, vertices: u32, kind: &str) {
     let Some(setup) = SETUP.get() else { return };
     let deferred = !immediate(ctx);
     {
-        let mut frame = FRAME.lock().unwrap_or_else(|e| e.into_inner());
+        let mut frame = FRAME.locked();
         frame.on_draws += 1;
         if deferred {
             frame.deferred_on_draws += 1;
@@ -288,7 +289,7 @@ fn before_draw(context: *mut c_void, vertices: u32, kind: &str) {
     }
     let Some(at) = (setup.place)() else { return };
     let Some(current) = viewport(ctx) else { return };
-    let mut moved = MOVED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut moved = MOVED.locked();
     // A viewport we did not set is the game's own: it becomes the base.
     let previous = moved[i];
     let base = match previous {

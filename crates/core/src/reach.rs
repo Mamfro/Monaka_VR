@@ -2,37 +2,8 @@
 //! target with the bone lengths kept, and the rigid turns that carry an animated arm there. For a
 //! game's first-person arm put on a tracked controller while the body stays the game's.
 
-use crate::camera::{Mat34, compose, translation};
-use crate::math::Vec3;
-
-fn sub(a: Vec3, b: Vec3) -> Vec3 {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn add(a: Vec3, b: Vec3) -> Vec3 {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn scale(a: Vec3, s: f32) -> Vec3 {
-    [a[0] * s, a[1] * s, a[2] * s]
-}
-
-fn dot(a: Vec3, b: Vec3) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn cross(a: Vec3, b: Vec3) -> Vec3 {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
-}
-
-fn length(a: Vec3) -> f32 {
-    dot(a, a).sqrt()
-}
-
-fn normalized(a: Vec3) -> Option<Vec3> {
-    let l = length(a);
-    (l.is_finite() && l > 1e-6).then(|| scale(a, 1.0 / l))
-}
+use crate::camera::{Mat34, compose, quaternion, rigid_inverse, translation};
+use crate::math::{Vec3, add, cross, dot, length, scale, sub, unit};
 
 /// Where the elbow goes for a shoulder at `shoulder`, bones `upper` and `lower` long, the wrist
 /// at `target`, bending toward `pole` (a direction, e.g. down and out for a right arm). A target
@@ -44,15 +15,15 @@ pub fn elbow(shoulder: Vec3, target: Vec3, upper: f32, lower: f32, pole: Vec3) -
         return None;
     }
     let toward = sub(target, shoulder);
-    let dir = normalized(toward)?;
+    let dir = unit(toward)?;
     let reach = length(toward).clamp((upper - lower).abs() + 1e-4, upper + lower - 1e-4);
     // Law of cosines: the elbow's distance along the shoulder-target line.
     let along = (upper * upper + reach * reach - lower * lower) / (2.0 * reach);
     let out = (upper * upper - along * along).max(0.0).sqrt();
     // The pole, square to the line; any square direction if the pole lies along it.
-    let side = normalized(sub(pole, scale(dir, dot(pole, dir))))
-        .or_else(|| normalized(cross(dir, [0.0, 1.0, 0.0])))
-        .or_else(|| normalized(cross(dir, [1.0, 0.0, 0.0])))?;
+    let side = unit(sub(pole, scale(dir, dot(pole, dir))))
+        .or_else(|| unit(cross(dir, [0.0, 1.0, 0.0])))
+        .or_else(|| unit(cross(dir, [1.0, 0.0, 0.0])))?;
     Some(add(add(shoulder, scale(dir, along)), scale(side, out)))
 }
 
@@ -69,9 +40,9 @@ const FOREARM_BELOW_AIM: f32 = 0.61;
 pub fn hand_pole(shoulder: Vec3, wrist: Vec3, palm: &Mat34, forearm: f32) -> Option<Vec3> {
     let (up, back) = ([palm[1], palm[5], palm[9]], [palm[2], palm[6], palm[10]]);
     let (s, c) = FOREARM_BELOW_AIM.sin_cos();
-    let along = normalized(sub(scale(back, c), scale(up, s)))?;
+    let along = unit(sub(scale(back, c), scale(up, s)))?;
     let guess = add(wrist, scale(along, forearm));
-    normalized(sub(guess, scale(add(shoulder, wrist), 0.5)))
+    unit(sub(guess, scale(add(shoulder, wrist), 0.5)))
 }
 
 /// Wrist-derived pole with only its inward bend component limited. The bend
@@ -81,24 +52,24 @@ pub fn hand_pole(shoulder: Vec3, wrist: Vec3, palm: &Mat34, forearm: f32) -> Opt
 pub fn bounded_hand_pole(shoulder: Vec3, wrist: Vec3, palm: &Mat34, forearm: f32, right: Vec3, left: bool) -> Option<Vec3> {
     if !right.iter().all(|v| v.is_finite()) { return None; }
     let hand = hand_pole(shoulder, wrist, palm, forearm)?;
-    let along = normalized(sub(wrist, shoulder))?;
-    let bend = normalized(sub(hand, scale(along, dot(hand, along))))?;
-    let right = normalized([right[0], 0.0, right[2]])?;
+    let along = unit(sub(wrist, shoulder))?;
+    let bend = unit(sub(hand, scale(along, dot(hand, along))))?;
+    let right = unit([right[0], 0.0, right[2]])?;
     let outward = scale(right, if left { -1.0 } else { 1.0 });
-    let Some(outward) = normalized(sub(outward, scale(along, dot(outward, along)))) else {
+    let Some(outward) = unit(sub(outward, scale(along, dot(outward, along)))) else {
         // A straight lateral reach has no distinct inner/outer bend half-plane.
         return Some(bend);
     };
-    normalized(add(bend, scale(outward, (0.05 - dot(bend, outward)).max(0.0))))
+    unit(add(bend, scale(outward, (0.05 - dot(bend, outward)).max(0.0))))
 }
 
 /// The rotation about `pivot` that turns direction `from` onto `to` (the shortest turn), as a
 /// matrix that applies to world points and frames.
 pub fn turn_about(pivot: Vec3, from: Vec3, to: Vec3) -> Option<Mat34> {
-    let (a, b) = (normalized(from)?, normalized(to)?);
+    let (a, b) = (unit(from)?, unit(to)?);
     let c = dot(a, b).clamp(-1.0, 1.0);
     let axis = cross(a, b);
-    let r: [f32; 9] = match normalized(axis) {
+    let r: [f32; 9] = match unit(axis) {
         Some(k) => {
             // Rodrigues: R = cI + s[k]x + (1-c)kk^T.
             let s = length(axis);
@@ -119,7 +90,7 @@ pub fn turn_about(pivot: Vec3, from: Vec3, to: Vec3) -> Option<Mat34> {
         None if c > 0.0 => [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
         // A half turn: about any axis square to the direction.
         None => {
-            let k = normalized(cross(a, [0.0, 1.0, 0.0])).or_else(|| normalized(cross(a, [1.0, 0.0, 0.0])))?;
+            let k = unit(cross(a, [0.0, 1.0, 0.0])).or_else(|| unit(cross(a, [1.0, 0.0, 0.0])))?;
             // R = 2kk^T - I.
             [
                 2.0 * k[0] * k[0] - 1.0,
@@ -141,7 +112,7 @@ pub fn turn_about(pivot: Vec3, from: Vec3, to: Vec3) -> Option<Mat34> {
 /// The turn by `angle` radians (right-handed) about the line through `pivot` along `axis`, as a
 /// matrix that applies to world points and frames.
 pub fn spin_about(pivot: Vec3, axis: Vec3, angle: f32) -> Option<Mat34> {
-    let k = normalized(axis)?;
+    let k = unit(axis)?;
     let (s, c) = angle.sin_cos();
     let t = 1.0 - c;
     let rotation = [
@@ -165,24 +136,10 @@ pub fn spin_about(pivot: Vec3, axis: Vec3, angle: f32) -> Option<Mat34> {
 /// right-handed, within a half turn): the twist part of the turn between their rotations, any bend
 /// across the axis left out. What a forearm's twist bones take of a hand turned against it.
 pub fn twist_between(from: &Mat34, to: &Mat34, axis: Vec3) -> Option<f32> {
-    let k = normalized(axis)?;
+    let k = unit(axis)?;
     // The turn from one to the other: to * from^T (rotations only).
-    let m = |i: usize, j: usize| (0..3).map(|n| to[i * 4 + n] * from[j * 4 + n]).sum::<f32>();
-    // Its quaternion (Shepperd: from the largest of the diagonal terms, stable at any angle).
-    let trace = m(0, 0) + m(1, 1) + m(2, 2);
-    let (w, v) = if trace > 0.0 {
-        let s = (trace + 1.0).sqrt() * 2.0;
-        (s / 4.0, [(m(2, 1) - m(1, 2)) / s, (m(0, 2) - m(2, 0)) / s, (m(1, 0) - m(0, 1)) / s])
-    } else if m(0, 0) > m(1, 1) && m(0, 0) > m(2, 2) {
-        let s = (1.0 + m(0, 0) - m(1, 1) - m(2, 2)).sqrt() * 2.0;
-        ((m(2, 1) - m(1, 2)) / s, [s / 4.0, (m(0, 1) + m(1, 0)) / s, (m(0, 2) + m(2, 0)) / s])
-    } else if m(1, 1) > m(2, 2) {
-        let s = (1.0 + m(1, 1) - m(0, 0) - m(2, 2)).sqrt() * 2.0;
-        ((m(0, 2) - m(2, 0)) / s, [(m(0, 1) + m(1, 0)) / s, s / 4.0, (m(1, 2) + m(2, 1)) / s])
-    } else {
-        let s = (1.0 + m(2, 2) - m(0, 0) - m(1, 1)).sqrt() * 2.0;
-        ((m(1, 0) - m(0, 1)) / s, [(m(0, 2) + m(2, 0)) / s, (m(1, 2) + m(2, 1)) / s, s / 4.0])
-    };
+    let q = quaternion(&compose(to, &rigid_inverse(from)));
+    let (w, v) = (q[3], [q[0], q[1], q[2]]);
     // The twist about the axis: the quaternion's part along it.
     let angle = 2.0 * dot(v, k).atan2(w);
     let wrapped = crate::math::wrap_radians(angle);
@@ -231,7 +188,7 @@ mod tests {
                 assert!(side * (elbow[0]-shoulder[0]) > 0.0);
                 saw_up |= elbow[1] > -0.1;
                 saw_down |= elbow[1] < -0.1;
-                let along = normalized(sub(wrist,shoulder)).unwrap();
+                let along = unit(sub(wrist,shoulder)).unwrap();
                 assert!(dot(pole,along).abs()<1e-5);
             }
         }

@@ -20,9 +20,6 @@ use windows::Win32::Graphics::Direct3D12::ID3D12CommandQueue;
 use windows::Win32::Graphics::Dxgi::{IDXGISwapChain, IDXGISwapChain3};
 use windows::core::HRESULT;
 
-/// The name a game's eye cameras `needs` (and [`monaka_producer::game::place`] finds).
-pub const NAME: &str = "present";
-
 /// The present loop: the game's swapchain, the eye and pose of the next frame, the pairs.
 pub static DRIVER: Driver = Driver::new();
 
@@ -71,7 +68,7 @@ pub trait Presents: Game {
 /// are the game's own camera); a game whose stereo switch turns publishing off as well gives it
 /// its own `on`.
 pub const fn present<G: Presents>() -> Component<G> {
-    Component { name: NAME, needs_channel: true, install: install::<G>, arm, give_back, release, summary: Some(summary), ..Component::NONE }
+    Component { name: "present", needs_channel: true, install: install::<G>, arm, give_back, release, summary: Some(summary), ..Component::NONE }
 }
 
 fn install<G: Presents>(start: &mut Start<'_, G>) -> Result<(), Lack> {

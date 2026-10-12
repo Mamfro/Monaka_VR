@@ -10,13 +10,10 @@ use monaka_core::manifest::CONTROLLER_PAD;
 use monaka_producer::game::{Component, Game, Lack, On, Start};
 use std::sync::atomic::{AtomicBool, Ordering::*};
 
-/// The name a game's own pad component `needs` (and [`monaka_producer::game::place`] finds).
-pub const NAME: &str = "gamepad";
-
 /// The gamepad component for game `G`.
 pub const fn gamepad<G: Game>() -> Component<G> {
     Component {
-        name: NAME,
+        name: "gamepad",
         features: &[Feature::Gamepad],
         options: &[CONTROLLER_PAD],
         needs_channel: true,
@@ -52,6 +49,13 @@ fn install<G: Game>(start: &mut Start<'_, G>) -> Result<(), Lack> {
 
 fn arm() {
     crate::take_right_stick_y(pitch_from_head());
+    crate::announce();
+}
+
+/// The start for a game whose own look decides what the right stick's pitch does (it steers the
+/// view toward targets, or lets some pitch through toward level): the stick left whole, by struct
+/// update (`Component { arm: monaka_pad::feature::whole_stick, ..gamepad() }`).
+pub fn whole_stick() {
     crate::announce();
 }
 

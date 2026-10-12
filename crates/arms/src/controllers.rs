@@ -8,6 +8,7 @@ use monaka_channel::reticles::ReticleChannel;
 use monaka_core::protocol::{FingerPose, HandPose, LEFT_HAND, RIGHT_HAND};
 use monaka_producer::log;
 use std::sync::Mutex;
+use monaka_core::sync::Locked;
 
 /// A controller not located for this long is off or asleep: head aim takes over.
 const MAX_AGE_MS: u64 = 250;
@@ -21,23 +22,23 @@ static RETICLES: Mutex<Option<ReticleChannel>> = Mutex::new(None);
 /// Opens the hand block beside `channel`; without it, the controllers are never tracked.
 pub fn open(channel: &ChannelName) {
     match HandChannel::open(channel) {
-        Ok(hands) => *CHANNEL.lock().unwrap_or_else(|e| e.into_inner()) = Some(hands),
+        Ok(hands) => *CHANNEL.locked() = Some(hands),
         Err(e) => log!("controllers: hand block unavailable ({e}); hand aim off"),
     }
     match FingerChannel::open(channel) {
-        Ok(fingers) => *FINGERS.lock().unwrap_or_else(|e| e.into_inner()) = Some(fingers),
+        Ok(fingers) => *FINGERS.locked() = Some(fingers),
         Err(e) => log!("controllers: finger block unavailable ({e}); fingers as the game animates them"),
     }
     match ReticleChannel::open(channel) {
-        Ok(reticles) => *RETICLES.lock().unwrap_or_else(|e| e.into_inner()) = Some(reticles),
+        Ok(reticles) => *RETICLES.locked() = Some(reticles),
         Err(e) => log!("controllers: reticle block unavailable ({e}); the reticles stay on the palms"),
     }
 }
 
 pub fn close() {
-    *CHANNEL.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    *FINGERS.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    if let Some(mut reticles) = RETICLES.lock().unwrap_or_else(|e| e.into_inner()).take() {
+    *CHANNEL.locked() = None;
+    *FINGERS.locked() = None;
+    if let Some(mut reticles) = RETICLES.locked().take() {
         reticles.write(LEFT_HAND, None);
         reticles.write(RIGHT_HAND, None);
     }

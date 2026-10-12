@@ -17,6 +17,7 @@ use monaka_producer::{Rejection, log};
 use std::ffi::c_void;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering::*};
+use monaka_core::sync::Locked;
 
 /// Set while counts may go out.
 pub static ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -88,7 +89,7 @@ fn queue(source: usize, dx: f64, dy: f64) {
     if !(dx.is_finite() && dy.is_finite()) {
         return;
     }
-    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut pending = PENDING.locked();
     pending[source][0] += dx;
     pending[source][1] += dy;
 }
@@ -105,7 +106,7 @@ pub fn reads() -> u64 {
 
 /// Counts of [`add`] queued but not yet read by the game.
 pub fn pending() -> [f64; 2] {
-    PENDING.lock().unwrap_or_else(|e| e.into_inner())[0]
+    PENDING.locked()[0]
 }
 
 pub fn summary() -> String {
@@ -124,7 +125,7 @@ pub fn summary() -> String {
 
 /// The whole counts to hand out now per source, taken from the queue.
 fn take() -> [[i32; 2]; 2] {
-    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut pending = PENDING.locked();
     pending.each_mut().map(|source| {
         let out = source.map(|v| v.trunc().clamp(-1.0e6, 1.0e6) as i32);
         for (p, o) in source.iter_mut().zip(out) {
@@ -141,7 +142,7 @@ fn total(taken: &[[i32; 2]; 2]) -> [i32; 2] {
 
 /// Gives counts that could not go out back to the queue.
 fn give_back(taken: [[i32; 2]; 2]) {
-    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    let mut pending = PENDING.locked();
     for (source, counts) in pending.iter_mut().zip(taken) {
         source[0] += counts[0] as f64;
         source[1] += counts[1] as f64;
@@ -157,7 +158,7 @@ fn delivered_now(taken: [[i32; 2]; 2]) {
 
 fn is_mouse(device: *mut c_void) -> bool {
     let key = device as usize;
-    let mut devices = DEVICES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut devices = DEVICES.locked();
     if let Some(&(_, mouse)) = devices.iter().find(|(d, _)| *d == key) {
         return mouse;
     }

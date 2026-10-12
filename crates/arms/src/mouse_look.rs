@@ -15,9 +15,7 @@ use monaka_core::options::Options;
 use monaka_producer::game::{Component, Game, Lack, On, Run, Start};
 use monaka_producer::log;
 use std::sync::Mutex;
-
-/// The name a game's own components `needs` (and [`monaka_producer::game::place`] finds).
-pub const NAME: &str = "look";
+use monaka_core::sync::Locked;
 
 /// How the aim's mouse counts reach the game.
 pub enum Delivery<G: Game> {
@@ -50,10 +48,10 @@ pub trait AimsByMouse: Game {
 /// `controller`).
 pub const fn look<G: AimsByMouse>() -> Component<G> {
     Component {
-        name: NAME,
+        name: "look",
         features: &[Feature::Look],
         needs_channel: true,
-        settings: |options| {
+        settings: |options, _| {
             read(options, false);
         },
         on: on::<G>,
@@ -108,14 +106,14 @@ fn install<G: AimsByMouse>(start: &mut Start<'_, G>) -> Result<(), Lack> {
     if power_aim || pointer.is_some() {
         crate::controllers::open(start.channel()?);
     }
-    *SETTINGS.lock().unwrap_or_else(|e| e.into_inner()) = Some(Settings { scale, stick_speed: start.shared.stick_speed, native_stick, power_aim, pointer });
+    *SETTINGS.locked() = Some(Settings { scale, stick_speed: start.shared.stick_speed, native_stick, power_aim, pointer });
     Ok(())
 }
 
 /// Starts steering. Keep the mouse still for the first two seconds: the scale is measured then
 /// unless known.
 fn arm<G: AimsByMouse>() {
-    let Some(settings) = SETTINGS.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
+    let Some(settings) = SETTINGS.locked().take() else { return };
     mouse_aim::start(MouseAim {
         scale: settings.scale,
         usual_scale: Some(G::AIM.usual_scale),

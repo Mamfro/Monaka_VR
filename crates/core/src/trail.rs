@@ -11,7 +11,7 @@
 //! step is too short for tracking noise to average out, and a game that reads the controllers
 //! twice in a frame gives two samples of one pose ([`Trail::SAME_UPDATE`]).
 
-use crate::math::{IDENTITY, Quat, Vec3, rotate};
+use crate::math::{IDENTITY, Quat, Vec3, dot, length, rotate};
 use std::collections::VecDeque;
 
 /// One sample: when, where the followed point was, and the hand's orientation.
@@ -196,14 +196,6 @@ impl Trail {
         let length = length(moved);
         (length > 0.005).then(|| moved.map(|c| c / length))
     }
-}
-
-pub(crate) fn length(v: Vec3) -> f32 {
-    dot(v, v).sqrt()
-}
-
-pub(crate) fn dot(a: Vec3, b: Vec3) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 #[cfg(test)]
