@@ -13,12 +13,23 @@
 //! - the end of a run: [`Driver::retire`] from the stop, [`Driver::finish`] on the present
 //!   thread, [`Driver::release`] once the hooks are out.
 //!
-//! The game's detour is one line: `DRIVER.present(swap, interval, flags, PRESENT_ORIGINAL.get())`.
+//! The game's detour is one line: `DRIVER.present(swap, interval, flags, PRESENT_ORIGINAL.get())`,
+//! or, from an engine's own present call, `DRIVER.around_present(chain, || original(..))`.
 //! Its camera hook reads [`Driver::pending`] and draws that eye from that pose. A per-game
 //! counter of those draws goes in the rate line ([`Install::work`]). A game with more to do at
 //! each present (its own publishers for some modes, a live camera to turn, controllers to read)
 //! hangs that on [`Install::before`], [`Install::after`] and [`Install::finish`]; one that moves
 //! the head's tracking origin (room-scale following) adjusts the pose in [`Install::adjust_pose`].
+//!
+//! Two things an engine may add:
+//!
+//! - **frames labelled by their camera:** the camera hook notes each eye camera it writes
+//!   ([`Driver::camera_written`]), and the renderer, once it knows the camera it renders the coming
+//!   frame from, labels that frame ([`Driver::label_frame`]): the frame then goes out as that eye
+//!   with that pose, whatever the timing ([`AlternatePublisher12::show_labelled`]);
+//! - **choices taken in turn** ([`Install::in_turn`]): an engine whose camera updates and presents
+//!   are not in lock-step takes the eye choices one by one ([`Driver::take_in_turn`]), each drawn
+//!   from a pose sampled at that update.
 
 use crate::alternate::{AlternatePublisher, Step};
 use crate::alternate12::AlternatePublisher12;
@@ -26,6 +37,7 @@ use crate::present::PresentFn;
 use monaka_channel::pose::{HeadSource, PoseChannel, Synthetic};
 use monaka_core::alternate::Schedule;
 use monaka_core::options::Shared;
+use monaka_core::math::Vec3;
 use monaka_core::protocol::HeadPose;
 use monaka_hook::InFlight;
 use monaka_producer::{log, log_first};
@@ -77,9 +89,17 @@ pub struct Install {
     /// After each present `n`, with the pair's head pose, once it is recorded and before the next
     /// eye is announced ([`Driver::pending`]): the game's own per-present work.
     pub after: Option<fn(&Driver, u64, &HeadPose)>,
-    /// The head pose each pair is drawn from, adjusted before it is recorded and announced (a
-    /// tracking origin moved under the player).
-    pub adjust_pose: Option<fn(&mut HeadPose)>,
+    /// The head pose each pair is drawn from, for present `n`, adjusted before it is recorded and
+    /// announced (a tracking origin moved under the player, a PC check's turn).
+    pub adjust_pose: Option<fn(u64, &mut HeadPose)>,
+    /// Whether a menu is up: its frames go to both eyes flat.
+    pub menu: Option<fn() -> bool>,
+    /// The camera updates take the eye choices in turn ([`Driver::take_in_turn`]), each sampling
+    /// its pose: none is sampled at the present.
+    pub in_turn: bool,
+    /// With choices taken in turn: whether each frame is drawn from the newest pose rather than
+    /// its pair's (frame generation: a generated eye stands for the other eye's moment).
+    pub pose_each_frame: Option<fn() -> bool>,
     /// The end of a run, before the publisher lets its eye copies go: what the game changed in
     /// the engine, given back; its tallies.
     pub finish: Option<fn(&Driver)>,
@@ -93,9 +113,59 @@ struct State {
     work: (&'static str, &'static AtomicU64),
     before: Option<fn(&Driver, &IDXGISwapChain, u64) -> bool>,
     after: Option<fn(&Driver, u64, &HeadPose)>,
-    adjust_pose: Option<fn(&mut HeadPose)>,
+    adjust_pose: Option<fn(u64, &mut HeadPose)>,
+    menu: Option<fn() -> bool>,
+    in_turn: bool,
+    pose_each_frame: Option<fn() -> bool>,
     finish: Option<fn(&Driver)>,
     pair_pose: HeadPose,
+}
+
+/// A frame recognised by its camera: its eye and the pose it was drawn from.
+#[derive(Clone, Copy, Debug)]
+pub struct Label {
+    pub eye: usize,
+    pub pose: HeadPose,
+}
+
+/// A frame taken in turn ([`Driver::take_in_turn`]): the present it follows, its eye, its pose.
+#[derive(Clone, Copy, Debug)]
+pub struct Taken {
+    pub n: u64,
+    pub eye: usize,
+    pub pose: HeadPose,
+}
+
+/// The eye cameras written lately.
+const WRITTEN_KEPT: usize = 8;
+/// A rendered camera this close (world units, metres) to a written one is that one.
+const SAME_CAMERA: f32 = 0.005;
+
+/// What the labels and the choices in turn keep.
+struct Frames {
+    written: [Option<(Vec3, Label)>; WRITTEN_KEPT],
+    next: usize,
+    label: Option<Label>,
+    /// Frames have been labelled this run, so a frame without a label is not guessed.
+    labelling: bool,
+    sequencer: Sequencer,
+    pair_pose: HeadPose,
+}
+
+impl Frames {
+    const NEW: Frames = Frames { written: [None; WRITTEN_KEPT], next: 0, label: None, labelling: false, sequencer: Sequencer::NEW, pair_pose: HeadPose::EMPTY };
+}
+
+/// The frames' tallies, for the summary.
+struct Tally {
+    labelled: AtomicU64,
+    unmatched: AtomicU64,
+    unlabelled: AtomicU64,
+    disagreed: AtomicU64,
+    early: AtomicU64,
+    late: AtomicU64,
+    resynced: AtomicU64,
+    flat: AtomicU64,
 }
 
 struct Cell(Option<State>);
@@ -126,6 +196,10 @@ pub struct Driver {
     settings: Mutex<Option<Shared>>,
     state: Mutex<Cell>,
     head: HeadSource,
+    frames: Mutex<Frames>,
+    /// Eye choices made, one per present (taken in turn by [`Driver::take_in_turn`]).
+    choices: AtomicU64,
+    tally: Tally,
 }
 
 impl Driver {
@@ -144,6 +218,18 @@ impl Driver {
             settings: Mutex::new(None),
             state: Mutex::new(Cell(None)),
             head: HeadSource::new(),
+            frames: Mutex::new(Frames::NEW),
+            choices: AtomicU64::new(0),
+            tally: Tally {
+                labelled: AtomicU64::new(0),
+                unmatched: AtomicU64::new(0),
+                unlabelled: AtomicU64::new(0),
+                disagreed: AtomicU64::new(0),
+                early: AtomicU64::new(0),
+                late: AtomicU64::new(0),
+                resynced: AtomicU64::new(0),
+                flat: AtomicU64::new(0),
+            },
         }
     }
 
@@ -162,6 +248,9 @@ impl Driver {
             before: install.before,
             after: install.after,
             adjust_pose: install.adjust_pose,
+            menu: install.menu,
+            in_turn: install.in_turn,
+            pose_each_frame: install.pose_each_frame,
             finish: install.finish,
             pair_pose: HeadPose::default(),
         });
@@ -169,8 +258,94 @@ impl Driver {
 
     /// Starts choosing eyes at the next present (the hooks are in).
     pub fn start(&self) {
+        *self.frames.locked() = Frames::NEW;
+        self.choices.store(0, Relaxed);
         self.finished.store(false, Release);
         self.capture.store(true, Release);
+    }
+
+    /// The camera hook wrote eye `eye`'s camera at `position`, drawn from `pose`: a frame rendered
+    /// from it can be recognised ([`Driver::label_frame`]).
+    pub fn camera_written(&self, position: Vec3, eye: usize, pose: HeadPose) {
+        let mut frames = self.frames.locked();
+        let slot = frames.next % WRITTEN_KEPT;
+        frames.written[slot] = Some((position, Label { eye, pose }));
+        frames.next += 1;
+    }
+
+    /// The renderer reports the camera position it renders the coming frame with: the frame is
+    /// labelled with the eye and pose of the camera written there. Returns the eye, if recognised.
+    pub fn label_frame(&self, position: Vec3) -> Option<usize> {
+        if !self.capture.load(Acquire) || !position.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let mut frames = self.frames.locked();
+        let distance = |p: &Vec3| (0..3).map(|i| (p[i] - position[i]).abs()).fold(0.0, f32::max);
+        let found = frames.written.iter().flatten().filter(|(p, _)| distance(p) < SAME_CAMERA).min_by(|a, b| distance(&a.0).total_cmp(&distance(&b.0))).map(|(_, label)| *label);
+        match found {
+            Some(label) => {
+                frames.label = Some(label);
+                frames.labelling = true;
+                self.tally.labelled.fetch_add(1, Relaxed);
+                Some(label.eye)
+            }
+            None => {
+                self.tally.unmatched.fetch_add(1, Relaxed);
+                None
+            }
+        }
+    }
+
+    /// The label of the frame about to present, left for the present loop.
+    pub fn peek_label(&self) -> Option<Label> {
+        self.frames.locked().label
+    }
+
+    /// The label of the frame about to present, taken (a game's own publishing path).
+    pub fn take_label(&self) -> Option<Label> {
+        self.frames.locked().label.take()
+    }
+
+    /// For [`Install::in_turn`]: the next camera update's frame, taking the choices made at the
+    /// presents one by one ([`Sequencer`]); its pose sampled now for a pair's left eye (or every
+    /// frame, [`Install::pose_each_frame`]), recorded for the pair it completes. None while not
+    /// running.
+    pub fn take_in_turn(&self) -> Option<Taken> {
+        if !self.capture.load(Acquire) || self.eye.load(Acquire) < 0 {
+            return None;
+        }
+        let (choice, taken) = self.frames.locked().sequencer.next(self.choices.load(Acquire));
+        let counter = match taken {
+            Turn::InStep => None,
+            Turn::Early => Some(&self.tally.early),
+            Turn::Late => Some(&self.tally.late),
+            Turn::Resynced => Some(&self.tally.resynced),
+        };
+        if let Some(counter) = counter {
+            counter.fetch_add(1, Relaxed);
+        }
+        // The camera written for choice `choice` is the one drawn after present `choice - 1`.
+        let n = choice.saturating_sub(1);
+        let mut cell = self.state.locked();
+        let state = cell.0.as_mut()?;
+        let each_frame = state.pose_each_frame.is_some_and(|f| f());
+        let pose = {
+            let mut frames = self.frames.locked();
+            if Schedule::starts_pair(n) || each_frame {
+                let tracked = state.shared.head_tracking || state.shared.synthetic.is_some();
+                let mut pose = if tracked { self.head.current().unwrap_or_default() } else { HeadPose::default() };
+                if let Some(adjust) = state.adjust_pose {
+                    adjust(n, &mut pose);
+                }
+                frames.pair_pose = pose;
+            }
+            frames.pair_pose
+        };
+        match &mut state.publisher {
+            Publisher::D3D11(publisher) => publisher.record_pose(n, pose),
+            Publisher::D3D12 { publisher, .. } => publisher.record_pose(n, pose),
+        }
+        Some(Taken { n, eye: Schedule::camera_eye(n), pose })
     }
 
     /// Whether the run's end has given everything back ([`Driver::finish`] ran).
@@ -277,6 +452,14 @@ impl Driver {
         }
     }
 
+    /// The latest pair published (D3D12): its sequence and the poses it went out with.
+    pub fn last_pair(&self) -> Option<(u64, [HeadPose; 2])> {
+        match self.state.locked().0.as_ref().map(|s| &s.publisher) {
+            Some(Publisher::D3D12 { publisher, .. }) => publisher.last_pair(),
+            _ => None,
+        }
+    }
+
     /// Pairs published, failures, presents, unpaired right eyes: the tail of a run's summary.
     pub fn summary(&self) -> String {
         let cell = self.state.locked();
@@ -285,11 +468,23 @@ impl Driver {
             Some(Publisher::D3D12 { publisher, .. }) => (publisher.pairs(), publisher.failures()),
             None => (0, 0),
         };
-        format!(
+        let t = &self.tally;
+        let count = |c: &AtomicU64| c.load(Relaxed);
+        let mut line = format!(
             "{} presents, {pairs} pairs published, {failures} failures, {} unpaired",
             self.presents.load(Relaxed).saturating_sub(self.attached_at.load(Relaxed)),
             self.unpaired.load(Relaxed)
-        )
+        );
+        if count(&t.labelled) + count(&t.unmatched) > 0 {
+            line += &format!("; frames labelled {}, unmatched {}, unlabelled {}, label differed from timing {}", count(&t.labelled), count(&t.unmatched), count(&t.unlabelled), count(&t.disagreed));
+        }
+        if count(&t.early) + count(&t.late) + count(&t.resynced) > 0 {
+            line += &format!("; camera updates early {}, late {}, resynced {}", count(&t.early), count(&t.late), count(&t.resynced));
+        }
+        if count(&t.flat) > 0 {
+            line += &format!("; menu frames flat {}", count(&t.flat));
+        }
+        line
     }
 
     /// Whether `swap` is the game's swapchain (the first one presented at a real size).
@@ -323,6 +518,15 @@ impl Driver {
             // SAFETY: forwards the caller's own call.
             return unsafe { original(swap, interval, flags) };
         };
+        // SAFETY: forwards the caller's own call.
+        self.around_present(chain, || unsafe { original(swap, interval, flags) })
+    }
+
+    /// One present of the game's swapchain `chain`, made by `call` (DXGI's Present, or an engine's
+    /// own present call that ends in it): the frame's eye kept or its pair published before it, the
+    /// next eye chosen after it.
+    pub fn around_present<R>(&self, chain: &IDXGISwapChain, call: impl FnOnce() -> R) -> R {
+        let _flight = InFlight::enter();
         if let Some(frame_end) = self.state.lock().ok().and_then(|cell| cell.0.as_ref().and_then(|s| s.frame_end)) {
             frame_end(chain);
         }
@@ -334,8 +538,7 @@ impl Driver {
             }
             self.before_present(chain, count - self.attached_at.load(Relaxed));
         }
-        // SAFETY: forwards the game's own call.
-        let result = unsafe { original(swap, interval, flags) };
+        let result = call();
         if capturing {
             self.after_present(count - self.attached_at.load(Relaxed));
         } else if self.eye.swap(-1, AcqRel) != -1 {
@@ -358,11 +561,35 @@ impl Driver {
             Some(report) => report(self, pose),
             None => self.report_centred(pose),
         };
+        let menu = state.menu.is_some_and(|menu| menu());
+        let label = self.take_label();
+        let labelling = self.frames.locked().labelling;
         let step = match &mut state.publisher {
+            Publisher::D3D11(publisher) if menu => {
+                self.tally.flat.fetch_add(1, Relaxed);
+                monaka_channel::d3d::swapchain_parts(chain).ok().map(|(image, device, context)| publisher.publish_flat(&device, &context, &image, n, &self.head))
+            }
             Publisher::D3D11(publisher) => Some(publisher.before_present(chain, n, &self.head, report)),
-            Publisher::D3D12 { publisher, queue } => chain.cast::<IDXGISwapChain3>().ok().and_then(|swap| match queue(&swap) {
-                Some(queue) => Some(publisher.before_present(&swap, &queue, n, &self.head, report)),
-                None => {
+            Publisher::D3D12 { publisher, queue } => chain.cast::<IDXGISwapChain3>().ok().and_then(|swap| match (queue(&swap), label) {
+                // A menu (the game's whole screen): flat to both eyes, on the viewer's screen.
+                (Some(queue), _) if menu => {
+                    self.tally.flat.fetch_add(1, Relaxed);
+                    Some(publisher.show_flat(&swap, &queue))
+                }
+                // The frame's own label: its eye and pose exactly, whatever the timing.
+                (Some(queue), Some(label)) => {
+                    if publisher.schedule().shown_eye(n).is_some_and(|s| s != label.eye) {
+                        self.tally.disagreed.fetch_add(1, Relaxed);
+                    }
+                    Some(publisher.show_labelled(&swap, &queue, label.eye, label.pose, &self.head, report))
+                }
+                // Labelled before but not this frame: its eye is unknown.
+                (Some(_), None) if labelling => {
+                    self.tally.unlabelled.fetch_add(1, Relaxed);
+                    None
+                }
+                (Some(queue), None) => Some(publisher.before_present(&swap, &queue, n, &self.head, report)),
+                (None, _) => {
                     log_first!(3, "present {n}: the game's command queue is not known");
                     None
                 }
@@ -399,20 +626,25 @@ impl Driver {
         }
         let mut cell = self.state.locked();
         let Some(state) = cell.0.as_mut() else { return };
-        // Both eyes of a pair are drawn from one head pose, sampled for its left-eye frame.
-        if Schedule::starts_pair(n) {
-            let tracked = state.shared.head_tracking || state.shared.synthetic.is_some();
-            let mut pose = if tracked { self.head.current().unwrap_or_default() } else { HeadPose::default() };
-            if let Some(adjust) = state.adjust_pose {
-                adjust(&mut pose);
+        self.choices.fetch_add(1, AcqRel);
+        // Both eyes of a pair are drawn from one head pose, sampled for its left-eye frame (by the
+        // camera update instead, with choices taken in turn).
+        if !state.in_turn {
+            if Schedule::starts_pair(n) {
+                let tracked = state.shared.head_tracking || state.shared.synthetic.is_some();
+                let mut pose = if tracked { self.head.current().unwrap_or_default() } else { HeadPose::default() };
+                if let Some(adjust) = state.adjust_pose {
+                    adjust(n, &mut pose);
+                }
+                state.pair_pose = pose;
             }
-            state.pair_pose = pose;
+            let pose = state.pair_pose;
+            match &mut state.publisher {
+                Publisher::D3D11(publisher) => publisher.record_pose(n, pose),
+                Publisher::D3D12 { publisher, .. } => publisher.record_pose(n, pose),
+            }
         }
         let pose = state.pair_pose;
-        match &mut state.publisher {
-            Publisher::D3D11(publisher) => publisher.record_pose(n, pose),
-            Publisher::D3D12 { publisher, .. } => publisher.record_pose(n, pose),
-        }
         let after = state.after;
         drop(cell);
         if let Some(after) = after {
@@ -451,6 +683,53 @@ impl Driver {
     }
 }
 
+/// Hands eye choices to the camera updates strictly in turn. The game thread's updates and the
+/// presents match one to one, but which comes first wobbles: an update can arrive before the
+/// present that makes its choice, or after the next one. Taking the choice after the last one used,
+/// rather than the newest made, keeps every frame on its own eye through that wobble; only a
+/// lasting offset (an update or a present that had no partner) moves it back into step.
+struct Sequencer {
+    used: u64,
+    run: u32,
+    run_sign: i64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Turn {
+    InStep,
+    Early,
+    Late,
+    Resynced,
+}
+
+impl Sequencer {
+    const NEW: Sequencer = Sequencer { used: 0, run: 0, run_sign: 0 };
+    /// Updates in a row offset the same way before the sequence follows the presents again.
+    const RESYNC_AFTER: u32 = 8;
+
+    /// The choice (1-based) for the next camera update, `made` choices having been made so far.
+    fn next(&mut self, made: u64) -> (u64, Turn) {
+        if self.used == 0 {
+            self.used = made;
+            return (made, Turn::InStep);
+        }
+        let choice = self.used + 1;
+        let offset = (made as i64 - choice as i64).signum();
+        if offset != 0 && offset == self.run_sign {
+            self.run += 1;
+        } else {
+            self.run = u32::from(offset != 0);
+            self.run_sign = offset;
+        }
+        if self.run >= Self::RESYNC_AFTER {
+            *self = Self { used: made, run: 0, run_sign: 0 };
+            return (made, Turn::Resynced);
+        }
+        self.used = choice;
+        (choice, if offset < 0 { Turn::Early } else if offset > 0 { Turn::Late } else { Turn::InStep })
+    }
+}
+
 impl Default for Driver {
     fn default() -> Self {
         Self::new()
@@ -461,6 +740,47 @@ impl Default for Driver {
 mod tests {
     use super::*;
     use monaka_core::options::Options;
+
+    #[test]
+    fn updates_take_choices_in_turn_through_the_wobble() {
+        let mut s = Sequencer::NEW;
+        assert_eq!(s.next(1), (1, Turn::InStep));
+        assert_eq!(s.next(2), (2, Turn::InStep));
+        // Early: a second update before the present making choice 3.
+        assert_eq!(s.next(2), (3, Turn::Early));
+        // Late: two presents before this update; it still takes the next choice, not the newest.
+        assert_eq!(s.next(4), (4, Turn::InStep));
+        assert_eq!(s.next(6), (5, Turn::Late));
+        assert_eq!(s.next(6), (6, Turn::InStep));
+    }
+
+    #[test]
+    fn a_lasting_offset_is_followed() {
+        let mut s = Sequencer::NEW;
+        assert_eq!(s.next(1).0, 1);
+        // A present had no camera update: from here every update is one late.
+        let mut made = 2;
+        let mut last = (0, Turn::InStep);
+        for _ in 0..Sequencer::RESYNC_AFTER {
+            made += 1;
+            last = s.next(made);
+        }
+        assert_eq!(last, (made, Turn::Resynced));
+        assert_eq!(s.next(made + 1), (made + 1, Turn::InStep));
+    }
+
+    #[test]
+    fn a_frame_is_labelled_by_its_camera() {
+        let driver = Driver::new();
+        driver.capture.store(true, Release);
+        let pose = HeadPose { valid: 1, ..HeadPose::default() };
+        driver.camera_written([1.0, 2.0, 3.0], 0, pose);
+        driver.camera_written([1.1, 2.0, 3.0], 1, pose);
+        assert_eq!(driver.label_frame([1.1, 2.0, 3.001]), Some(1));
+        assert_eq!(driver.take_label().map(|l| l.eye), Some(1));
+        assert!(driver.take_label().is_none(), "taken once");
+        assert_eq!(driver.label_frame([5.0, 2.0, 3.0]), None, "no camera written there");
+    }
 
     #[test]
     fn the_default_report_runs_while_the_state_is_held() {

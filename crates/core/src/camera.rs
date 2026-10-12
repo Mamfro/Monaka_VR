@@ -5,7 +5,7 @@
 //! +Y up, looking down -Z), so a head pose composes directly onto it; the view matrix is the
 //! rigid inverse. Both Dying Light engines store cameras this way; other engines convert first.
 
-use crate::math::{Quat, Vec3, cross, unit};
+use crate::math::{Quat, Vec3, cross, dot, unit};
 use crate::protocol::HeadPose;
 
 /// How the head's position moves the view (the `head_position` option).
@@ -350,6 +350,30 @@ pub fn translation(offset: Vec3) -> Mat34 {
     [1.0, 0.0, 0.0, offset[0], 0.0, 1.0, 0.0, offset[1], 0.0, 0.0, 1.0, offset[2]]
 }
 
+/// `v` through `m`'s 3x3 part (a direction or an offset, no translation).
+pub fn apply_3x3(m: &Mat34, v: Vec3) -> Vec3 {
+    [0, 1, 2].map(|r| m[r * 4] * v[0] + m[r * 4 + 1] * v[1] + m[r * 4 + 2] * v[2])
+}
+
+/// `v` taken back through `m`'s 3x3 part, which may scale or mirror (a model's bones can):
+/// [`apply_3x3`] of the result gives `v` again. None when the part is singular.
+pub fn unapply_3x3(m: &Mat34, v: Vec3) -> Option<Vec3> {
+    let rows = [0, 1, 2].map(|r| [m[r * 4], m[r * 4 + 1], m[r * 4 + 2]]);
+    // The inverse's columns are the rows' pairwise crosses over the determinant.
+    let columns = [cross(rows[1], rows[2]), cross(rows[2], rows[0]), cross(rows[0], rows[1])];
+    let det = dot(rows[0], columns[0]);
+    (det.is_finite() && det.abs() > 1e-9).then(|| [0, 1, 2].map(|i| (columns[0][i] * v[0] + columns[1][i] * v[1] + columns[2][i] * v[2]) / det))
+}
+
+/// `m`'s axes (its columns) made a rotation, keeping its x axis and the plane of x and y: a game
+/// matrix that carries a scale or a squash, as a rigid frame.
+pub fn rigid_axes(m: &Mat34) -> [Vec3; 3] {
+    let unit = |v: Vec3| unit(v).unwrap_or(v);
+    let x = unit([m[0], m[4], m[8]]);
+    let z = unit(cross(x, [m[1], m[5], m[9]]));
+    [x, cross(z, x), z]
+}
+
 /// Largest absolute difference between two matrices.
 pub fn distance(a: &Mat34, b: &Mat34) -> f32 {
     a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max)
@@ -459,6 +483,19 @@ mod tests {
     use super::*;
     use core::f32::consts::FRAC_PI_6;
     use crate::math::{IDENTITY, yaw_rotation};
+
+    #[test]
+    fn a_scaled_frame_takes_a_vector_back_and_squares_up() {
+        // Turned 90 degrees about z, x scaled by 2, z mirrored.
+        let m: Mat34 = [0.0, -1.0, 0.0, 5.0, 2.0, 0.0, 0.0, 6.0, 0.0, 0.0, -1.0, 7.0];
+        let v = [0.3, -0.2, 0.9];
+        let back = unapply_3x3(&m, apply_3x3(&m, v)).unwrap();
+        assert!((0..3).all(|k| (back[k] - v[k]).abs() < 1e-6), "{back:?}");
+        assert!(unapply_3x3(&[0.0; 12], v).is_none(), "singular");
+        let [x, y, z] = rigid_axes(&m);
+        assert_eq!((x, y), ([0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]));
+        assert!((dot(z, z) - 1.0).abs() < 1e-6 && dot(x, z).abs() < 1e-6 && dot(y, z).abs() < 1e-6);
+    }
 
     #[test]
     fn head_aim_adds_the_heads_turn_and_keeps_the_games_pitch() {

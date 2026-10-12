@@ -8,14 +8,15 @@
 //!
 //! - **start**: the manifest the launcher meant, the shared settings, the build; each component's
 //!   condition decided in order; the channel opened if a component that is on needs it; each on
-//!   component installed in order into one set of hooks and one [`Ledger`] of what it changes in
-//!   the game (a component this build cannot carry is left off, its features lost with the reason;
-//!   one that cannot install at all refuses the start and the others are undone); the hooks
-//!   enabled together; each component armed.
+//!   component installed in order into one set of hooks, with a [`Ledger`] of its own for what it
+//!   changes in the game (a component this build cannot carry is left off, its features lost with
+//!   the reason and its changes put back; one that cannot install at all refuses the start and the
+//!   others are undone); the hooks enabled together; each component armed.
 //! - **stop**, in phases, each over the components that are on in reverse order: **quiet** (the
 //!   component is off from here: [`on`] answers no and its frame work stops; it stops starting new
-//!   work), **give back** (the ledger's settings put back, then each component's own state, while
-//!   the hooks are in), **unhook**, **release**. A component that may not have let go (a device the
+//!   work), **give back** (each component's ledger put back, then its own state, while the hooks
+//!   are in: a setting goes back when the component that changed it stops, so one listed before
+//!   another outlasts its give-back), **unhook**, **release**. A component that may not have let go (a device the
 //!   engine still calls) is asked after its give-back ([`Component::let_go`]); if it has not, the
 //!   stop ends there, the hooks kept, as a failed hook removal does.
 //!
@@ -95,6 +96,42 @@ impl From<monaka_hook::Error> for Lack {
     }
 }
 
+/// A result a component can do without: an error leaves it off for this build, the error its
+/// reason (`result.missing()?` in an install).
+pub trait Missing<T> {
+    fn missing(self) -> Result<T, Lack>;
+}
+
+impl<T> Missing<T> for Result<T, Rejection> {
+    fn missing(self) -> Result<T, Lack> {
+        self.map_err(|why| Lack::Missing(why.reason))
+    }
+}
+
+impl<T> Missing<T> for Result<T, String> {
+    fn missing(self) -> Result<T, Lack> {
+        self.map_err(Lack::Missing)
+    }
+}
+
+impl<T> Missing<T> for Result<T, monaka_hook::Error> {
+    fn missing(self) -> Result<T, Lack> {
+        self.map_err(|e| Lack::Missing(e.to_string()))
+    }
+}
+
+/// Something a component needs that this build may not have: without it the component is off for
+/// this build, for `why` (`facts.gamedll.as_ref().or_missing("no game DLL")?`).
+pub trait OrMissing<T> {
+    fn or_missing(self, why: &str) -> Result<T, Lack>;
+}
+
+impl<T> OrMissing<T> for Option<T> {
+    fn or_missing(self, why: &str) -> Result<T, Lack> {
+        self.ok_or_else(|| Lack::Missing(why.to_owned()))
+    }
+}
+
 /// One piece of a run. A `const` value; [`Component::NONE`] gives every default, so a component
 /// states only what it does (struct update syntax).
 pub struct Component<G: Game> {
@@ -114,6 +151,8 @@ pub struct Component<G: Game> {
     pub needs_channel: bool,
     /// Reads its own options (also what the manifest test calls, to prove each option is read).
     pub settings: fn(&Options, &Manifest),
+    /// The switch that turns it off ([`Switch`]), before its own condition is asked.
+    pub switch: Option<Switch>,
     /// Whether it is on for this run (its `needs` already on).
     pub on: fn(&Run<'_, G>) -> On,
     /// Makes it for this run: its state, its hooks into `start.hooks`, its game changes into
@@ -154,6 +193,7 @@ impl<G: Game> Component<G> {
         needs: &[],
         needs_channel: false,
         settings: |_, _| {},
+        switch: None,
         on: always::<G>,
         install: nothing::<G>,
         arm: || {},
@@ -174,6 +214,26 @@ impl<G: Game> Component<G> {
             i += 1;
         }
         self.games.is_empty()
+    }
+}
+
+/// An option that turns a component off: `id` (its default the manifest's when the manifest offers
+/// it, else `default`), and why the component is off when it is.
+#[derive(Clone, Copy, Debug)]
+pub struct Switch {
+    pub id: &'static str,
+    pub default: bool,
+    pub off: &'static str,
+}
+
+impl Switch {
+    pub const fn new(id: &'static str, default: bool, off: &'static str) -> Self {
+        Self { id, default, off }
+    }
+
+    /// Whether it is on for `options` of `manifest`.
+    pub fn on(&self, options: &Options, manifest: &Manifest) -> bool {
+        options.switch(self.id, manifest.switch_default(self.id).unwrap_or(self.default))
     }
 }
 
@@ -210,8 +270,8 @@ pub struct Start<'a, G: Game> {
     pub shared: &'a Shared,
     pub build: &'a G::Build,
     pub hooks: &'a mut Hooks,
-    /// What it changes in the game, put back in the stop's give-back phase (on the loader's
-    /// thread; a change the game's own thread must undo is the component's own give-back).
+    /// What it changes in the game, put back at its own give-back (on the loader's thread; a
+    /// change the game's own thread must undo is the component's own give-back).
     pub ledger: &'a mut Ledger,
     channel: Option<&'a ChannelName>,
     installed: &'a [&'static str],
@@ -373,6 +433,9 @@ pub fn read_all<G: Game>(options: &Options, manifest: &Manifest) {
     Shared::from_options(options, manifest);
     for component in G::ADAPTER.components.iter().filter(|c| c.serves(manifest.id)) {
         (component.settings)(options, manifest);
+        if let Some(switch) = component.switch {
+            switch.on(options, manifest);
+        }
     }
 }
 
@@ -415,7 +478,8 @@ pub fn frame<G: Game>(frame: &G::Frame) {
 /// A run in progress: what the stop needs.
 struct Running {
     hooks: Mutex<Option<Hooks>>,
-    ledger: Ledger,
+    /// Each armed component's changes to the game, by its place.
+    ledgers: Vec<(usize, Ledger)>,
     available: Available,
     /// The components armed at the start (their [`ON`] bits then), whatever is on now.
     armed: u64,
@@ -463,10 +527,14 @@ pub fn start<G: Game>(session: &'static Session) -> Result<(), Rejection> {
     for (_, component) in &serving {
         let run = Run::<G> { manifest, options: &options, shared: &shared, build: &build, decided: &decided };
         let missing = component.needs.iter().find(|need| !run.is_on(need));
-        let off = match (missing, (component.on)(&run)) {
+        let switched_off = component.switch.filter(|switch| !switch.on(&options, manifest));
+        let off = match (missing, switched_off) {
             (Some(need), _) => Some(format!("needs {}", need.name)),
-            (None, On::No(why)) => Some(why.to_owned()),
-            (None, On::Yes) => None,
+            (None, Some(switch)) => Some(switch.off.to_owned()),
+            (None, None) => match (component.on)(&run) {
+                On::No(why) => Some(why.to_owned()),
+                On::Yes => None,
+            },
         };
         if let Some(why) = &off {
             log!("{}: off ({why})", component.name);
@@ -481,10 +549,9 @@ pub fn start<G: Game>(session: &'static Session) -> Result<(), Rejection> {
     crate::install_crash_log();
 
     let mut hooks = Hooks::default();
-    let mut ledger = Ledger::new();
-    let mut installed: Vec<(usize, &'static Component<G>)> = Vec::new();
+    let mut installed: Vec<(usize, &'static Component<G>, Ledger)> = Vec::new();
     for (index, component) in wanted {
-        let names: Vec<&'static str> = installed.iter().map(|(_, c)| c.name).collect();
+        let names: Vec<&'static str> = installed.iter().map(|(_, c, _)| c.name).collect();
         // A component it needs did not install (this build lacks it): this one stays off too.
         if let Some(need) = component.needs.iter().find(|need| !names.contains(&need.name)) {
             log!("{}: off for this build (needs {}, which is off)", component.name, need.name);
@@ -493,17 +560,20 @@ pub fn start<G: Game>(session: &'static Session) -> Result<(), Rejection> {
             }
             continue;
         }
+        let mut ledger = Ledger::new();
         let mut start = Start::<G> { session, manifest, options: &options, shared: &shared, build: &build, hooks: &mut hooks, ledger: &mut ledger, channel: channel.as_ref(), installed: &names };
         match step(component.name, "install", || (component.install)(&mut start)) {
-            Ok(()) => installed.push((index, component)),
+            Ok(()) => installed.push((index, component, ledger)),
             Err(Lack::Missing(why)) => {
                 log!("{}: off for this build ({why})", component.name);
+                ledger.restore();
                 for feature in component.features {
                     available.lose(*feature, why.clone());
                 }
             }
             Err(Lack::Fatal(rejection)) => {
-                undo(&installed, &mut ledger);
+                ledger.restore();
+                undo(&mut installed);
                 crate::remove_crash_log();
                 return Err(rejection);
             }
@@ -511,29 +581,30 @@ pub fn start<G: Game>(session: &'static Session) -> Result<(), Rejection> {
     }
     let slot = Mutex::new(None);
     if let Err(rejection) = enable_hooks(&slot, hooks) {
-        undo(&installed, &mut ledger);
+        undo(&mut installed);
         crate::remove_crash_log();
         return Err(rejection);
     }
-    let armed = installed.iter().fold(0, |bits, (i, _)| bits | (1 << i));
+    let armed = installed.iter().fold(0, |bits, (i, _, _)| bits | (1 << i));
     ON.store(armed, Release);
-    for (_, component) in &installed {
+    for (_, component, _) in &installed {
         step(component.name, "arm", component.arm);
     }
     for line in available.report() {
         log!("features: {line}");
     }
-    *RUN.locked() = Some(Running { hooks: slot, ledger, available, armed });
+    let ledgers = installed.into_iter().map(|(place, _, ledger)| (place, ledger)).collect();
+    *RUN.locked() = Some(Running { hooks: slot, ledgers, available, armed });
     Ok(())
 }
 
-/// A start that failed after components installed: each releases what it made, newest first, and
-/// the game gets back what the ledger changed.
-fn undo<G: Game>(installed: &[(usize, &'static Component<G>)], ledger: &mut Ledger) {
-    for (_, component) in installed.iter().rev() {
+/// A start that failed after components installed: each, newest first, gives the game back what
+/// its ledger changed and releases what it made.
+fn undo<G: Game>(installed: &mut [(usize, &'static Component<G>, Ledger)]) {
+    for (_, component, ledger) in installed.iter_mut().rev() {
+        ledger.restore();
         step(component.name, "release (start undone)", component.release);
     }
-    ledger.restore();
 }
 
 /// Stops the run (`producer!`'s `MonakaStop`).
@@ -546,13 +617,15 @@ pub fn stop<G: Game>() -> Result<(), Rejection> {
         ON.fetch_and(!(1 << place), AcqRel);
         step(component.name, "quiet", component.quiet);
     }
-    // The settings the components changed go back first; then each gives back its own state
-    // (waiting on a render thread to free its objects, a window size switched back).
-    let gone = run.ledger.restore();
-    if gone > 0 {
-        log!("{gone} changes not put back: what they changed is gone");
-    }
-    for (_, component) in on.iter().rev() {
+    // Each gives back, newest first: the settings it changed, then its own state (waiting on a
+    // render thread to free its objects, a window size switched back).
+    for (place, component) in on.iter().rev() {
+        if let Some((_, ledger)) = run.ledgers.iter_mut().find(|(p, _)| p == place) {
+            let gone = ledger.restore();
+            if gone > 0 {
+                log!("{}: {gone} changes not put back: what they changed is gone", component.name);
+            }
+        }
         step(component.name, "give back", component.give_back);
         // One that has not let go refuses: the run stays as it is, hooks in, for another try.
         if let Some(let_go) = component.let_go
@@ -653,9 +726,31 @@ mod tests {
 
     const LIVED_GAME: Manifest = Manifest { id: "lived", options: &[], options_file: "lived-options.txt", ..monaka_core::manifest::MONAKA };
 
+    /// A game setting that notes when it is put back (to 0).
+    struct Noted(&'static str);
+
+    impl crate::ledger::Setting for Noted {
+        type Value = u32;
+        fn name(&self) -> String {
+            self.0.to_owned()
+        }
+        fn read(&self) -> Option<u32> {
+            Some(0)
+        }
+        fn write(&self, value: &u32) -> bool {
+            if *value == 0 {
+                call(&format!("{} setting back", self.0));
+            }
+            true
+        }
+    }
+
     const VIDEO: Component<Lived> = Component {
         name: "video",
-        install: |_| called("video install"),
+        install: |start| {
+            start.ledger.set(Noted("video"), 1);
+            called("video install")
+        },
         arm: || call("video arm"),
         quiet: || call("video quiet"),
         give_back: || call("video give back"),
@@ -707,7 +802,8 @@ mod tests {
         let session = Session::open_in(dir.clone(), "lifecycle.log").unwrap();
 
         // A whole run: installed and armed in order, each frame to those on, the stop in phases
-        // over them in reverse.
+        // over them in reverse; a component's settings go back at its own give-back, so they
+        // outlast the give-backs of those after it.
         start::<Lived>(session).unwrap();
         frame::<Lived>(&());
         assert!(on::<Lived>(HANDS_AT) && !on::<Lived>(BROKEN_AT));
@@ -715,8 +811,8 @@ mod tests {
         assert_eq!(
             calls(),
             [
-                "video install", "hands install", "video arm", "hands arm", "hands frame", "hands quiet", "video quiet", "hands give back", "video give back",
-                "hands release", "video release",
+                "video install", "hands install", "video arm", "hands arm", "hands frame", "hands quiet", "video quiet", "hands give back", "video setting back",
+                "video give back", "hands release", "video release",
             ]
         );
         let features = std::fs::read_to_string(dir.join("features.txt")).unwrap();
@@ -730,7 +826,7 @@ mod tests {
         assert!(!on::<Lived>(HANDS_AT) && on::<Lived>(VIDEO_AT));
         stop::<Lived>().unwrap();
         MISSING.store(false, Relaxed);
-        assert_eq!(calls(), ["video install", "hands install", "video arm", "video quiet", "video give back", "video release"]);
+        assert_eq!(calls(), ["video install", "hands install", "video arm", "video quiet", "video setting back", "video give back", "video release"]);
         let features = std::fs::read_to_string(dir.join("features.txt")).unwrap();
         assert!(features.contains("hand rig: lost (no arms in this build)"), "{features}");
 
@@ -744,13 +840,13 @@ mod tests {
         stop::<Lived>().unwrap();
         let tried = calls();
         assert_eq!(&tried[4..7], ["hands quiet", "video quiet", "hands give back"], "{tried:?}");
-        assert_eq!(&tried[7..], ["hands quiet", "video quiet", "hands give back", "video give back", "hands release", "video release"]);
+        assert_eq!(&tried[7..], ["hands quiet", "video quiet", "hands give back", "video setting back", "video give back", "hands release", "video release"]);
 
         // An install that cannot go in refuses the start, and what installed before it is undone.
         FATAL.store(true, Relaxed);
         assert!(start::<Lived>(session).is_err());
         FATAL.store(false, Relaxed);
-        assert_eq!(calls(), ["video install", "hands install", "hands release", "video release"]);
+        assert_eq!(calls(), ["video install", "hands install", "hands release", "video setting back", "video release"]);
         assert!(!on::<Lived>(VIDEO_AT));
     }
 }

@@ -4,7 +4,8 @@
 //! `monaka_stereo::feature::present()` among its components and says, once, what its loop adds
 //! ([`Presents::LOOP`]: its D3D version, its eye-view counter, its own steps around each present);
 //! its eye cameras are a component of its own that `needs` this one and reads
-//! [`Driver::pending`] for the eye and pose to draw.
+//! [`Driver::pending`] for the eye and pose to draw. An engine with a present call of its own
+//! hooks that and calls [`Driver::around_present`] from it ([`Entry::Game`]).
 
 use crate::alternate::AlternatePublisher;
 use crate::alternate12::AlternatePublisher12;
@@ -34,10 +35,20 @@ pub enum Graphics {
     D3D12,
 }
 
+/// Where the loop is entered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Entry {
+    /// DXGI's Present, hooked by the component (every swapchain; the game's is found).
+    Dxgi,
+    /// The game's own present call, hooked by the game, which calls [`Driver::around_present`].
+    Game,
+}
+
 /// What a game's present loop adds to Monaka's ([`Install`] says what each step is for).
 pub struct Loop<G: Game> {
     /// What this build draws with.
     pub graphics: fn(&G::Build) -> Graphics,
+    pub entry: Entry,
     /// The game's draws of eye views, for the rate line: its name and counter.
     pub work: (&'static str, &'static AtomicU64),
     /// D3D12: where the game's direct queue is, for the swapchain presenting (the game may make it
@@ -47,7 +58,10 @@ pub struct Loop<G: Game> {
     pub report: Option<fn(&Driver, &mut HeadPose)>,
     pub before: Option<fn(&Driver, &IDXGISwapChain, u64) -> bool>,
     pub after: Option<fn(&Driver, u64, &HeadPose)>,
-    pub adjust_pose: Option<fn(&mut HeadPose)>,
+    pub adjust_pose: Option<fn(u64, &mut HeadPose)>,
+    pub menu: Option<fn() -> bool>,
+    pub in_turn: bool,
+    pub pose_each_frame: Option<fn() -> bool>,
     pub finish: Option<fn(&Driver)>,
 }
 
@@ -55,7 +69,21 @@ impl<G: Game> Loop<G> {
     /// A loop that adds no step of its own, drawing with `graphics`, its eye views counted by
     /// `work`.
     pub const fn new(graphics: fn(&G::Build) -> Graphics, work: (&'static str, &'static AtomicU64)) -> Self {
-        Loop { graphics, work, queue: None, frame_end: None, report: None, before: None, after: None, adjust_pose: None, finish: None }
+        Loop {
+            graphics,
+            entry: Entry::Dxgi,
+            work,
+            queue: None,
+            frame_end: None,
+            report: None,
+            before: None,
+            after: None,
+            adjust_pose: None,
+            menu: None,
+            in_turn: false,
+            pose_each_frame: None,
+            finish: None,
+        }
     }
 }
 
@@ -84,12 +112,14 @@ fn install<G: Presents>(start: &mut Start<'_, G>) -> Result<(), Lack> {
         Graphics::D3D11 => Publisher::D3D11(AlternatePublisher::new(channel.clone(), shared.schedule)),
         Graphics::D3D12 => Publisher::D3D12 { publisher: AlternatePublisher12::new(channel.clone(), shared.schedule), queue: G::LOOP.queue.unwrap_or(crate::queue12::game_queue) },
     };
-    let Loop { work, frame_end, report, before, after, adjust_pose, finish, .. } = G::LOOP;
-    DRIVER.install(Install { shared, publisher, poses, frame_end, report, work, before, after, adjust_pose, finish });
+    let Loop { entry, work, frame_end, report, before, after, adjust_pose, menu, in_turn, pose_each_frame, finish, .. } = G::LOOP;
+    DRIVER.install(Install { shared, publisher, poses, frame_end, report, work, before, after, adjust_pose, menu, in_turn, pose_each_frame, finish });
     // SAFETY: Present is DXGI's, found on a probe swapchain; ExecuteCommandLists is D3D12's, found
     // on a queue of our own; each detour has its target's signature.
     unsafe {
-        crate::present::hook_dxgi_present(start.hooks, &PRESENT_ORIGINAL, dxgi_present)?;
+        if entry == Entry::Dxgi {
+            crate::present::hook_dxgi_present(start.hooks, &PRESENT_ORIGINAL, dxgi_present)?;
+        }
         if graphics == Graphics::D3D12 && G::LOOP.queue.is_none() {
             crate::queue12::hook(start.hooks)?;
         }
