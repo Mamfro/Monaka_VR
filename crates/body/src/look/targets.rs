@@ -68,6 +68,8 @@ struct Steering {
     applied: HeadAim,
     /// The look written at the last update and the character it was written on.
     written: Option<(usize, Look)>,
+    /// The look the game left over the one written at the last update, and the character.
+    left: Option<(usize, Look)>,
     /// While the game holds the look itself ([`Steering::taken`]).
     taken: Option<Taken>,
 }
@@ -82,46 +84,69 @@ struct Taken {
     kept: u32,
 }
 
-/// Between two updates the look moves only by the player's turning (vertical look input is held
-/// neutral while head aim steers): a pitch moved further, or a yaw moved further than turning
-/// moves it in one update, was written by the game (degrees).
+/// A look head aim wrote and found otherwise at the next update moved by more than this (degrees):
+/// the player's turning or the game. Vertical look input is held neutral while head aim steers, so
+/// a pitch moved is the game's; a yaw moved may be either.
 const TAKEN_PITCH: f32 = 0.5;
 const TAKEN_YAW: f32 = 5.0;
+/// Two looks the game left are the same within this (degrees): it holds a look of its own.
+const HELD_SAME: f32 = 0.01;
 /// The probe's pitch (degrees), and how many probes in a row the game must leave alone before
 /// head aim steers again: a game holding a still look writes the same angles each frame, which
 /// reading alone cannot tell from a game that let go.
 const PROBE_PITCH: f32 = 0.05;
 const PROBES_KEPT: u32 = 3;
 
-/// Logs each change of whether the game holds the look itself (the first few).
-fn note_taken(taken: bool) {
+/// Logs each change of whether the game holds the look itself (the first few); taken, with the look
+/// it holds and the one head aim had written.
+fn note_taken(taken: Option<(Look, Look)>) {
     static LAST: AtomicBool = AtomicBool::new(false);
     static CHANGES: AtomicU64 = AtomicU64::new(0);
-    if LAST.swap(taken, Relaxed) != taken && CHANGES.fetch_add(1, Relaxed) < 40 {
-        log!("head aim: {}", if taken { "the game writes the look itself (a scripted moment); standing down" } else { "the game let go of the look; steering" });
+    if LAST.swap(taken.is_some(), Relaxed) != taken.is_some() && CHANGES.fetch_add(1, Relaxed) < 40 {
+        match taken {
+            Some((held, written)) => log!("head aim: the game holds a look of its own (a scripted moment): {held:?} over the written {written:?}; standing down"),
+            None => log!("head aim: the game let go of the look; steering"),
+        }
     }
 }
 
-/// Whether `stored` is no longer the look written (`written`), turning aside: the game wrote it.
+/// Whether `stored` is no longer the look written (`written`) at the last update.
 fn written_over(stored: Look, written: Look) -> bool {
     (stored.pitch - written.pitch).abs() > TAKEN_PITCH || monaka_core::math::wrap_degrees(stored.yaw - written.yaw).abs() > TAKEN_YAW
 }
 
+/// Whether two looks the game left are the same: a look of its own it holds. A look the game
+/// moves on from the one written (the player's turning, aim assist turning toward a target) is
+/// another at each update.
+fn same(a: Look, b: Look) -> bool {
+    (a.pitch - b.pitch).abs() <= HELD_SAME && monaka_core::math::wrap_degrees(a.yaw - b.yaw).abs() <= HELD_SAME
+}
+
 impl Steering {
-    /// Whether the game holds `character`'s look itself now (a scripted moment, a cutscene steering
-    /// the look every frame): it wrote over the look head aim wrote, and still writes over the
-    /// probes since. Then the head's share is gone from it, and only the probe is written.
+    /// Whether the game holds `character`'s look itself now (a scripted moment, a cutscene setting
+    /// the look every frame): two updates in a row it left the same look over the one head aim
+    /// wrote, and it still writes over the probes since. Then the head's share is gone from it, and
+    /// only the probe is written. A look the game only moves on (aim assist, the player's turning)
+    /// stays head aim's: what it moved is the character's own, as a turn is.
     fn taken(&mut self, character: usize, stored: Look) -> bool {
         if self.taken.is_some_and(|t| t.character != character) {
             self.taken = None;
         }
-        if matches!(self.written, Some((who, written)) if who == character && written_over(stored, written)) {
+        let over = match self.written {
+            Some((who, written)) if who == character && written_over(stored, written) => Some(written),
+            _ => None,
+        };
+        let held = over.filter(|_| matches!(self.left, Some((who, left)) if who == character && same(left, stored)));
+        self.left = over.map(|_| (character, stored));
+        if let Some(written) = held {
             self.applied.forget();
             self.taken = Some(Taken { character, probe: None, kept: 0 });
+            self.left = None;
+            note_taken(Some((stored, written)));
         }
         self.written = None;
         let Some(taken) = &mut self.taken else {
-            note_taken(false);
+            note_taken(None);
             return false;
         };
         match taken.probe {
@@ -131,14 +156,13 @@ impl Steering {
         }
         if taken.kept >= PROBES_KEPT {
             self.taken = None;
-            note_taken(false);
+            note_taken(None);
             return false;
         }
         // Up and down by turns, so probes the game leaves do not add up.
         let probe = stored.pitch + if taken.kept % 2 == 0 { PROBE_PITCH } else { -PROBE_PITCH };
         mem::write(character + self.fields.pitch, probe);
         taken.probe = Some(probe);
-        note_taken(true);
         true
     }
 
@@ -168,6 +192,7 @@ impl Steering {
     fn release(&mut self, character: usize) -> bool {
         // What is in the targets from here on is not head aim's last write.
         self.written = None;
+        self.left = None;
         if !self.applied.holds_share() {
             return false;
         }
@@ -182,7 +207,7 @@ impl Steering {
     }
 }
 
-static STEERING: Mutex<Steering> = Mutex::new(Steering { fields: LookFields { yaw: 0, pitch: 0, convention: Convention::DEGREES_YAW_RIGHT }, applied: HeadAim::NONE, written: None, taken: None });
+static STEERING: Mutex<Steering> = Mutex::new(Steering { fields: LookFields { yaw: 0, pitch: 0, convention: Convention::DEGREES_YAW_RIGHT }, applied: HeadAim::NONE, written: None, left: None, taken: None });
 /// While set, the next update hands the head's share back.
 static RELEASING: AtomicBool = AtomicBool::new(false);
 static UPDATES: AtomicU64 = AtomicU64::new(0);

@@ -266,8 +266,12 @@ pub fn swing_rules(held: Kind, side: usize, settings: &Settings, blade: Option<[
 
 /// Whether a swing attacked within the last `ms` milliseconds.
 pub fn swung_within(ms: u64) -> bool {
-    let at = LAST_SWING.load(Relaxed);
-    at != 0 && monaka_channel::tick().saturating_sub(at) < ms
+    swung_at().is_some_and(|at| monaka_channel::tick().saturating_sub(at) < ms)
+}
+
+/// When the latest swing attacked (`monaka_channel::tick`); none before the first.
+pub fn swung_at() -> Option<u64> {
+    Some(LAST_SWING.load(Relaxed)).filter(|&at| at != 0)
 }
 
 fn side_name(side: usize) -> &'static str {

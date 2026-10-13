@@ -176,7 +176,7 @@ fn each_update_steers_and_bakes_as_before() {
     let mut chrome = Chrome { steer: Steer { applied: HeadAim::NONE }, baked: BakedYaw::EMPTY };
     let rig = AimSettings { hand_rig: true, ..HEAD_ONLY };
     RELEASING.store(false, Relaxed);
-    *STEERING.locked() = Steering { fields: FIELDS, applied: HeadAim::NONE, written: None, taken: None };
+    *STEERING.locked() = Steering { fields: FIELDS, applied: HeadAim::NONE, written: None, left: None, taken: None };
     // Updates: (head yaw and pitch, or no head; the game's frame; a cutscene has the player; the
     // settings; what is in hand aims itself; the stop has begun).
     let updates = [

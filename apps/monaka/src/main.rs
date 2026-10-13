@@ -814,13 +814,13 @@ impl App {
             self.hows.push(HowRow { how, title: static_text(self.hwnd, how.action, 0), text: static_text(self.hwnd, "", 0) });
         }
         // The tabs this game has options (or how-tos) in, an option a how-to names counting for the
-        // Controls tab; a tab it lacks falls back to Main.
+        // Controls tab; a tab it lacks falls back to its first (Main, where it has one).
         let has_hows = !self.hows.is_empty();
         let tab_of = |row: &Row| if self.tuned(row) { Shown::Controls } else { row.opt.shown };
         self.tabs_shown =
             TABS.iter().map(|(t, _)| *t).filter(|t| self.rows.iter().any(|r| tab_of(r) == *t) || (*t == Shown::Controls && has_hows)).collect();
         if !self.tabs_shown.contains(&self.tab) {
-            self.tab = Shown::Main;
+            self.tab = self.tabs_shown.first().copied().unwrap_or(Shown::Main);
         }
         set_tabs(self.tabs, &TABS.iter().filter(|(t, _)| self.tabs_shown.contains(t)).map(|(_, n)| *n).collect::<Vec<_>>());
         show(self.tabs, self.tabs_shown.len() > 1);
