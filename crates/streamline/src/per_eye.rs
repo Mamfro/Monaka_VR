@@ -33,6 +33,19 @@ pub static ENABLED: AtomicBool = AtomicBool::new(false);
 /// The motion-vector rebase (off leaves the game's vectors, to test the viewports and constants
 /// alone).
 pub static FIX_MOTION: AtomicBool = AtomicBool::new(true);
+/// The game itself keeps each eye's own previous frame ([`use_game_history`]): its constants and
+/// motion vectors pass as it made them, only the viewport is the eye's.
+static GAME_HISTORY: AtomicBool = AtomicBool::new(false);
+
+/// The game describes each eye's own previous frame itself (a producer that hands each eye's
+/// render its own previous camera, as same-frame stereo can): each eye keeps its own DLSS history,
+/// with the game's constants and motion vectors as they are, nothing rebased.
+pub fn use_game_history(on: bool) {
+    GAME_HISTORY.store(on, Relaxed);
+    if on {
+        FIX_MOTION.store(false, Relaxed);
+    }
+}
 
 /// Whether per-eye DLSS runs (armed, and not given back).
 pub fn enabled() -> bool {
@@ -68,8 +81,15 @@ pub type MakeRebase = fn(&ID3D12Device) -> Result<Box<dyn MotionRebase>, String>
 const VIEWPORT_BYTES: usize = 40;
 const RESOURCE_BYTES: usize = 128;
 const OPTIONS_BYTES: usize = 512;
-/// How far object motion is carried: the eye's previous frame is two frames back.
-const OBJECT_SCALE: f32 = 2.0;
+/// How far object motion is carried: the eye's previous frame is two frames back
+/// ([`set_object_scale`]; `f32` bits).
+static OBJECT_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x4000_0000);
+
+/// How far object motion is carried onto each eye's previous frame (2: two frames' worth, the
+/// default; a probe tries others).
+pub fn set_object_scale(scale: f32) {
+    OBJECT_SCALE.store(scale.to_bits(), Relaxed);
+}
 
 type Bytes<const N: usize> = Aligned16<[u8; N]>;
 
@@ -114,7 +134,7 @@ static STATE: Mutex<State> = Mutex::new(State {
 /// Arms per-eye DLSS: it starts once the game sets its DLSS options. `make` makes the motion
 /// rebase; `fix_motion` off leaves the game's motion vectors.
 pub fn arm(make: MakeRebase, fix_motion: bool) {
-    FIX_MOTION.store(fix_motion, Relaxed);
+    FIX_MOTION.store(fix_motion && !GAME_HISTORY.load(Relaxed), Relaxed);
     state().make_fixer = Some(make);
     ENABLED.store(true, Relaxed);
 }
@@ -199,7 +219,10 @@ pub fn constants(constants: *const u8, viewport: *const u8, eye: Option<usize>) 
     let game_to_prev = copy.matrix(at::CLIP_TO_PREV_CLIP);
     let mvec_scale = copy.vec2(at::MVEC_SCALE);
     s.previous.frame(eye, (), false);
+    let game_history = GAME_HISTORY.load(Relaxed);
     let same_to_prev = match (s.previous.previous(eye).copied(), invert(&now)) {
+        // The game's own matrices already describe this eye's previous frame.
+        (Some(_), _) if game_history => game_to_prev,
         (Some(previous), Some(inverse)) => {
             let to_prev = multiply(&inverse, &previous);
             if let Some(from_prev) = invert(&previous).map(|p| multiply(&p, &now)) {
@@ -216,7 +239,7 @@ pub fn constants(constants: *const u8, viewport: *const u8, eye: Option<usize>) 
     };
     s.previous.keep(eye, now);
     s.eye = Some(eye);
-    s.fix = Some(Rebase { game_to_prev, same_to_prev, mvec_scale, object_scale: OBJECT_SCALE });
+    s.fix = Some(Rebase { game_to_prev, same_to_prev, mvec_scale, object_scale: f32::from_bits(OBJECT_SCALE.load(Relaxed)) });
     s.constants = Some(copy);
     COUNTERS.frames.fetch_add(1, Relaxed);
     Some((s.constants.as_ref()?.as_ptr(), s.eye_viewports[eye].0.as_ptr()))
