@@ -42,6 +42,12 @@ pub(super) struct Frames {
 
 impl Frames {
     pub(super) const NEW: Frames = Frames { written: [None; WRITTEN_KEPT], next: 0, label: None, labelling: false, sequencer: Sequencer::NEW, pair_pose: HeadPose::EMPTY };
+
+    /// The label of the camera written nearest `position`, within [`SAME_CAMERA`].
+    fn written_at(&self, position: Vec3) -> Option<Label> {
+        let distance = |p: &Vec3| (0..3).map(|i| (p[i] - position[i]).abs()).fold(0.0, f32::max);
+        self.written.iter().flatten().filter(|(p, _)| distance(p) < SAME_CAMERA).min_by(|a, b| distance(&a.0).total_cmp(&distance(&b.0))).map(|(_, label)| *label)
+    }
 }
 
 impl Driver {
@@ -61,9 +67,7 @@ impl Driver {
             return None;
         }
         let mut frames = self.frames.locked();
-        let distance = |p: &Vec3| (0..3).map(|i| (p[i] - position[i]).abs()).fold(0.0, f32::max);
-        let found = frames.written.iter().flatten().filter(|(p, _)| distance(p) < SAME_CAMERA).min_by(|a, b| distance(&a.0).total_cmp(&distance(&b.0))).map(|(_, label)| *label);
-        match found {
+        match frames.written_at(position) {
             Some(label) => {
                 frames.label = Some(label);
                 frames.labelling = true;
@@ -75,6 +79,15 @@ impl Driver {
                 None
             }
         }
+    }
+
+    /// The eye of the camera written at `position`, if one was lately (nothing labelled: the
+    /// renderer asking before the frame's own label).
+    pub fn eye_at(&self, position: Vec3) -> Option<usize> {
+        if !position.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        self.frames.locked().written_at(position).map(|label| label.eye)
     }
 
     /// The label of the frame about to present, left for the present loop.

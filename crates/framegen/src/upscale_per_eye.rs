@@ -12,6 +12,10 @@
 //!   that eye's context. A frame whose chain is broken (the first, or after a frame of the same eye)
 //!   resets its eye's history.
 //!
+//! When the game itself renders each eye against that eye's own previous frame
+//! ([`use_game_history`]), its vectors already reach that frame and pass as they are: only the
+//! context is the eye's.
+//!
 //! The vectors are chained in the scale the game gives FSR for them (to render pixels), read in the
 //! state it describes them in.
 
@@ -31,6 +35,8 @@ use windows::core::Interface;
 
 /// Per-eye upscaling is on for this run.
 static ON: AtomicBool = AtomicBool::new(false);
+/// The game's motion vectors already reach each eye's own previous frame ([`use_game_history`]).
+static GAME_HISTORY: AtomicBool = AtomicBool::new(false);
 /// The game's answer, during its dispatch, to which eye the frame being upscaled is.
 pub type EyeOfFrame = fn() -> Option<usize>;
 
@@ -48,17 +54,26 @@ struct State {
     /// The game's motion vectors of the frame before, and its eye.
     previous: Option<ID3D12Resource>,
     previous_eye: Option<usize>,
+    /// Each eye has been upscaled on its context since it was made (with the game's history, a
+    /// first frame resets it).
+    seen: [bool; 2],
     /// Something failed for good: the game's upscaling runs as it was.
     broken: bool,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { game: 0, twin: 0, composer: None, previous: None, previous_eye: None, broken: false });
+static STATE: Mutex<State> = Mutex::new(State { game: 0, twin: 0, composer: None, previous: None, previous_eye: None, seen: [false; 2], broken: false });
 
 /// Per-eye upscaling on for the run: `eye` tells, during the game's dispatch, which eye the frame
 /// being upscaled is (`None`: no eye's, upscaled as the game made it).
 pub fn arm(eye: EyeOfFrame) {
     *EYE.locked() = Some(eye);
     ON.store(true, Release);
+}
+
+/// The game describes each eye's own previous frame itself (a producer that hands each eye's
+/// render its own previous camera): its motion vectors pass as they are, nothing chained.
+pub fn use_game_history(on: bool) {
+    GAME_HISTORY.store(on, Relaxed);
 }
 
 /// At stop, first: the game's upscales go to its own context again, and no new twin is made (the
@@ -95,7 +110,7 @@ pub unsafe fn created(create: CreateFn, context: *mut *mut c_void, desc: *const 
     let mut s = STATE.locked();
     if made == 0 && !twin.is_null() {
         log!("fsr: the game's upscale context {game:#x} has a twin {:#x} for the right eye", twin as usize);
-        (s.game, s.twin, s.previous_eye) = (game, twin as usize, None);
+        (s.game, s.twin, s.previous_eye, s.seen) = (game, twin as usize, None, [false; 2]);
     } else {
         log!("fsr: no twin context ({made:#x}); the game's upscaling runs as it is");
         (s.game, s.twin) = (0, 0);
@@ -144,9 +159,11 @@ pub unsafe fn dispatch(dispatch: DispatchFn, handle: usize, desc: *const c_void)
         log_first!(3, "fsr: the game's upscale has no command list or motion vectors");
         return None;
     };
+    let game_history = GAME_HISTORY.load(Relaxed);
     let motion_state = state::d3d12(game.motion_vectors.state).unwrap_or(motion::READABLE);
-    let chained = chain(&mut s, list, motion, motion_state, eye, [game.motion_vector_scale.x, game.motion_vector_scale.y]);
-    let reset = game.reset || chained.is_none();
+    let chained = if game_history { None } else { chain(&mut s, list, motion, motion_state, eye, [game.motion_vector_scale.x, game.motion_vector_scale.y]) };
+    let first = !std::mem::replace(&mut s.seen[eye], true);
+    let reset = game.reset || if game_history { first } else { chained.is_none() };
     if let Some(output) = &chained {
         copy.set_motion_vectors(Resource::texture(output, state::PIXEL_COMPUTE_READ, None));
     }
@@ -158,7 +175,8 @@ pub unsafe fn dispatch(dispatch: DispatchFn, handle: usize, desc: *const c_void)
     drop(s);
     let n = UPSCALED[eye].fetch_add(1, Relaxed);
     if n < 3 {
-        log!("fsr: eye {eye} upscaled on its own context ({}chained{})", if chained.is_some() { "" } else { "not " }, if reset { ", reset" } else { "" });
+        let vectors = if game_history { "the game's vectors" } else if chained.is_some() { "chained" } else { "not chained" };
+        log!("fsr: eye {eye} upscaled on its own context ({vectors}{})", if reset { ", reset" } else { "" });
     }
     // SAFETY: the loader's dispatch on the eye's context (the game's or our twin of it), with a copy
     // of the game's description that lives through the call.
