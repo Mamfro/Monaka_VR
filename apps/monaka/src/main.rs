@@ -146,7 +146,8 @@ fn create_main_window(off_screen: bool) -> Option<HWND> {
             return None;
         }
         let style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
-        let hwnd = CreateWindowExW(WS_EX_CONTROLPARENT, w!("monaka.window"), w!("Monaka VR"), style, CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, None, None, Some(instance.into()), None).ok()?;
+        let title = HSTRING::from(concat!("Monaka VR ", env!("CARGO_PKG_VERSION")));
+        let hwnd = CreateWindowExW(WS_EX_CONTROLPARENT, w!("monaka.window"), &title, style, CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, None, None, Some(instance.into()), None).ok()?;
         // Size for the monitor's DPI now that the window is on one.
         let dpi = GetDpiForWindow(hwnd);
         let mut rect = RECT { left: 0, top: 0, right: scale(940, dpi), bottom: scale(700, dpi) };

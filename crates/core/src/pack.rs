@@ -42,7 +42,8 @@ pub struct Contract {
 ///   [`crate::manifest::DISABLE_VIEW_BOBBING`]).
 /// - 1.3: the Controls tab: the `controls` tab word, a game's how-tos (`control`, `way`, `tunes`
 ///   lines; [`crate::manifest::HowTo`]), and conditions on any value but one (`!value`).
-pub const CONTRACT: Contract = Contract { major: 1, minor: 3 };
+/// - 2.0: the `engine` tab word is gone: a 1.x pack that puts an option there cannot be read.
+pub const CONTRACT: Contract = Contract { major: 2, minor: 0 };
 
 /// Who made a pack and where it comes from, as the pack itself says (nothing checks it): its
 /// crate's `authors` and `repository`. Empty where the crate names none, or the pack predates 1.1.
