@@ -40,6 +40,9 @@ pub struct Fired {
     /// The aim the game made the shot along, where it says (unit): a pellet's spread is its turn
     /// away from this.
     pub aim: Option<Vec3>,
+    /// The hand whose weapon fired it, where the game tells (a gun in each hand); none: the aim
+    /// hand.
+    pub side: Option<usize>,
 }
 
 /// Where a shot leaves from and which way (unit), and how fast where that changes (m/s; none keeps

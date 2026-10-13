@@ -7,8 +7,12 @@
 //!
 //! The actions provider ([`actions`]): a game's actions pressed by what they mean
 //! ([`crate::actions`]), listed by a game that implements [`Actions`].
+//!
+//! The VR button layout ([`remap`]): some of the controllers' buttons reaching the game as others
+//! ([`crate::remap`]), listed by a game that implements [`Remaps`].
 
 use crate::actions::Actions;
+use crate::remap::Remaps;
 use monaka_core::feature::Feature;
 use monaka_core::manifest::CONTROLLER_PAD;
 use monaka_producer::game::{Component, Game, Lack, On, Start};
@@ -78,6 +82,13 @@ pub const fn actions<G: Actions>() -> Component<G> {
 fn install_actions<G: Actions>(_: &mut Start<'_, G>) -> Result<(), Lack> {
     crate::actions::install::<G>();
     Ok(())
+}
+
+/// The VR button layout for game `G` ([`crate::remap`]): from its arm the controllers' buttons
+/// reach the game as its [`Remaps`] say, at its stop as they are. A game lists it after its
+/// gamepad, with the switch that turns it off.
+pub const fn remap<G: Remaps>() -> Component<G> {
+    Component { name: "vr buttons", arm: crate::remap::install::<G>, quiet: crate::remap::release, ..Component::NONE }
 }
 
 fn release() {

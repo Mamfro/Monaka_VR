@@ -7,11 +7,11 @@ use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessCommandL
 use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE, UNICODE_STRING};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
-use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW};
+use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW};
 use windows::Win32::System::Threading::{GetExitCodeProcess, IsWow64Process, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
 use windows::Win32::UI::Shell::{FOLDERID_Documents, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use windows::core::{HSTRING, w};
+use windows::core::{HSTRING, PCWSTR, w};
 
 /// A running process.
 #[derive(Clone, Debug)]
@@ -164,17 +164,33 @@ pub fn steamvr_openxr() -> Result<OpenXr, String> {
 
 /// Steam's install folder, from the registry.
 fn steam_folder() -> Option<PathBuf> {
+    registry_text(HKEY_CURRENT_USER, w!(r"Software\Valve\Steam"), w!("SteamPath")).map(PathBuf::from)
+}
+
+/// Windows' version and build (`24H2, build 26100.4061`), for logs.
+pub fn windows_build() -> String {
+    let key = w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+    let build = registry_text(HKEY_LOCAL_MACHINE, key, w!("CurrentBuild")).unwrap_or_else(|| "?".into());
+    let update = registry_number(HKEY_LOCAL_MACHINE, key, w!("UBR")).map_or_else(String::new, |ubr| format!(".{ubr}"));
+    let release = registry_text(HKEY_LOCAL_MACHINE, key, w!("DisplayVersion")).map_or_else(String::new, |r| format!("{r}, "));
+    format!("{release}build {build}{update}")
+}
+
+fn registry_text(root: HKEY, key: PCWSTR, value: PCWSTR) -> Option<String> {
     let mut buffer = vec![0u16; 1024];
     let mut bytes = (buffer.len() * 2) as u32;
     // SAFETY: reads a string value into our buffer, whose size in bytes is passed.
-    let read = unsafe {
-        RegGetValueW(HKEY_CURRENT_USER, w!(r"Software\Valve\Steam"), w!("SteamPath"), RRF_RT_REG_SZ, None, Some(buffer.as_mut_ptr().cast()), Some(&mut bytes))
-    };
-    if read.is_err() {
-        return None;
-    }
+    unsafe { RegGetValueW(root, key, value, RRF_RT_REG_SZ, None, Some(buffer.as_mut_ptr().cast()), Some(&mut bytes)) }.ok().ok()?;
     let end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
-    Some(PathBuf::from(String::from_utf16_lossy(&buffer[..end])))
+    Some(String::from_utf16_lossy(&buffer[..end]))
+}
+
+fn registry_number(root: HKEY, key: PCWSTR, value: PCWSTR) -> Option<u32> {
+    let mut number = 0u32;
+    let mut bytes = size_of::<u32>() as u32;
+    // SAFETY: reads a DWORD value into `number`, whose size in bytes is passed.
+    unsafe { RegGetValueW(root, key, value, RRF_RT_REG_DWORD, None, Some((&raw mut number).cast()), Some(&mut bytes)) }.ok().ok()?;
+    Some(number)
 }
 
 /// Every Steam library folder (including Steam's own).
@@ -232,5 +248,12 @@ mod tests {
     #[test]
     fn finds_documents() {
         assert!(documents().is_some_and(|d| d.is_absolute()));
+    }
+
+    #[test]
+    fn reads_the_windows_build() {
+        let build = windows_build();
+        let number = build.split("build ").nth(1).and_then(|b| b.split('.').next()).and_then(|b| b.parse::<u32>().ok());
+        assert!(number.is_some_and(|n| n >= 10_240), "{build}");
     }
 }

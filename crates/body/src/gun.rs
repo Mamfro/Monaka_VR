@@ -3,9 +3,10 @@
 //! pellet keeps its spread around the aim, turned onto the barrel.
 //!
 //! A game implements the fire hook (`crate::launch::Fires`: each projectile of the player's shot
-//! asked of the ready-made, with the aim the game made it along) and the held item (the gun in the
-//! aiming hand, its barrel's line on its holder, `crate::held`). The barrel is that line where the
-//! hand rig last posed the holder ([`crate::held::in_world`]), the muzzle at its end.
+//! asked of the ready-made, with the aim the game made it along and, with a gun in each hand, the
+//! hand that fired it) and the held item (the gun in that hand, its barrel's line on its holder,
+//! `crate::held`). The barrel is that line where the gun is ([`crate::held::in_world`]: where the
+//! hand rig last posed the holder, or where the game put the gun itself), the muzzle at its end.
 
 use crate::held::{self, HeldItems};
 use crate::launch::{self, Fired, Fires, Shot, Weapon};
@@ -69,7 +70,7 @@ pub fn from_barrel(fired: &Fired, muzzle: Vec3, barrel: Vec3) -> Option<Shot> {
 }
 
 fn shot<G: Fires + HeldItems>(fired: &Fired) -> Option<Shot> {
-    let side = *AIM_SIDE.locked();
+    let side = fired.side.unwrap_or_else(|| *AIM_SIDE.locked());
     if held::now::<G>(side).kind != Kind::Gun {
         return None;
     }

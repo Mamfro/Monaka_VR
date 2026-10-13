@@ -2,7 +2,7 @@ use super::*;
 use crate::launch::Flight;
 
 fn fired(velocity: Vec3, aim: Option<Vec3>) -> Fired {
-    Fired { weapon: Weapon::Gun, game: Flight { from: [0.0; 3], velocity }, aim }
+    Fired { weapon: Weapon::Gun, game: Flight { from: [0.0; 3], velocity }, aim, side: None }
 }
 
 #[test]

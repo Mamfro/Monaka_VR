@@ -154,6 +154,44 @@ pub trait HeldItems: HandRig {
     fn line(side: usize) -> Option<Line>;
     /// Its model: a weapon's blade tip, a bow's string and nock.
     fn model(side: usize) -> Option<Self::Model>;
+    /// Where the game itself put what hand `side` holds in the world, for a game that places the
+    /// item (a gun on its controller, the arms hanging from it) rather than the hand rig's holder:
+    /// the holder, its line there, when it was put. None: where the rig posed it ([`in_world`]).
+    fn placed(_side: usize) -> Option<InWorld> {
+        None
+    }
+}
+
+/// An item model that reads nothing, for a game whose items' models are not read
+/// ([`HeldItems::Model`]).
+pub struct NoModel;
+
+impl Skeleton for NoModel {
+    fn id(&self) -> usize {
+        0
+    }
+
+    fn count(&self) -> i32 {
+        0
+    }
+
+    fn name(&self, _: i32) -> String {
+        String::new()
+    }
+
+    fn parent(&self, _: i32) -> i32 {
+        -1
+    }
+
+    fn world(&self, _: i32) -> Option<Mat34> {
+        None
+    }
+
+    fn set_world(&self, _: i32, _: &Mat34) {}
+
+    fn is_bone(&self, _: i32) -> bool {
+        false
+    }
 }
 
 /// What a hand holds, as a feature reads it ([`now`]).
@@ -275,11 +313,15 @@ pub struct InWorld {
     pub posed: u64,
 }
 
-/// Where what hand `side` of game `G` holds is now, in the world: its holder as the hand rig last
-/// posed the arms ([`crate::hand_rig::posed`]: read back after its write) and its line there. On the
-/// game's thread, after the posing moment (its line may read the item's model). None before the rig
-/// has posed the arms, or where the game names no holder for that hand.
+/// Where what hand `side` of game `G` holds is now, in the world: where the game put it itself
+/// ([`HeldItems::placed`]), else its holder as the hand rig last posed the arms
+/// ([`crate::hand_rig::posed`]: read back after its write) and its line there. On the game's
+/// thread, after the posing moment (its line may read the item's model). None before the rig has
+/// posed the arms, or where the game names no holder for that hand.
 pub fn in_world<G: HeldItems>(side: usize) -> Option<InWorld> {
+    if let Some(placed) = G::placed(side) {
+        return Some(placed);
+    }
     let posed = crate::hand_rig::posed()?;
     let holder = posed.holders[side.min(1)]?;
     Some(InWorld { holder, line: G::line(side).and_then(|line| line.in_world(&holder)), posed: posed.at })

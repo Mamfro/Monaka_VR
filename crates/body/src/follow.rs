@@ -194,10 +194,13 @@ pub(crate) fn carry(skeleton: &dyn Skeleton, before: &Snapshot, pose: &Pose, fra
         return Err("not finite");
     }
     // The off hand: on the weapon when the game holds it two-handed, else on its own controller.
+    // Only a weapon is held two-handed: with the aim hand reported empty, an animation bringing
+    // the hands together never hands the off arm the aim controller's move.
     let off = arms.sides[off_side];
     let anchor = position(world(aim.holder.unwrap_or(aim.joints[2])));
     let off_wrist = position(world(off.joints[2]));
-    let both_hands = two_handed(monaka_core::math::distance(anchor, off_wrist));
+    let holds_weapon = crate::held::latest(aim_side).is_some_and(|held| matches!(held.kind, crate::held::Kind::Gun | crate::held::Kind::Melee | crate::held::Kind::Blade));
+    let both_hands = two_handed(if holds_weapon { monaka_core::math::distance(anchor, off_wrist) } else { f32::INFINITY });
     let off_move = if both_hands {
         Some(aim_move)
     } else {

@@ -1,5 +1,5 @@
-//! AFW on D3D11 (alternate-eye rendering with depth) as a ready-made component
-//! ([`frame_warping`]) on the present loop, for a D3D11 game with frame inputs
+//! AFW on D3D11 as a ready-made component ([`frame_warping`], the core's shape:
+//! [`crate::afw::component`]) on the present loop, for a D3D11 game with frame inputs
 //! (`crate::providers::FrameInputs11`): a pair every frame, this frame's real eye and the other eye
 //! reprojected from it ([`super::Afw11`]), the HUD a layer over both eyes.
 //!
@@ -7,14 +7,15 @@
 //! frame's world image at its scene copy ([`capture`]) and the HUD's draws ([`hud_targets`]). The
 //! present loop's step ([`before_present`], joined at install) publishes the pair.
 
-use super::{EyeCameras, Afw11};
-use crate::driver::Driver;
+use super::{Afw11, At, EyeCameras};
+use crate::afw::{self, Counters, Shot};
+use crate::driver::{Driver, Pending};
 use crate::feature::Presents;
 use crate::providers::FrameInputs11;
 use monaka_core::alternate::{PresentRing, Schedule};
 use monaka_core::protocol::HeadPose;
 use monaka_core::sync::Locked;
-use monaka_producer::game::{Component, Lack, Missing, Start};
+use monaka_producer::game::{Component, Every, Lack, Missing, Start};
 use monaka_producer::log;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering::*};
@@ -22,17 +23,10 @@ use windows::Win32::Graphics::Direct3D11::{ID3D11DeviceContext, ID3D11RenderTarg
 use windows::Win32::Graphics::Dxgi::IDXGISwapChain;
 
 /// Frame warping on D3D11 for game `G` (AFW, the stereo method `stereo=afw`): a pair every frame;
-/// the HUD a layer over both eyes while it is shown. The game says when it is on (`on`) and what it
-/// works on top of (`needs`: its eyes) by struct update.
+/// the HUD a layer over both eyes while it is shown. The game says when it is on ([`afw::on`]) and
+/// what it works on top of (`needs`: its eyes) by struct update.
 pub const fn frame_warping<G: Presents + FrameInputs11>() -> Component<G> {
-    Component {
-        name: "frame warping",
-        needs_channel: true,
-        install: install::<G>,
-        release,
-        summary: Some(summary),
-        ..Component::NONE
-    }
+    afw::component(install::<G>, release, &EVERY, summary, true)
 }
 
 /// What frame warping reads of its game.
@@ -40,6 +34,7 @@ pub const fn frame_warping<G: Presents + FrameInputs11>() -> Component<G> {
 struct GameFns {
     scene_depth: fn(u64) -> Option<ID3D11Texture2D>,
     eye_rects: fn(&HeadPose, u32, u32) -> [[f32; 4]; 2],
+    presenting: fn() -> Option<Pending>,
 }
 
 struct State {
@@ -57,6 +52,9 @@ static STATE: Mutex<Cell> = Mutex::new(Cell(State { game: None, afw: None, camer
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static HUD_LAYER: AtomicBool = AtomicBool::new(false);
 static CAPTURED: AtomicBool = AtomicBool::new(false);
+pub(super) static COUNTERS: Counters = Counters::new();
+
+const EVERY: [Every; 1] = [Every::millis(afw::REPORT_MS, log_report)];
 
 fn install<G: Presents + FrameInputs11>(start: &mut Start<'_, G>) -> Result<(), Lack> {
     let hud = start.shared.hud.shown;
@@ -67,7 +65,7 @@ fn install<G: Presents + FrameInputs11>(start: &mut Start<'_, G>) -> Result<(), 
     }
     let mut state = STATE.locked();
     state.0.afw = Some(afw);
-    state.0.game = Some(GameFns { scene_depth: G::scene_depth, eye_rects: crate::hud11::eye_rects::<G> });
+    state.0.game = Some(GameFns { scene_depth: G::scene_depth, eye_rects: crate::hud11::eye_rects::<G>, presenting: G::presenting });
     drop(state);
     HUD_LAYER.store(hud, Release);
     crate::driver::join_present(before_present);
@@ -104,26 +102,23 @@ pub fn record_cameras(chosen_at: u64, cameras: EyeCameras) {
 }
 
 /// Keeps the frame shown at present `n` (its world image is `color` now) as its eye's latest real
-/// frame, once per frame.
+/// frame, once per frame: which eye and how it was rendered by the core ([`Shot::scheduled`]).
 pub fn capture(context: &ID3D11DeviceContext, color: &ID3D11Texture2D, n: u64, schedule: Schedule) {
     if !enabled() || CAPTURED.swap(true, AcqRel) {
         return;
     }
-    let eye = schedule.eye_at(n);
-    let chosen_at = schedule.chosen_at(n);
     let Some(game) = STATE.lock().ok().and_then(|s| s.0.game) else { return };
     let Some(depth) = (game.scene_depth)(n) else { return };
     let Ok(mut state) = STATE.lock() else { return };
     let State { afw, cameras, .. } = &mut state.0;
-    let Some(cameras) = cameras.get(chosen_at) else { return };
-    if eye != Schedule::camera_eye(chosen_at) {
-        return;
-    }
+    let Some(shot) = Shot::scheduled(schedule, n, cameras) else { return };
     if let Some(afw) = afw.as_mut() {
-        afw.capture(context, eye, color, &depth, &cameras);
+        afw.capture(context, &shot, color, &depth);
     }
     static DIAGNOSED: AtomicBool = AtomicBool::new(false);
-    if !DIAGNOSED.swap(true, Relaxed) {
+    if !DIAGNOSED.swap(true, Relaxed)
+        && let Some(cameras) = cameras.get(schedule.chosen_at(n))
+    {
         diagnose_depth(context, &depth, &cameras);
     }
 }
@@ -161,9 +156,10 @@ fn diagnose_depth(context: &ID3D11DeviceContext, depth: &ID3D11Texture2D, camera
 }
 
 /// The present loop's step (joined at install): the frame not captured at its scene copy (no HUD
-/// draws) taken now, then this frame's pair published, the HUD layer at its place in each eye (from
-/// the latest pose: frame warping publishes from present `latency` on, a present before the schedule
-/// calls a frame shown). True: the loop publishes nothing itself.
+/// draws) taken now, then what the core says goes out (the pair, by the rules) published, the HUD
+/// layer at its place in each eye (from the latest pose: frame warping publishes from present
+/// `latency` on, a present before the schedule calls a frame shown). True: the loop publishes
+/// nothing itself.
 pub fn before_present(driver: &Driver, chain: &IDXGISwapChain, n: u64) -> bool {
     if !enabled() {
         return false;
@@ -175,19 +171,32 @@ pub fn before_present(driver: &Driver, chain: &IDXGISwapChain, n: u64) -> bool {
         let size = monaka_channel::d3d::texture_desc(&image);
         let Some(game) = STATE.lock().ok().and_then(|s| s.0.game) else { return true };
         let rects = (game.eye_rects)(&driver.pending_pose(), size.Width, size.Height);
+        let at = At { head: driver.head(), hud_rects: rects, flat: driver.flat().is_some(), label: (game.presenting)(), present: n };
         CAPTURED.store(false, Release);
         if let Ok(mut state) = STATE.lock()
             && let Some(afw) = state.0.afw.as_mut()
         {
-            afw.publish(&device, &context, &image, driver.head(), rects, |pose| driver.report(pose));
+            afw.publish(&device, &context, &image, &at, |pose| driver.report(pose));
         }
     }
     true
 }
 
+fn log_report(_: f64) {
+    log!("{}", report());
+}
+
+/// The periodic report's line (the core's, [`afw::report_line`]): no depth goes with the pairs and
+/// no frame generation runs on D3D11.
+pub fn report() -> String {
+    let (counts, captured) = STATE.lock().ok().and_then(|s| s.0.afw.as_ref().map(Afw11::counts)).unwrap_or_default();
+    afw::report_line(captured, counts, &COUNTERS, 0, None)
+}
+
 fn summary() -> String {
-    match STATE.locked().0.afw.as_ref() {
-        Some(afw) => format!("alternate-eye with depth: pairs={} failures={}", afw.pairs(), afw.failures()),
+    let published = STATE.locked().0.afw.as_ref().map(Afw11::published);
+    match published {
+        Some((pairs, failures)) => format!("{}; alternate-eye with depth: pairs={pairs} failures={failures}", report()),
         None => String::new(),
     }
 }

@@ -11,7 +11,8 @@
 //! On D3D12, [`warp12`]: both eyes warped from one rendered frame and its depth on the game's
 //! queue (depth stereo), with the game's UI layer laid back over each eye; and [`reproject12`]:
 //! a frame redrawn from another camera with a second frame filling its gaps, as [`Reprojector`]
-//! does on D3D11 (alternate frame warping).
+//! does on D3D11 (alternate frame warping), with the same shader, constants and matrix
+//! ([`source_matrix`]).
 
 use monaka_channel::d3d;
 use monaka_channel::d3d12::compute;
@@ -30,7 +31,7 @@ pub mod reproject12;
 pub mod warp12;
 pub use hud::{HUD_SOURCE, HudLayer};
 pub use motion::{EyeView, MOTION_SOURCE, MotionPass, ObjectMotion};
-pub use reproject::{Frame, REPROJECT_SOURCE, Reprojector, View};
+pub use reproject::{Frame, REPROJECT_SOURCE, Reprojector, View, source_matrix};
 pub use scale::{SCALE_SOURCE, Scaler, fit};
 
 #[derive(Debug)]
@@ -213,7 +214,7 @@ fn uav_desc(format: DXGI_FORMAT) -> D3D11_UNORDERED_ACCESS_VIEW_DESC {
 struct SavedCompute {
     shader: Option<ID3D11ComputeShader>,
     resources: [Option<ID3D11ShaderResourceView>; 6],
-    uavs: [Option<ID3D11UnorderedAccessView>; 2],
+    uavs: [Option<ID3D11UnorderedAccessView>; 3],
     constants: [Option<ID3D11Buffer>; 1],
 }
 
@@ -235,7 +236,7 @@ impl SavedCompute {
         unsafe {
             context.CSSetShader(self.shader.as_ref(), None);
             context.CSSetShaderResources(0, Some(&self.resources));
-            context.CSSetUnorderedAccessViews(0, 2, Some(self.uavs.as_ptr()), None);
+            context.CSSetUnorderedAccessViews(0, 3, Some(self.uavs.as_ptr()), None);
             context.CSSetConstantBuffers(0, Some(&self.constants));
         }
     }

@@ -41,13 +41,25 @@ fn install<G: Game>(start: &mut Start<'_, G>) -> Result<(), Lack> {
 }
 
 /// A game's movement step as room-scale following needs it. The hook asks each step of the
-/// player's character for the velocity to follow with ([`roomscale::follow`], with why the game
-/// moves the body itself if it does), adds it to the game's own move, and says what the step moved
-/// beyond the game's own move ([`roomscale::credit`]). When following waits and how a step is
-/// measured are the game's.
+/// player's character for the velocity to follow with and adds it to the game's own move, in one
+/// of two ways. Measured at the next step ([`roomscale::begin_step`]): following asks why it waits
+/// ([`Steps::waiting`]) and where the body is ([`Steps::position`]), and the hook says the game's
+/// own velocity ([`roomscale::game_velocity`]). Measured inside the step: the hook asks
+/// [`roomscale::follow`] with why it waits and says what the step moved beyond the game's own move
+/// ([`roomscale::credit`]).
 pub trait Steps: Game {
     /// Hooks the player's movement step.
     fn install(start: &mut Start<'_, Self>) -> Result<(), Lack>;
+    /// Why following waits on the step of `body` (the step hook's handle on the stepping body), if
+    /// the game knows a reason. A game that gives none follows whenever the player is not climbing.
+    fn waiting(_body: usize) -> Option<roomscale::Wait> {
+        None
+    }
+    /// Where `body` is as its step begins (world, metres; `None` when unreadable), for a step
+    /// measured at the next one. A hook that measures its step itself leaves it.
+    fn position(_body: usize) -> Option<[f32; 3]> {
+        None
+    }
     /// Puts back what the step hook changed in the game, the hooks still in.
     fn restore() {}
     /// Logs the step hook's counts, the hooks out.

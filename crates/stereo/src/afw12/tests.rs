@@ -1,4 +1,7 @@
 use super::*;
+use monaka_core::depth::DepthMapping;
+use monaka_core::math::Vec3;
+use monaka_core::protocol::DepthParams;
 use monaka_framegen::ffx::Float2;
 use monaka_framegen::inputs::Place;
 use monaka_framegen::upscale::{GameDispatch, GameResource, create};
@@ -266,8 +269,9 @@ fn each_present_makes_a_pair_whose_gaps_come_from_the_warped_eyes_own_last_frame
     let present = |afw: &mut Afw12, eye: usize, rgba| {
         let (color, depth) = frame(&device, &queue, size, rgba, NEAR / 2.0);
         let (rendered, other) = if eye == 0 { (left, right) } else { (right, left) };
-        let real = RealEye { eye, color: &color, color_state: common, depth: &depth, depth_state: common, rendered, other };
-        let pair = afw.warp(&queue, &real).unwrap().unwrap();
+        let shot = Shot { eye, pose: HeadPose::default(), rendered, other };
+        let real = RealEye { color: &color, color_state: common, depth: &depth, depth_state: common };
+        let pair = afw.warp(&queue, &shot, &real).unwrap().unwrap();
         assert!(afw.idle(2000));
         pair
     };

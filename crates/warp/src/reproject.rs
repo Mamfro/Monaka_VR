@@ -1,8 +1,11 @@
-//! Rendered frames redrawn from another camera (`reproject.hlsl`). For alternate-eye rendering
-//! with depth: each presented frame is one real eye; the other eye of the same moment is this
-//! frame reprojected (the primary), and what this frame could not see is filled from that eye's own
-//! previous real frame reprojected to now (the fill), so gaps get rendered pixels, not stretched
-//! ones.
+//! Rendered frames redrawn from another camera (`reproject.hlsl`, shared with
+//! [`crate::reproject12`], which runs it on D3D12). For alternate-eye rendering with depth: each
+//! presented frame is one real eye; the other eye of the same moment is this frame reprojected (the
+//! primary), and what this frame could not see is filled from that eye's own previous real frame
+//! reprojected to now (the fill), so gaps get rendered pixels, not stretched ones.
+//!
+//! What both APIs share besides the shader: its constants ([`Constants`]) and the matrix taking a
+//! source frame into the view ([`source_matrix`]).
 
 use crate::{ConstantBuffer, Error, Readable, Result, SavedCompute, color_formats, compute_shader, depth_formats, readable, shader_view, uav_texture};
 use monaka_channel::d3d;
@@ -12,21 +15,61 @@ use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32_UINT};
 use windows::core::s;
 
-pub const REPROJECT_SOURCE: &str = include_str!("reproject.hlsl");
+#[cfg(test)]
+mod lift_checks;
+#[cfg(test)]
+mod tests;
 
-/// The layout of the HLSL `cbuffer Reproject`.
+/// The shader on D3D11: its images written as UNORM (the views' own format, as D3D11 checks).
+pub const REPROJECT_SOURCE: &str = concat!("#define IMAGE unorm float4\n", include_str!("reproject.hlsl"));
+
+/// The layout of the HLSL `cbuffer Reproject`, the same on both APIs (D3D11's constant buffer,
+/// D3D12's root constants).
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
-struct Constants {
-    m: [f32; 16],
-    width: u32,
-    height: u32,
-    source_width: u32,
-    source_height: u32,
-    depth_width: u32,
-    depth_height: u32,
-    near_a: f32,
-    near_b: f32,
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Constants {
+    pub m: [f32; 16],
+    pub width: u32,
+    pub height: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub depth_width: u32,
+    pub depth_height: u32,
+    pub out_depth_width: u32,
+    pub out_depth_height: u32,
+    pub near_a: f32,
+    pub near_b: f32,
+    pub pad: [u32; 2],
+}
+
+const _: () = assert!(size_of::<Constants>() == 28 * 4);
+
+impl Constants {
+    /// A redraw into `view`, its depth written at `out_depth` (width, height) when asked: the
+    /// constants of its clears and resolves.
+    pub(crate) fn redraw(view: &View, out_depth: Option<(u32, u32)>) -> Self {
+        let (out_depth_width, out_depth_height) = out_depth.unwrap_or((0, 0));
+        Self { width: view.width, height: view.height, out_depth_width, out_depth_height, near_a: view.mapping.a, near_b: view.mapping.b, ..Default::default() }
+    }
+
+    /// The splat of a source frame into this redraw's `view`: its colour of `color` size, its depth
+    /// of `depth` size, rendered with `projection` and `camera`. `None` when its cameras make no
+    /// reprojection (left out, as a missing fill).
+    pub(crate) fn splat(&self, view: &View, color: (u32, u32), depth: (u32, u32), projection: &Mat44, camera: &Mat34) -> Option<Self> {
+        let m = source_matrix(view, projection, camera)?;
+        Some(Self { m, source_width: color.0, source_height: color.1, depth_width: depth.0, depth_height: depth.1, ..*self })
+    }
+}
+
+/// The matrix taking a source frame rendered with `projection` and `camera` into `view`: both
+/// cameras moved by the view's position, so it is built from small numbers far from the origin.
+pub fn source_matrix(view: &View, projection: &Mat44, camera: &Mat34) -> Option<Mat44> {
+    let to_origin = |camera: &Mat34| {
+        let mut c = *camera;
+        (c[3], c[7], c[11]) = (c[3] - view.camera[3], c[7] - view.camera[7], c[11] - view.camera[11]);
+        c
+    };
+    reprojection(projection, &to_origin(camera), &view.projection, &to_origin(&view.camera))
 }
 
 /// A rendered frame kept for reprojection: private copies of its colour and depth, and the
@@ -140,23 +183,21 @@ impl Reprojector {
         let groups = |w: u32, h: u32| (w.div_ceil(8), h.div_ceil(8));
         let saved = SavedCompute::take(context);
         self.constants.bind(context);
+        let redraw = Constants::redraw(view, None);
         // SAFETY: binds our own shaders and views on the game's context, dispatches, and restores
         // what was bound.
         unsafe {
             for (layer, frame) in layers.iter().zip([Some(primary), fill]) {
                 let uavs = [Some(layer.keys_uav.clone()), Some(layer.image_uav.clone())];
                 context.CSSetUnorderedAccessViews(0, 2, Some(uavs.as_ptr()), None);
-                let mut constants = Constants { width: view.width, height: view.height, near_a: view.mapping.a, near_b: view.mapping.b, ..Default::default() };
-                self.constants.update(context, &constants);
+                self.constants.update(context, &redraw);
                 let (gx, gy) = groups(view.width, view.height);
                 context.CSSetShader(&self.clear, None);
                 context.Dispatch(gx, gy, 1);
                 let Some(frame) = frame else { continue };
-                let Some(m) = reprojection(&frame.projection, &frame.camera, &view.projection, &view.camera) else { continue };
-                constants.m = m;
-                (constants.source_width, constants.source_height) = (frame.color.width, frame.color.height);
-                (constants.depth_width, constants.depth_height) = (frame.depth.width, frame.depth.height);
-                self.constants.update(context, &constants);
+                let sizes = ((frame.color.width, frame.color.height), (frame.depth.width, frame.depth.height));
+                let Some(splat) = redraw.splat(view, sizes.0, sizes.1, &frame.projection, &frame.camera) else { continue };
+                self.constants.update(context, &splat);
                 context.CSSetShaderResources(0, Some(&[Some(frame.color.view.clone()), Some(frame.depth.view.clone())]));
                 let (sx, sy) = groups(frame.color.width, frame.color.height);
                 for shader in [&self.splat, &self.paint] {
@@ -164,74 +205,20 @@ impl Reprojector {
                     context.Dispatch(sx, sy, 1);
                 }
             }
-            context.CSSetUnorderedAccessViews(0, 2, Some([None, Some(output_uav.clone())].as_ptr()), None);
+            self.constants.update(context, &redraw);
+            context.CSSetUnorderedAccessViews(0, 3, Some([None, None, Some(output_uav.clone())].as_ptr()), None);
             let resources =
                 [None, None, Some(layers[0].image_srv.clone()), Some(layers[1].image_srv.clone()), Some(layers[0].keys_srv.clone()), Some(layers[1].keys_srv.clone())];
             context.CSSetShaderResources(0, Some(&resources));
             context.CSSetShader(&self.resolve, None);
             let (gx, gy) = groups(view.width, view.height);
             context.Dispatch(gx, gy, 1);
-            context.CSSetUnorderedAccessViews(0, 2, Some([None, None].as_ptr()), None);
+            context.CSSetUnorderedAccessViews(0, 3, Some([None, None, None].as_ptr()), None);
             context.CSSetShaderResources(0, Some(&[None, None, None, None, None, None]));
         }
         saved.restore(context);
         // The layer textures are only reached through their views.
         let _ = (&layers[0].keys, &layers[0].image);
         Ok(output)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use monaka_channel::d3d::{create_device, create_texture_with, read_pixel};
-    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_R32_FLOAT};
-
-    fn texture(device: &ID3D11Device, w: u32, h: u32, format: DXGI_FORMAT, bytes: &[u8]) -> ID3D11Texture2D {
-        create_texture_with(device, &D3D11_TEXTURE2D_DESC { BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32, ..d3d::simple_texture_desc(w, h, format) }, bytes).unwrap()
-    }
-
-    #[test]
-    fn shaders_compile() {
-        for entry in [s!("Clear"), s!("Splat"), s!("Paint"), s!("Resolve")] {
-            crate::compile(REPROJECT_SOURCE, "reproject.hlsl", entry).unwrap();
-        }
-    }
-
-    #[test]
-    fn other_eye_from_this_frame_and_gaps_from_its_own_last_frame() {
-        let (device, context, _) = create_device(None).unwrap();
-        let mut reprojector = Reprojector::new(&device).unwrap();
-        let (w, h) = (64u32, 8u32);
-        // A standard-depth projection with P00 = P11 = 1 and a wall 2 m away everywhere.
-        let (n, f) = (0.1f32, 100.0f32);
-        let mut projection = [0.0f32; 16];
-        projection[0] = 1.0;
-        projection[5] = 1.0;
-        projection[10] = f / (n - f);
-        projection[11] = n * f / (n - f);
-        projection[14] = -1.0;
-        let wall = -projection[10] + projection[11] / 2.0;
-        let depth: Vec<u8> = (0..w * h).flat_map(|_| wall.to_le_bytes()).collect();
-        let depth = texture(&device, w, h, DXGI_FORMAT_R32_FLOAT, &depth);
-        let camera = |x: f32| -> Mat34 { [1.0, 0.0, 0.0, x, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] };
-        // This frame: the left camera, red = 4 * column. The right eye's last frame: plain green.
-        let columns: Vec<u8> = (0..h).flat_map(|_| (0..w).flat_map(|x| [(x * 4) as u8, 0, 0, 255])).collect();
-        let green: Vec<u8> = (0..w * h).flat_map(|_| [0, 255, 0, 255]).collect();
-        let left = texture(&device, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, &columns);
-        let last_right = texture(&device, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, &green);
-        let primary = reprojector.capture(&context, &left, &depth, projection, camera(-0.5), None).unwrap();
-        let fill = reprojector.capture(&context, &last_right, &depth, projection, camera(0.5), None).unwrap();
-        let mapping = DepthMapping::from_projection(&projection, n).unwrap();
-        let view = View { projection, camera: camera(0.5), mapping, width: w, height: h };
-
-        // Cameras 1 m apart, wall 2 m away: the right eye sees each column 16 pixels further left.
-        let image = reprojector.run(&context, &view, &primary, Some(&fill)).unwrap().clone();
-        assert_eq!(read_pixel(&device, &context, &image, 20, 3).unwrap(), [36 * 4, 0, 0, 255]);
-        // The right edge was out of the left camera's view: its own last frame fills it.
-        assert_eq!(read_pixel(&device, &context, &image, 55, 3).unwrap(), [0, 255, 0, 255]);
-        // Without a fill frame, the gap continues its neighbour instead.
-        let image = reprojector.run(&context, &view, &primary, None).unwrap().clone();
-        assert_eq!(read_pixel(&device, &context, &image, 55, 3).unwrap(), [63 * 4, 0, 0, 255]);
     }
 }

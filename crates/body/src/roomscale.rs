@@ -13,10 +13,14 @@
 //! the view does not move twice. Blocked by a wall, the character stays and the anchor with it:
 //! the head can then lean past the character, as without following.
 //!
-//! Off while the game moves the body itself (the game says why) or the player climbs, and when no
-//! head is tracked. A recentre (the head's position jumping) moves the anchor with it, so the
-//! character does not walk off to the new centre.
+//! Off while the game moves the body itself or the view is not the player's (the game says why:
+//! [`Wait`]) or the player climbs, and when no head is tracked. A recentre (the head's position
+//! jumping) moves the anchor with it, so the character does not walk off to the new centre.
+//!
+//! A step hook that cannot measure its step inside it has it measured at the next step
+//! ([`begin_step`]): the body's move since, beyond the game's own velocity over the step.
 
+use crate::feature::Steps;
 use crate::traverse;
 use monaka_core::camera::{Base, Mat34};
 use monaka_core::math::{Vec3, dot};
@@ -190,9 +194,31 @@ fn turned_anchor(anchor: [f32; 2], head: [f32; 3], old: ([f32; 3], [f32; 3]), ne
     if turned.iter().all(|c| c.is_finite()) { [head[0] - turned[0], head[2] - turned[1]] } else { anchor }
 }
 
+/// Why following waits on a step, as the game says it ([`Steps::waiting`], or a step hook asking
+/// [`follow`] itself); climbing is following's own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wait {
+    /// The mod is not drawing the view.
+    NotRunning,
+    /// The step takes the body to a target of the game's own (a scripted move).
+    ScriptedMove,
+    /// The game holds the body's position.
+    PositionLocked,
+    /// The body's physics is off.
+    PhysicsOff,
+    /// The body is attached to something (a vehicle, a rope) and goes with it.
+    Attached,
+    /// An animation moves the body.
+    Animated,
+    /// The step takes no time.
+    NoTime,
+    /// A cutscene has the player.
+    Cutscene,
+}
+
 /// The velocity to follow with this step of the player's character (world x and z, m/s): zero
-/// while the game moves the body itself (`waiting`, its reason), while climbing, or with no head.
-pub fn follow(waiting: Option<&'static str>) -> [f32; 2] {
+/// while the game says following waits (`waiting`), while climbing, or with no head.
+pub fn follow(waiting: Option<Wait>) -> [f32; 2] {
     let Ok(mut state) = STATE.lock() else { return [0.0; 2] };
     let Some(settings) = state.settings else { return [0.0; 2] };
     state.stats.steps += 1;
@@ -247,6 +273,71 @@ pub fn credit(beyond: [f32; 3], follow: [f32; 2], dt: f32) {
     state.stats.followed += followed;
 }
 
+/// A step measured at the next one: the body's position as the previous step began, and what
+/// that step asked (the game's own velocity, the following velocity and the step's length).
+struct LastStep {
+    body: Option<[f32; 3]>,
+    ask: Option<([f32; 3], [f32; 2], f32)>,
+}
+
+impl LastStep {
+    const fn new() -> Self {
+        Self { body: None, ask: None }
+    }
+
+    /// A step `dt` long begins with the body at `now`: what the previous step moved beyond the
+    /// game's own velocity goes to `credit`, then this step's velocity comes from `follow`, asked
+    /// with why following waits (`waiting`).
+    fn begin(
+        &mut self,
+        now: Option<[f32; 3]>,
+        dt: f32,
+        waiting: impl FnOnce() -> Option<Wait>,
+        follow: impl FnOnce(Option<Wait>) -> [f32; 2],
+        credit: impl FnOnce([f32; 3], [f32; 2], f32),
+    ) -> [f32; 2] {
+        let now = now.filter(|p| p.iter().all(|c| c.is_finite()));
+        if let (Some(now), Some(before), Some((game, follow, last_dt))) = (now, self.body, self.ask) {
+            credit([now[0] - before[0] - game[0] * last_dt, 0.0, now[2] - before[2] - game[2] * last_dt], follow, last_dt);
+        }
+        self.body = now;
+        let follow = follow(waiting());
+        // The game's own velocity is filled in by `game`, once the step has it.
+        self.ask = Some(([0.0; 3], follow, dt));
+        follow
+    }
+
+    /// The game's own velocity on the step just begun.
+    fn game(&mut self, game: [f32; 3]) {
+        if let Some(ask) = self.ask.as_mut() {
+            ask.0 = if game.iter().all(|c| c.is_finite()) { game } else { [0.0; 3] };
+        }
+    }
+}
+
+static LAST_STEP: Mutex<LastStep> = Mutex::new(LastStep::new());
+
+/// A step of the player's body `body` (the step hook's handle on it), `dt` seconds long, begins:
+/// what the previous step moved beyond the game's own velocity is credited (the body's move since,
+/// where [`Steps::position`] reads it), and the velocity to follow with this step is returned
+/// (world x and z, m/s), waiting while [`Steps::waiting`] gives a reason. The hook then says the
+/// game's own velocity ([`game_velocity`]).
+pub fn begin_step<G: Steps>(body: usize, dt: f32) -> [f32; 2] {
+    if !active() {
+        return [0.0; 2];
+    }
+    let Ok(mut last) = LAST_STEP.lock() else { return [0.0; 2] };
+    last.begin(G::position(body), dt, || G::waiting(body), follow, credit)
+}
+
+/// The game's own velocity on the step [`begin_step`] began (what its velocity was added to;
+/// world, m/s).
+pub fn game_velocity(game: [f32; 3]) {
+    if let Ok(mut last) = LAST_STEP.lock() {
+        last.game(game);
+    }
+}
+
 fn summarise(state: &State) {
     let s = &state.stats;
     log!(
@@ -270,47 +361,7 @@ pub fn stop() {
     }
 }
 
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_turn_keeps_the_head_where_it_is_in_the_world() {
-        // The head 1 m along tracking x from the character; the world turns 90 degrees.
-        let (anchor, head) = ([0.0, 0.0], [1.0, 1.7, 0.0]);
-        let old = ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
-        let new = ([0.0, 0.0, -1.0], [1.0, 0.0, 0.0]);
-        let a = turned_anchor(anchor, head, old, new);
-        let world = |anchor: [f32; 2], axes: ([f32; 3], [f32; 3])| {
-            let o = [head[0] - anchor[0], head[2] - anchor[1]];
-            [0, 1, 2].map(|k| axes.0[k] * o[0] + axes.1[k] * o[1])
-        };
-        let (before, after) = (world(anchor, old), world(a, new));
-        assert!((0..3).all(|k| (before[k] - after[k]).abs() < 1e-5), "{before:?} {after:?}");
-        assert_eq!(turned_anchor(anchor, head, old, old), anchor, "no turn, no change");
-    }
-
-    #[test]
-    fn eyes_on_the_moved_back_camera_are_those_on_the_moved_back_origin() {
-        use monaka_core::camera::{apply_head, distance, from_back_up, tracking_origin, view_centre};
-        // A pitched game camera turned 30 degrees left, 0.2 m walked to the right and 0.1 back.
-        let yaw = 30f32.to_radians();
-        let game = from_back_up([yaw.sin() * 0.9, 0.43, yaw.cos() * 0.9], [0.0, 1.0, 0.0], [5.0, 1.0, 2.0]).unwrap();
-        let (anchor, head, q) = ([0.2, 0.1], [0.25, 1.6, 0.05], [0.0, 0.2588, 0.0, 0.9659]);
-        for base in [Base::Game, Base::Level { baked_yaw: 0.3 }] {
-            // As the eye sites did it: the tracking origin shifted, the head applied to it.
-            let mut origin = match base {
-                Base::Level { baked_yaw } => tracking_origin(&game, baked_yaw).unwrap(),
-                _ => game,
-            };
-            origin[3] -= origin[0] * anchor[0] + origin[2] * anchor[1];
-            origin[7] -= origin[4] * anchor[0] + origin[6] * anchor[1];
-            origin[11] -= origin[8] * anchor[0] + origin[10] * anchor[1];
-            let before = apply_head(&origin, q, head);
-            let moved = moved_back(&game, &base.origin(&game).unwrap(), anchor);
-            let after = view_centre(&moved, base, q, head).unwrap();
-            assert!(distance(&before, &after) < 1e-5, "{base:?}: {before:?} {after:?}");
-        }
-    }
-}
+mod tests;
+#[cfg(test)]
+mod lift_checks;

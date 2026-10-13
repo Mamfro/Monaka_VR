@@ -8,7 +8,9 @@
 //! right away. The producer is always stopped before the session returns while the game runs.
 
 use crate::games::{EyeSize, Game, Launch, Values};
+use crate::run_log::{self, RunLog};
 use crate::{Paths, attach, system, text};
+use monaka_core::manifest::{DIAGNOSTIC_LOGGING, DIAGNOSTIC_MARKER, MONAKA};
 use std::io::{BufRead, BufReader};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -314,18 +316,33 @@ fn one_run(
     stop: &Stop,
     report: &mut dyn FnMut(Event),
 ) -> RunResult {
+    // The installed launcher keeps a game's newest runs; a build tree keeps them all for research.
+    if paths.dev_games.is_none() {
+        run_log::prune_runs(&paths.runs, game.run_prefix, run_log::KEPT_RUNS - 1);
+    }
     let version = version();
     let folder = paths.runs.join(format!("{}-{version}", game.run_prefix));
     std::fs::create_dir_all(&folder).map_err(|e| fatal(format!("cannot make the run folder {}: {e}", folder.display())))?;
+    let plan = crate::games::plan(values, game, eye);
+    let mut monaka_log = RunLog::create(&folder);
+    for line in header(game, producer, pid, openxr, eye, &plan) {
+        monaka_log.line(&line);
+    }
+    let report = &mut |event: Event| {
+        monaka_log.event(&event);
+        report(event);
+    };
     report(Event::RunFolder(folder.clone()));
     let dll = folder.join(format!("{}-{version}.dll", game.producer));
     std::fs::copy(producer, &dll).map_err(|e| fatal(format!("cannot copy the producer: {e}")))?;
     let channel = format!(r"Local\monaka-{version}");
-    let plan = crate::games::plan(values, game, eye);
     let write = |name: &str, contents: &str| std::fs::write(folder.join(name), contents).map_err(|e| fatal(format!("cannot write {name}: {e}")));
     write("live-channel.txt", &channel)?;
     for (name, contents) in &plan.files {
         write(name, contents)?;
+    }
+    if values.switch(&MONAKA, DIAGNOSTIC_LOGGING.id) {
+        write(DIAGNOSTIC_MARKER, "")?;
     }
     let notices = game.licence_folder(paths);
     for licence in &plan.licences {
@@ -366,6 +383,29 @@ fn one_run(
     };
     stopped?;
     viewed.map_err(RunEnd::Retry)
+}
+
+/// What a run runs where, at the top of its log: the first thing to know about a player's report.
+fn header(game: &Game, producer: &Path, pid: u32, openxr: &system::OpenXr, eye: Option<(u32, u32)>, plan: &crate::games::Plan) -> Vec<String> {
+    let mut lines = vec![
+        format!("Monaka {} (pack contract {}) on Windows {}", env!("CARGO_PKG_VERSION"), monaka_core::pack::CONTRACT, system::windows_build()),
+        format!("game: {} ({}), process {pid} {}", game.name, game.id, system::process_path(pid).map_or_else(|| "(path unreadable)".into(), |p| p.display().to_string())),
+        format!("producer: {} sha256 {}", producer.display(), file_sha256(producer).unwrap_or_else(|| "(unreadable)".into())),
+        format!("pack: {}", game.credit()),
+        format!("OpenXR runtime: {}", openxr.runtime.display()),
+        format!("eye size: {}", eye.map_or_else(|| "the game's own".into(), |(w, h)| format!("{w}x{h}"))),
+    ];
+    for (name, contents) in &plan.files {
+        lines.push(format!("{name}:"));
+        lines.extend(contents.lines().map(|line| format!("  {line}")));
+    }
+    lines
+}
+
+fn file_sha256(path: &Path) -> Option<String> {
+    let mut hash = monaka_core::sha256::Sha256::default();
+    hash.update(&std::fs::read(path).ok()?);
+    Some(monaka_core::sha256::hex(&hash.finish()))
 }
 
 /// Runs the viewer until it ends or a stop is asked for, forwarding its output.

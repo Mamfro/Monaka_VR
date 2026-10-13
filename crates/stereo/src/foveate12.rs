@@ -64,12 +64,12 @@ use frame::*;
 use hooks::*;
 use images::*;
 
-/// The switch: on unless turned off.
+/// The switch: off unless turned on, until its hooks are proven in a game.
 pub const FOVEATED_RENDERING: Opt = opt(
     "foveated_rendering",
     "Foveated rendering",
     "Draws the edges of your view in less detail, so the game runs faster. Sharp where you look with eye tracking, else straight ahead.",
-    Kind::Switch { default: true },
+    Kind::Switch { default: false },
 )
 .on(Shown::Rendering);
 
@@ -224,7 +224,7 @@ pub const fn foveation<G: FrameInputs + GameQueue>() -> Component<G> {
         name: "foveation",
         options: &OPTIONS,
         settings: read_settings,
-        switch: Some(Switch::new("foveated_rendering", true, "foveated rendering is off")),
+        switch: Some(Switch::new("foveated_rendering", false, "foveated rendering is off")),
         install: install::<G>,
         arm,
         quiet,

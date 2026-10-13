@@ -926,6 +926,8 @@ mod tests {
         );
         let features = std::fs::read_to_string(dir.join("features.txt")).unwrap();
         assert!(features.contains("hand rig: on"), "{features}");
+        let log = dir.join("lifecycle.log");
+        assert!(crate::wait_until(1000, || std::fs::read_to_string(&log).is_ok_and(|text| text.contains("features: "))), "the writer thread writes the log");
         frame::<Lived>(&());
         assert!(calls().is_empty(), "no frame work after the stop");
 

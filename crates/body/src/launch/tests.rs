@@ -12,7 +12,7 @@ fn a_shot_keeps_the_games_speed_unless_it_says_its_own() {
 
 #[test]
 fn without_an_answer_the_game_launches_its_own_way() {
-    let fired = Fired { weapon: Weapon::Gun, game: Flight { from: [0.0; 3], velocity: [0.0, 0.0, -1.0] }, aim: None };
+    let fired = Fired { weapon: Weapon::Gun, game: Flight { from: [0.0; 3], velocity: [0.0, 0.0, -1.0] }, aim: None, side: None };
     let leaving = Leaving { thrown: Thrown::Throwable, way: Way::Given, hand: HandThrow { from: None, velocity: [0.0; 3] }, game: None };
     aim_shots(Weapon::Gun, None);
     throw_by(None);

@@ -23,7 +23,7 @@
 
 pub mod pairs;
 
-use crate::afw12::Rendered;
+use crate::afw::Rendered;
 use crate::driver::Driver;
 use crate::feature::Presents;
 use crate::pairs12::{EyeDepth12, PairDepth, PairPublisher12, Step};

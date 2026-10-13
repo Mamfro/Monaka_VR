@@ -113,6 +113,8 @@ impl Before {
 struct Commanded;
 static HEAD: Mutex<Option<HeadPose>> = Mutex::new(None);
 static TAKEN: AtomicBool = AtomicBool::new(false);
+/// Whether the game's own pad is on (the Wolfensteins levelled only then).
+static PAD: AtomicBool = AtomicBool::new(true);
 impl monaka_producer::game::Game for Commanded {
     const MANIFESTS: &'static [monaka_core::manifest::Manifest] = &[];
     const ADAPTER: Adapter<Self> = Adapter { components: &[] };
@@ -123,7 +125,7 @@ impl monaka_producer::game::Game for Commanded {
     }
 }
 impl Looks for Commanded {
-    const DELIVERY: Delivery<Self> = Delivery::Command { head: || *HEAD.locked() };
+    const DELIVERY: Delivery<Self> = Delivery::Command { head: || *HEAD.locked(), levels: || PAD.load(Relaxed) };
     fn stand_down(_: usize) -> StandDown {
         StandDown { now: TAKEN.load(Relaxed), changed: false }
     }
@@ -173,6 +175,20 @@ fn a_run_of_commands_writes_the_angles_and_bakes_the_shares_it_did() {
         assert_eq!(command_baked(), before.baked(taken), "the share after command {i}");
     }
     AIMING.store(false, Relaxed);
+}
+
+#[test]
+fn steering_levels_only_where_the_wolfensteins_did() {
+    let _serial = serial();
+    for pad in [false, true] {
+        PAD.store(pad, Relaxed);
+        arm::<Commanded>();
+        // The Wolfensteins' arm: levelling with their pad on and the head alone pitching.
+        let before = pad && monaka_pad::feature::pitch_from_head();
+        assert_eq!(LEVELLING.load(Relaxed), before, "pad {pad}");
+        quiet();
+    }
+    PAD.store(true, Relaxed);
 }
 
 /// The share the look's eye site reads for the command game.

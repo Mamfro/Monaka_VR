@@ -185,6 +185,44 @@ fn an_opengl_frame_goes_flat_when_it_did() {
     }
 }
 
+/// The Wolfensteins' own tickets before: a frame's ticket issued at its view build, taken at its
+/// swap, the oldest not shown being drawn.
+struct TicketsBefore(Tickets);
+
+impl TicketsBefore {
+    fn built(&mut self, pose: HeadPose) {
+        self.0.issue(View::Both, pose, ());
+    }
+
+    fn shown(&mut self) -> (Option<HeadPose>, usize) {
+        let shown = self.0.show();
+        (shown.ticket.map(|ticket| ticket.pose), shown.waiting)
+    }
+
+    fn rendering(&self) -> Option<HeadPose> {
+        self.0.drawing().map(|ticket| ticket.pose)
+    }
+}
+
+#[test]
+fn an_opengl_pair_goes_out_with_the_pose_it_went_out_with() {
+    let pairs = Pairs::new();
+    let mut before = TicketsBefore(Tickets::new(4));
+    // Each step a view build (`b`) or a swap (`s`): in turn, a frame of lag, two, a swap with no
+    // frame built, more in flight than the pairing holds, then back in turn.
+    let steps = "bsbsbbsbssbsssbbbbbbsssbsbsbbs";
+    for (i, step) in steps.chars().enumerate() {
+        if step == 'b' {
+            let pose = HeadPose::synthetic(i as f32 * 3.0, -(i as f32), HeadPose::SYNTHETIC_FOV, 0.064);
+            pairs.built(View::Both, pose);
+            before.built(pose);
+        } else {
+            assert_eq!(pairs.shown(), before.shown(), "the pose at swap {i}");
+        }
+        assert_eq!(pairs.rendering(), before.rendering(), "the pose being drawn after step {i}");
+    }
+}
+
 // ---- Dying Light 2's own pair counting, eye turns and stage timings, now the loop's ----
 
 /// The old pair counter: each pair started on the engine side took the next number from 1.

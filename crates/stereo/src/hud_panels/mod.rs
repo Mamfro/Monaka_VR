@@ -3,21 +3,33 @@
 //! each on its own panel (`<channel>-panel-<piece>`, which the viewer places by the piece's name;
 //! [`crate::panel11`]).
 //!
-//! Method: draw-level. While the game draws its HUD, its HUD pieces provider says which draws are
-//! which piece's ([`d3d11::draw`], [`gl::draw`]) and where each piece lies in the HUD's layout
-//! ([`show`], [`hide`]); this does the rest. A piece's box grows while it shows and is made its
-//! panel's shape; at the frame's first piece draw every shown piece's panel starts empty; a
-//! piece's draws run into its panel, onto black and onto white, with the layout scaled and moved
-//! so the box fills it, and into no eye; once a frame every shown panel is resolved and
-//! published, and one no longer shown is published cleared, once. A piece not shown is drawn as
-//! the game draws it. The panels are drawn with the game's own graphics API: D3D11 on the game's
-//! device ([`d3d11`]), OpenGL into canvases of our own captured into D3D11 ([`gl`]).
+//! Two methods, one set of pieces. Draw-level: while the game draws its HUD, its HUD pieces
+//! provider says which draws are which piece's ([`d3d11::draw`], [`gl::draw`]) and where each
+//! piece lies in the HUD's layout ([`show`], [`hide`]); this does the rest. A piece's box grows
+//! while it shows and is made its panel's shape; at the frame's first piece draw every shown
+//! piece's panel starts empty; a piece's draws run into its panel, onto black and onto white, with
+//! the layout scaled and moved so the box fills it, and into no eye; once a frame every shown panel
+//! is resolved and published, and one no longer shown is published cleared, once. A piece not shown
+//! is drawn as the game draws it. The panels are drawn with the game's own graphics API: D3D11 on
+//! the game's device ([`d3d11`]), OpenGL into canvases of our own captured into D3D11 ([`gl`]).
 //!
-//! A game lists the ready-made with its own install (which calls [`install`], then hooks where
-//! its HUD is drawn) by struct update: `Component { install: install_panels, ..hud_panels() }`.
+//! Layer crops, for a D3D12 game whose HUD is a layer of its own ([`LayerPieces`], [`d3d12`]): at
+//! each present the game says where each piece lies in the layer, the boxes grow and take their
+//! panels' shape as above, and each shown piece's rectangle of the layer is scaled into its panel
+//! and published; the rectangles are left out of the HUD laid over the eyes, or taken out of an
+//! eye frame that has the HUD drawn in ([`d3d12::take_out`]).
+//!
+//! A game lists the ready-made with its own install (which calls [`install`], or
+//! [`install_layer`] for layer crops, then hooks where its HUD is drawn) by struct update:
+//! `Component { install: install_panels, ..hud_panels() }`.
 
 pub mod d3d11;
+pub mod d3d12;
 pub mod gl;
+#[cfg(test)]
+mod lift_checks;
+#[cfg(test)]
+mod tests;
 
 use monaka_channel::ChannelName;
 use monaka_core::feature::Feature;
@@ -46,9 +58,20 @@ pub trait HudPieces: Game {
     /// The game masks its HUD's draws through the stencil (a bar's fill): its D3D11 panels get
     /// depth-stencils of their own, so the masks hold on the hands.
     const MASKED: bool = false;
+    /// A piece's box grown by this share of its larger side on each side for its panel (smaller
+    /// where a long thin piece has another close by).
+    const MARGIN: f32 = MARGIN;
 }
 
-/// A piece's box grown by this share of its larger side on each side for its panel.
+/// A game whose pieces are cut out of its HUD layer ([`d3d12`]): where each lies in the layer.
+pub trait LayerPieces: HudPieces {
+    /// Each piece's box this frame, by its index in `PIECES` (left, top, right, bottom in the
+    /// layer's pixels); `None` for a piece not shown. Asked at each present before the crops.
+    fn boxes(boxes: &mut [Option<[f32; 4]>]);
+}
+
+/// A piece's box grown by this share of its larger side on each side for its panel, unless the
+/// game says otherwise ([`HudPieces::MARGIN`]).
 pub const MARGIN: f32 = 0.06;
 
 /// The dynamic HUD for game `G`, on with `world_hud`.
@@ -76,10 +99,16 @@ struct Shown {
     seen: Instant,
 }
 
+/// Where a layer-crops game's pieces lie in its layer ([`LayerPieces::boxes`]).
+type Boxes = fn(&mut [Option<[f32; 4]>]);
+
 struct State {
     channel: ChannelName,
     pieces: &'static [Piece],
     masked: bool,
+    margin: f32,
+    /// The game's boxes, for layer crops.
+    boxes: Option<Boxes>,
     shown: Vec<Option<Shown>>,
 }
 
@@ -90,8 +119,32 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// The ready-made's part of the component's install: the run's channel and the game's pieces.
 pub fn install<G: HudPieces>(start: &mut Start<'_, G>) -> Result<(), Lack> {
     let channel = start.channel()?.clone();
-    *STATE.locked() = Some(State { channel, pieces: G::PIECES, masked: G::MASKED, shown: vec![None; G::PIECES.len()] });
+    *STATE.locked() = Some(State { channel, pieces: G::PIECES, masked: G::MASKED, margin: G::MARGIN, boxes: None, shown: vec![None; G::PIECES.len()] });
     Ok(())
+}
+
+/// [`install`] for a game whose pieces are cut out of its HUD layer: its boxes are asked for at
+/// each present ([`d3d12::publish`]).
+pub fn install_layer<G: LayerPieces>(start: &mut Start<'_, G>) -> Result<(), Lack> {
+    install::<G>(start)?;
+    if let Some(state) = STATE.locked().as_mut() {
+        state.boxes = Some(G::boxes);
+    }
+    Ok(())
+}
+
+/// A layer-crops game's boxes this frame, in a layer of `size`: each piece shown there or hidden.
+fn take_boxes(size: (u32, u32)) {
+    let Some((boxes, count)) = STATE.locked().as_ref().and_then(|s| Some((s.boxes?, s.pieces.len()))) else { return };
+    let mut found = vec![None; count];
+    boxes(&mut found);
+    let layout = (size.0 as f32, size.1 as f32);
+    for (piece, found) in found.into_iter().enumerate() {
+        match found {
+            Some(bounds) => show(piece, bounds, layout),
+            None => hide(piece),
+        }
+    }
 }
 
 fn arm() {
@@ -105,6 +158,7 @@ fn quiet() {
 /// The hooks are out: the panels go (their channels close; the viewer takes them off the hands).
 fn release() {
     d3d11::release();
+    d3d12::release();
     gl::release();
     STATE.locked().take();
 }
@@ -121,7 +175,7 @@ pub fn show(piece: usize, bounds: [f32; 4], layout: (f32, f32)) {
     if !(layout.0 > 0.0 && layout.1 > 0.0 && bounds.iter().all(|v| v.is_finite())) {
         return;
     }
-    let fraction = [bounds[0] / layout.0, bounds[1] / layout.1, bounds[2] / layout.0, bounds[3] / layout.1];
+    let fraction = fraction(bounds, layout);
     let mut state = STATE.locked();
     let Some(slot) = state.as_mut().and_then(|s| s.shown.get_mut(piece)) else { return };
     let found = match *slot {
@@ -151,17 +205,22 @@ fn fresh(shown: &Shown) -> bool {
     shown.seen.elapsed().as_millis() < u128::from(LAYOUT_FRESH_MS)
 }
 
+/// A box (left, top, right, bottom) of a layout of `layout` as fractions of it.
+fn fraction(bounds: [f32; 4], layout: (f32, f32)) -> [f32; 4] {
+    [bounds[0] / layout.0, bounds[1] / layout.1, bounds[2] / layout.0, bounds[3] / layout.1]
+}
+
 /// The rectangle of the layout piece `piece`'s panel shows (x, y, width, height as fractions of the
 /// layout), while it shows.
 fn rect(state: &State, piece: usize) -> Option<[f32; 4]> {
     let shown = state.shown.get(piece)?.filter(fresh)?;
-    Some(rect_of(&shown.found, shown.layout, state.pieces[piece].size))
+    Some(rect_of(&shown.found, shown.layout, state.pieces[piece].size, state.margin))
 }
 
-/// A box (fractions of a layout of `layout`) grown by [`MARGIN`] and made the panel's shape, as a
+/// A box (fractions of a layout of `layout`) grown by `margin` and made the panel's shape, as a
 /// rectangle of fractions.
-fn rect_of(found: &[f32; 4], (w, h): (f32, f32), size: (u32, u32)) -> [f32; 4] {
-    let r = fit([found[0] * w, found[1] * h, found[2] * w, found[3] * h], MARGIN, size);
+fn rect_of(found: &[f32; 4], (w, h): (f32, f32), size: (u32, u32), margin: f32) -> [f32; 4] {
+    let r = fit([found[0] * w, found[1] * h, found[2] * w, found[3] * h], margin, size);
     [r[0] / w, r[1] / h, r[2] / w, r[3] / h]
 }
 
@@ -180,36 +239,8 @@ fn frame() -> Option<Frame> {
     Some(Frame { channel: state.channel.clone(), pieces: state.pieces, masked: state.masked, rects: (0..state.pieces.len()).map(|i| rect(state, i)).collect() })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_box_becomes_the_panels_shape() {
-        let rect = rect_of(&[0.846, 0.710, 0.921, 0.749], (2644.0, 2644.0), (768, 384));
-        assert!((rect[2] / rect[3] - 2.0).abs() < 1e-4, "{rect:?}");
-        assert!((rect[0] + rect[2] / 2.0 - 0.8835).abs() < 1e-4 && (rect[1] + rect[3] / 2.0 - 0.7295).abs() < 1e-4);
-        let rect = rect_of(&[0.80, 0.85, 0.95, 0.95], (1920.0, 1080.0), (768, 384));
-        assert!(((rect[2] * 1920.0) / (rect[3] * 1080.0) - 2.0).abs() < 1e-3, "{rect:?}");
-    }
-
-    #[test]
-    fn a_shown_piece_grows_and_a_hidden_one_starts_afresh() {
-        const PIECES: &[Piece] = &[Piece { name: "weapon", size: (768, 384) }];
-        let channel = ChannelName::new("monaka-hud-panels-test".to_string()).unwrap();
-        *STATE.locked() = Some(State { channel, pieces: PIECES, masked: false, shown: vec![None] });
-        show(0, [80.0, 70.0, 90.0, 75.0], (100.0, 100.0));
-        show(0, [85.0, 72.0, 95.0, 74.0], (100.0, 100.0));
-        let found = |s: &Option<State>| s.as_ref().unwrap().shown[0].unwrap().found;
-        assert_eq!(found(&STATE.locked()), [0.8, 0.7, 0.95, 0.75]);
-        assert!(frame().unwrap().rects[0].is_some());
-        hide(0);
-        assert!(frame().unwrap().rects[0].is_none());
-        show(0, [85.0, 72.0, 95.0, 74.0], (100.0, 100.0));
-        assert_eq!(found(&STATE.locked()), [0.85, 0.72, 0.95, 0.74]);
-        // Another layout size: measured afresh.
-        show(0, [10.0, 10.0, 20.0, 20.0], (200.0, 200.0));
-        assert_eq!(found(&STATE.locked()), [0.05, 0.05, 0.1, 0.1]);
-        STATE.locked().take();
-    }
+/// A rectangle of fractions of a layout of `size` in its pixels (x, y, width, height).
+fn pixels(rect: [f32; 4], size: (u32, u32)) -> [f32; 4] {
+    let (w, h) = (size.0 as f32, size.1 as f32);
+    [rect[0] * w, rect[1] * h, rect[2] * w, rect[3] * h]
 }

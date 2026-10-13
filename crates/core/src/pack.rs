@@ -186,6 +186,7 @@ const fn status_word(status: Status) -> &'static str {
         Status::Playable => "playable",
         Status::Beta => "beta",
         Status::Alpha => "alpha",
+        Status::PreAlpha => "pre_alpha",
         Status::InProgress => "in_progress",
         Status::Experimental => "experimental",
     }
@@ -729,6 +730,7 @@ fn status_of(word: &str) -> Result<Status, String> {
         "playable" => Status::Playable,
         "beta" => Status::Beta,
         "alpha" => Status::Alpha,
+        "pre_alpha" => Status::PreAlpha,
         "in_progress" => Status::InProgress,
         "experimental" => Status::Experimental,
         _ => return Err(format!("unknown status {word}")),

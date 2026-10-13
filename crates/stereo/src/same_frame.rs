@@ -378,7 +378,7 @@ impl Pairs {
     }
 
     /// Where the head pose comes from: the viewer's, or a synthetic one on PC runs.
-    pub fn head(&self) -> &HeadSource {
+    pub const fn head(&self) -> &HeadSource {
         &self.head
     }
 
@@ -514,11 +514,13 @@ impl Pairs {
         flat
     }
 
-    /// One publish attempt: counted; at the first present and every 600 the loop's counts logged.
+    /// One publish attempt: counted; at the first present and every 600 the loop's counts logged
+    /// (every 90 with diagnostic logging).
     pub(crate) fn count(&self, ok: bool) {
         self.tally(ok);
         let n = self.presents();
-        if n == 1 || n.is_multiple_of(600) {
+        let every = if monaka_producer::log::detailed() { 90 } else { 600 };
+        if n == 1 || n.is_multiple_of(every) {
             self.log_counts();
         }
     }

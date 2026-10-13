@@ -66,9 +66,11 @@ pub enum Delivery<G: Game> {
     /// ([`targets::steer`]); `carried`: which share the eyes take out of a frame's camera.
     Targets { carried: Carried },
     /// The head's turn added to the look angles the game's input command accumulates, as each
-    /// command is built ([`command::built`]); `head`: the head pose now. Another camera has the
-    /// view while [`Looks::stand_down`] says so.
-    Command { head: fn() -> Option<HeadPose> },
+    /// command is built ([`command::built`]); `head`: the head pose now; `levels`: whether the
+    /// player's own pitch may be kept level while only the head pitches it, asked as steering
+    /// starts (a game that levels only with its own pad on says whether it is). Another camera has
+    /// the view while [`Looks::stand_down`] says so.
+    Command { head: fn() -> Option<HeadPose>, levels: fn() -> bool },
     /// The head's turn sent as mouse counts, the game kept on its pad where it says how
     /// ([`mouse::on_build`] at each view build).
     Mouse(mouse::Mouse<G>),
@@ -114,7 +116,7 @@ pub const fn look<G: Looks>() -> Component<G> {
                 options.switch("pause_hold", true);
             },
             install: command::install::<G>,
-            arm: command::arm,
+            arm: command::arm::<G>,
             quiet: command::quiet,
             give_back: command::give_back,
             release: G::release,

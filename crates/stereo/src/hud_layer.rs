@@ -3,6 +3,13 @@
 //! (`hud_scale`, `hud_distance`) and is on while the HUD is placed in front of the eyes (`hud=0`:
 //! as the game draws it). A method's HUD lists `Component { install, .., ..hud_layer() }`; a game
 //! with a size of its own offers `options: &hud_layer::options(0.55)`.
+//!
+//! The lay-over of a D3D12 game's HUD layer at its present request is [`present12`], on the game's
+//! `crate::providers::HudLayer12`.
+
+pub mod present12;
+#[cfg(test)]
+mod lift_checks;
 
 use monaka_core::feature::Feature;
 use monaka_core::manifest::{HUD_DISTANCE, HUD_SIZE, Opt};

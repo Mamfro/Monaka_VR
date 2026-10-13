@@ -14,8 +14,6 @@ use monaka_core::protocol::ChannelName;
 use monaka_hook::module::Module;
 use monaka_hook::{Hooks, InFlight};
 use std::fmt;
-use std::fs::File;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -132,9 +130,16 @@ pub fn wait_until(ms: u64, mut done: impl FnMut() -> bool) -> bool {
 }
 
 /// Logs panics and the first faults anywhere in the game to the session log
-/// ([`monaka_hook::crash`]); [`remove_crash_log`] at stop (a rejected start removes it itself).
+/// ([`monaka_hook::crash`]), each written out before the game can go down; [`remove_crash_log`]
+/// at stop (a rejected start removes it itself).
 pub fn install_crash_log() {
-    monaka_hook::crash::install(log);
+    monaka_hook::crash::install(urgent);
+}
+
+fn urgent(args: fmt::Arguments<'_>) {
+    if let Some(session) = Session::get() {
+        session.log.urgent(args);
+    }
 }
 
 pub fn remove_crash_log() {
@@ -181,6 +186,7 @@ impl Lifecycle {
             Err(rejection) => {
                 remove_crash_log();
                 session.log(format_args!("rejected: {}", rejection.reason));
+                session.write_log();
                 self.set(State::Rejected);
                 rejection.code
             }
@@ -188,23 +194,27 @@ impl Lifecycle {
     }
 
     /// `MonakaStop`: runs `stop` once from the running state. A failure means hooks may still be
-    /// live, so this copy must never be started again.
+    /// live, so this copy must never be started again. Either way the whole log is on the disk
+    /// when the new state shows.
     pub fn stop(&self, stop: impl FnOnce() -> Result<(), Rejection>) -> u32 {
         if !self.advance(State::Running, State::Stopping) {
             return code::NOT_READY;
         }
-        match stop() {
+        let (state, code) = match stop() {
             Ok(()) => {
                 log(format_args!("stopped"));
-                self.set(State::Stopped);
-                code::SUCCESS
+                (State::Stopped, code::SUCCESS)
             }
             Err(failure) => {
                 log(format_args!("stop failed: {}", failure.reason));
-                self.set(State::ShutdownFailed);
-                failure.code
+                (State::ShutdownFailed, failure.code)
             }
+        };
+        if let Some(session) = Session::get() {
+            session.write_log();
         }
+        self.set(state);
+        code
     }
 }
 
@@ -217,8 +227,7 @@ impl Default for Lifecycle {
 /// The run folder this DLL copy was started from, its option files and its log.
 pub struct Session {
     dir: PathBuf,
-    log: Mutex<Option<File>>,
-    started: std::time::Instant,
+    log: log::LogFile,
 }
 
 static SESSION: OnceLock<Session> = OnceLock::new();
@@ -233,10 +242,32 @@ impl Session {
         Self::open_in(this_module_dir()?, log_name)
     }
 
-    /// The session in `dir` (the DLL copy's own folder in a run; a test's folder in tests).
+    /// The session in `dir` (the DLL copy's own folder in a run; a test's folder in tests), and
+    /// the thread that writes its log.
     fn open_in(dir: PathBuf, log_name: &str) -> Option<&'static Session> {
-        let file = File::create(dir.join(log_name)).ok()?;
-        let session = SESSION.get_or_init(|| Session { dir, log: Mutex::new(Some(file)), started: std::time::Instant::now() });
+        let log = log::LogFile::create(&dir.join(log_name), monaka_core::scrub::Scrub::from_env()).ok()?;
+        let mut opened = false;
+        let session = SESSION.get_or_init(|| {
+            opened = true;
+            Session { dir, log }
+        });
+        if opened {
+            std::thread::Builder::new()
+                .name("monaka log".into())
+                .spawn(|| {
+                    // The player's diagnostic logging is checked about once a second; it may
+                    // change while the game runs.
+                    let check_every = (1000 / log::WRITE_EVERY.as_millis()).max(1);
+                    for turn in 0u128.. {
+                        if turn % check_every == 0 {
+                            session.log.follow(session.has(manifest::DIAGNOSTIC_MARKER));
+                        }
+                        std::thread::sleep(log::WRITE_EVERY);
+                        session.log.write_pending();
+                    }
+                })
+                .ok()?;
+        }
         Some(session)
     }
 
@@ -285,12 +316,12 @@ impl Session {
     }
 
     pub fn log(&self, args: fmt::Arguments<'_>) {
-        if let Ok(mut file) = self.log.lock()
-            && let Some(file) = file.as_mut()
-        {
-            let _ = writeln!(file, "{:>9.3} {args}", self.started.elapsed().as_secs_f64());
-            let _ = file.flush();
-        }
+        self.log.line(args);
+    }
+
+    /// Writes the pending log lines now, rather than at the writer thread's next turn.
+    pub fn write_log(&self) {
+        self.log.write_pending();
     }
 }
 
@@ -362,6 +393,7 @@ macro_rules! producer {
         pub extern "system" fn MonakaStart(_: *mut ::core::ffi::c_void) -> u32 {
             let manifests = <$game as $crate::game::Game>::MANIFESTS;
             LIFECYCLE.start(manifests[0].log, |session| {
+                $crate::log_header(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
                 $crate::require_host(&$crate::manifest::host_text(manifests))?;
                 $crate::allow_other_builds(session.manifest_options(&manifests[0]).switch("other_builds", false));
                 $crate::game::start::<$game>(session)
@@ -407,7 +439,10 @@ macro_rules! producer {
 pub fn require_build(name: &str, sha256: &str) -> Result<Module, Rejection> {
     let module = Module::find(name).ok_or_else(|| Rejection::not_ready(format!("{name} is not loaded")))?;
     let mismatch = match module.file_sha256() {
-        Some(actual) if actual == sha256 => return Ok(module),
+        Some(actual) if actual == sha256 => {
+            log!("{name} build {actual} (known)");
+            return Ok(module);
+        }
         Some(actual) => format!("{name} is build {actual}, not the inspected {sha256}"),
         None => format!("{name} could not be fingerprinted"),
     };
@@ -434,6 +469,12 @@ static OTHER_BUILDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 /// the options file before the game's own start.
 pub fn allow_other_builds(allow: bool) {
     OTHER_BUILDS.store(allow, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The log's first line: which producer this is and where it runs (the game build follows from
+/// [`require_build`] or [`discovered_build`]).
+pub fn log_header(producer: &str, version: &str) {
+    log!("{producer} {version} (pack contract {}) in {}", pack::CONTRACT, monaka_hook::module::host_name());
 }
 
 /// Refuses to run in any process but the game's executable (`executables`: one name, or several

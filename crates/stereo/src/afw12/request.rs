@@ -58,14 +58,12 @@ pub(super) struct State {
     pub(super) motion: Option<ID3D12Resource>,
     pub(super) shown: [[Option<ID3D12Resource>; 2]; SLOTS],
     pub(super) shown_slot: usize,
-    /// The last pair's pose, real eye and present (frame generation's history).
-    pub(super) previous: Option<(HeadPose, usize, u64)>,
     pub(super) interval: Interval,
-    /// When a labelled frame was last presented.
-    pub(super) last_labelled: Option<Instant>,
-    /// Each eye's last frame as presented, its pose and present, for a plain pair when a frame
-    /// could not be warped.
-    pub(super) plain: [Option<(ID3D12Resource, HeadPose, u64)>; 2],
+    /// What goes out at each present (the core's: labels, plain pairs, frame generation's history).
+    pub(super) presents: afw::Presents,
+    /// Each eye's last frame as presented, for a plain pair when a frame could not be warped (its
+    /// pose and present are the core's).
+    pub(super) plain: [Option<ID3D12Resource>; 2],
 }
 
 // SAFETY: the D3D objects are free-threaded; everything is used under the state's lock only.
@@ -91,9 +89,8 @@ pub(super) fn state_for<'a>(guard: &'a mut Option<State>, queue: &ID3D12CommandQ
                     motion: None,
                     shown: Default::default(),
                     shown_slot: 0,
-                    previous: None,
                     interval: Interval::new(Duration::from_millis(16)),
-                    last_labelled: None,
+                    presents: afw::Presents::new(RULES),
                     plain: [None, None],
                 })
             }
@@ -121,24 +118,16 @@ pub fn warp(queue: &ID3D12CommandQueue, buffer: &ID3D12Resource) {
     let Some(label) = (game.presenting)() else { return };
     let (eye, other) = (label.eye.min(1), 1 - label.eye.min(1));
     let Some(inputs) = take_inputs(eye) else {
-        COUNTERS.no_inputs.fetch_add(1, Relaxed);
+        Counters::add(&COUNTERS.no_inputs);
         return;
     };
     let Some(separation) = (game.separation)(&label.pose) else { return };
-    let frustum = (game.frustum)(&label.pose, other);
+    let shot = Shot::labelled(label, inputs.rendered, separation, (game.frustum)(&label.pose, other));
     // SAFETY: reads a descriptor.
     let format = unsafe { buffer.GetDesc() }.Format;
     state.hud_fits = keeps_format(format);
-    let real = RealEye {
-        eye,
-        color: buffer,
-        color_state: D3D12_RESOURCE_STATE_PRESENT,
-        depth: &inputs.depth,
-        depth_state: D3D12_RESOURCE_STATE_COMMON,
-        rendered: inputs.rendered,
-        other: inputs.rendered.other_eye(eye, separation, frustum),
-    };
-    let pair = match state.afw.warp(queue, &real) {
+    let real = RealEye { color: buffer, color_state: D3D12_RESOURCE_STATE_PRESENT, depth: &inputs.depth, depth_state: D3D12_RESOURCE_STATE_COMMON };
+    let pair = match state.afw.warp(queue, &shot, &real) {
         Ok(Some(pair)) => pair,
         Ok(None) => return,
         Err(why) => {
@@ -146,7 +135,7 @@ pub fn warp(queue: &ID3D12CommandQueue, buffer: &ID3D12Resource) {
             return;
         }
     };
-    let mut prepared = Prepared { present, eye, pose: label.pose, pair, shown: None, generated: None };
+    let mut prepared = Prepared { present, eye, pose: shot.pose, pair, shown: None, generated: None };
     if framegen_running() {
         generate(state, queue, &mut prepared, &inputs, separation);
     }
@@ -158,11 +147,8 @@ pub fn warp(queue: &ID3D12CommandQueue, buffer: &ID3D12Resource) {
 pub(super) fn generate(state: &mut State, queue: &ID3D12CommandQueue, prepared: &mut Prepared, inputs: &Inputs, separation: f32) {
     let Ok(device) = d3d12::device_of(queue) else { return };
     let (eye, pair) = (prepared.eye, &prepared.pair);
-    // The history runs on when the last pair was the other eye's frame of the present before, the
-    // game kept its own history and nothing was forgotten (the warped eye's gaps came from its own
-    // last frame). It is this pair's once both streams were given it.
-    let previous = state.previous.take();
-    let continuous = previous.is_some_and(|(_, e, at)| e != eye && at + 1 == prepared.present) && !inputs.reset && pair.filled;
+    // Whether the history runs on (the core's rule), the last pair taken.
+    let (previous, continuous) = state.presents.generation(eye, prepared.present, inputs.reset, pair.filled);
     // SAFETY: reads descriptors.
     let (frame, depth) = unsafe { (pair.images[0].GetDesc(), pair.depths[0].GetDesc()) };
     let render = Size2 { width: depth.Width as u32, height: depth.Height };
@@ -197,13 +183,13 @@ pub(super) fn generate(state: &mut State, queue: &ID3D12CommandQueue, prepared: 
         return;
     }
     if made.is_some() {
-        state.previous = Some((prepared.pose, eye, prepared.present));
+        state.presents.generated(afw::Previous { pose: prepared.pose, eye, present: prepared.present });
     }
     if made == Some([true, true])
-        && let Some((before, ..)) = previous
+        && let Some(before) = previous
         && prepared.shown.is_some()
     {
-        prepared.generated = Some(monaka_framegen::blend(&before, &prepared.pose, 0.5));
+        prepared.generated = Some(afw::halfway(&before.pose, &prepared.pose));
     }
 }
 
@@ -272,12 +258,12 @@ pub fn lay_hud(queue: &ID3D12CommandQueue, layer: &ID3D12Resource, params: [hudo
     let Some(state) = guard.as_mut() else { return };
     let Some(prepared) = &state.prepared else { return };
     if !state.hud_fits {
-        COUNTERS.no_hud.fetch_add(1, Relaxed);
+        Counters::add(&COUNTERS.no_hud);
         log_first!(1, "frame warping: the back buffer's format is not one the warp writes; the warped eye goes without the HUD");
         return;
     }
     let Ok(Some(list)) = state.recorder.begin() else {
-        COUNTERS.no_hud.fetch_add(1, Relaxed);
+        Counters::add(&COUNTERS.no_hud);
         return;
     };
     let common = D3D12_RESOURCE_STATE_COMMON;

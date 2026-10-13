@@ -330,7 +330,9 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
     if producer.adapter != runtime_adapter {
         return Err("the game renders on a different GPU than the headset runtime".into());
     }
-    let (device, context, level) = d3d::create_device(Some(&find_adapter(runtime_adapter)?))?;
+    let adapter = find_adapter(runtime_adapter)?;
+    println!("GPU: {}", d3d::describe_adapter(&adapter));
+    let (device, context, level) = d3d::create_device(Some(&adapter))?;
     if level.0 < min_feature_level {
         return Err("GPU feature level is below the runtime's minimum".into());
     }

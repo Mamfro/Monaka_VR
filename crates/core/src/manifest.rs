@@ -25,6 +25,7 @@ pub enum Status {
     Playable,
     Beta,
     Alpha,
+    PreAlpha,
     InProgress,
     Experimental,
 }
@@ -35,6 +36,7 @@ impl Status {
             Status::Playable => "Playable",
             Status::Beta => "Beta",
             Status::Alpha => "Alpha",
+            Status::PreAlpha => "Pre-alpha",
             Status::InProgress => "In Progress",
             Status::Experimental => "Experimental",
         }
@@ -45,6 +47,7 @@ impl Status {
             Status::Playable => "You can play the whole game this way with no big problems.",
             Status::Beta => "You can probably play the whole game this way. Some rough edges remain.",
             Status::Alpha => "You can technically play it, but it isn't comfortable yet, and pieces may be missing.",
+            Status::PreAlpha => "It runs, but it's probably a bad experience. Very rough edges remain.",
             Status::InProgress => "Works, but pieces are missing.",
             Status::Experimental => "Probably runs, but rough.",
         }
@@ -177,8 +180,8 @@ pub struct SteamFiles {
 }
 
 /// While the option it is declared on has `value` (`!value`: any other, [`matches`]), the switch
-/// `target` is off whatever it is set to, for `reason` (one sentence: the window shows it under
-/// both options).
+/// `target` is off whatever it is set to, for `reason` (one sentence the window adds under the
+/// greyed-out target; empty when the rule says enough).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TurnsOff {
     pub value: &'static str,
@@ -193,7 +196,7 @@ impl Opt {
     }
 
     /// While this option is `value`, the switch `target` is off, for `reason`. The window greys
-    /// the target out and says why under both; the launcher writes it off; the producer reads it
+    /// the target out and names the rule under both; the launcher writes it off; the producer reads it
     /// off ([`Manifest::turned_off`]).
     pub const fn turns_off(self, value: &'static str, target: &'static str, reason: &'static str) -> Opt {
         Opt { turns_off: Some(TurnsOff { value, target, reason }), ..self }
@@ -829,12 +832,12 @@ pub mod plays {
 pub const PLAY_WITH: Opt = opt(
     "play_with",
     "Play with",
-    "What you hold while you play.",
+    "What you hold.",
     choice(&[(plays::VR, "VR controllers"), (plays::KEYBOARD, "Mouse and keyboard"), (plays::GAMEPAD, "Gamepad")], plays::VR),
 )
 .on(Shown::Controls)
 .launcher()
-.turns_off("!vr", "controller_pad", "Your VR controllers are not the game's gamepad while you play with something else.");
+.turns_off("!vr", "controller_pad", "");
 
 /// Whether `device` ([`PLAY_WITH`]) can make aim `aim`: motion controls and a pointing controller
 /// need the VR controllers; the look and the mouse or stick aim with anything.
@@ -916,7 +919,7 @@ pub const fn dpad_hold(directions: &'static [&'static str]) -> Opt {
     opt(
         "dpad_hold",
         "Hold d-pad menus",
-        "For controllers without a d-pad (Quest): a d-pad menu stays open until you pick with A, B, X or Y.",
+        "D-pad menus stay open until you pick with A, B, X or Y.",
         Kind::Switch { default: true },
     )
     .on(Shown::Controls)
@@ -958,7 +961,7 @@ pub const MENU_REACH_DEPTH: Opt = opt(
 pub const CONTROLLER_PROXY: Opt = opt(
     "controller_proxy",
     "Controller test",
-    "Your controllers act like another kind, to try its layout: Quest's have no d-pad or View button, Index's no d-pad. Your left grip stands in for the Quest thumbrest or the Index trackpad touch.",
+    "Try another controller's layout. The left grip stands in for the thumbrest or trackpad touch.",
     choice(&[("off", "Off"), ("touch", "Quest controllers"), ("index", "Valve Index controllers")], "off"),
 )
 .on(Shown::Controls)
@@ -987,7 +990,7 @@ pub const EYE_SEPARATION: Opt =
 
 /// The character walks where the player steps (`monaka_body::roomscale`).
 pub const ROOM_SCALE: Opt =
-    opt("room_scale", "Room-scale movement", "Your real steps and leans move your character; walls and enemies still stop it.", Kind::Switch { default: true })
+    opt("room_scale", "Room-scale movement", "Real steps and leans move your character.", Kind::Switch { default: true })
         .on(Shown::Controls)
         .only_when("aim", "hand_rig")
         .owned_by(Feature::RoomScale);
@@ -999,7 +1002,7 @@ pub const TURN: Opt =
 
 /// The VR controllers as the game's gamepad (`monaka_pad`).
 pub const CONTROLLER_PAD: Opt =
-    opt("controller_pad", "Controllers as gamepad", "Your VR controllers' sticks and buttons work as the game's gamepad.", Kind::Switch { default: true })
+    opt("controller_pad", "Controllers as gamepad", "Sticks and buttons act as the game's gamepad.", Kind::Switch { default: true })
         .on(Shown::Controls)
         .owned_by(Feature::Gamepad);
 
@@ -1014,17 +1017,13 @@ pub const CONTROLLER_PAD: Opt =
 pub const HOW_BUTTONS: HowTo = HowTo {
     action: "The game's buttons",
     ways: &[
+        way("Xbox layout: grips are LB/RB, menu button is Start.", &[("play_with", plays::VR), ("controller_pad", "1")]),
         way(
-            "Your VR controllers are the game's gamepad, so its button prompts mean these: the triggers are its triggers, the grips its bumpers (LB, RB), A and B are on the right controller, X and Y on the left, and the menu button is Start.",
+            "D-pad on Quest: left thumb on the thumbrest + right stick (menu button is then View). On Index: touch the left trackpad + right stick; right trackpad click is View.",
             &[("play_with", plays::VR), ("controller_pad", "1")],
         ),
-        way(
-            "No d-pad on your controllers? On Quest, rest your left thumb on the thumbrest: the right stick is then the d-pad and the menu button is View. On Index, touch the left trackpad and push the right stick for the d-pad; pressing the right trackpad is View.",
-            &[("play_with", plays::VR), ("controller_pad", "1")],
-        ),
-        way("Your VR controllers are not the game's gamepad.", &[("play_with", plays::VR), ("controller_pad", "0")]),
-        way("Your mouse and keyboard work as in the game; its own controls menu lists them.", &[("play_with", plays::KEYBOARD)]),
-        way("Your gamepad works as in the game; its own controls menu lists the buttons.", &[("play_with", plays::GAMEPAD)]),
+        way("As in the game.", &[("play_with", plays::KEYBOARD)]),
+        way("As in the game.", &[("play_with", plays::GAMEPAD)]),
     ],
     options: &["controller_pad", "controller_proxy"],
 };
@@ -1032,10 +1031,7 @@ pub const HOW_BUTTONS: HowTo = HowTo {
 /// Walking in the room, with motion controls. Names `room_scale`.
 pub const HOW_WALK: HowTo = HowTo {
     action: "Walk",
-    ways: &[
-        way("Walk in your room: your character follows your steps and leans. Walls and enemies still stop it.", &[("aim", aims::HAND_RIG), ("room_scale", "1")]),
-        way("Push the left stick to walk further.", &[("play_with", plays::VR)]),
-    ],
+    ways: &[],
     options: &["room_scale"],
 };
 
@@ -1078,6 +1074,17 @@ pub const CONTROLLER_SMOOTHING: Opt = opt(
 
 /// Disabled view bobbing: Monaka's own setting (saved once, for every game), read by the producer of
 /// each game that can (the game lists it among its options, unchanged: [`Manifest::check`]).
+/// More detail in the producer's log, for a bug report. Not an options-file line: the launcher
+/// leaves [`DIAGNOSTIC_MARKER`] in the run folder, and the window adds or removes it while VR runs,
+/// so it can change mid-run.
+pub const DIAGNOSTIC_LOGGING: Opt =
+    opt("diagnostic_logging", "Diagnostic logging", "More detail in the logs, for bug reports. Stops by itself at 64 MB per run.", Kind::Switch { default: false })
+        .on(Shown::Monaka)
+        .launcher();
+
+/// The run-folder file whose presence turns [`DIAGNOSTIC_LOGGING`] on in the producer.
+pub const DIAGNOSTIC_MARKER: &str = "diagnostic-logging.on";
+
 pub const DISABLE_VIEW_BOBBING: Opt = opt(
     "disable_view_bobbing",
     "Disable view bobbing",
@@ -1102,7 +1109,7 @@ pub const MONAKA: Manifest = Manifest {
     launch: Launch::Manual,
     refused_arguments: &[],
     before: "",
-    options: &[CONTROLLER_SMOOTHING, DISABLE_VIEW_BOBBING],
+    options: &[CONTROLLER_SMOOTHING, DISABLE_VIEW_BOBBING, DIAGNOSTIC_LOGGING],
     licences: &[],
     left_hand_aims: false,
     weapon_ring: false,
@@ -1267,12 +1274,11 @@ mod tests {
     fn a_how_to_shows_the_ways_that_hold() {
         let mut values = Values::default();
         let buttons = values.ways(&PLAYS, &HOW_BUTTONS);
-        assert!(buttons.len() == 2 && buttons[0].contains("bumpers") && buttons[1].contains("thumbrest"), "{buttons:?}");
-        assert_eq!(values.ways(&PLAYS, &HOW_WALK).len(), 2);
-        values.set("room_scale", "0");
-        assert_eq!(values.ways(&PLAYS, &HOW_WALK), ["Push the left stick to walk further."]);
+        assert!(buttons.len() == 2 && buttons[0].contains("LB/RB") && buttons[1].contains("thumbrest"), "{buttons:?}");
+        values.set("controller_pad", "0");
+        assert!(values.ways(&PLAYS, &HOW_BUTTONS).is_empty());
         values.set("play_with", "gamepad");
-        assert!(values.ways(&PLAYS, &HOW_BUTTONS)[0].starts_with("Your gamepad"));
+        assert_eq!(values.ways(&PLAYS, &HOW_BUTTONS), ["As in the game."]);
         assert!(values.ways(&PLAYS, &HOW_WALK).is_empty());
         assert!(matches("keyboard", "!vr") && !matches("vr", "!vr") && matches("vr", "vr"));
         // Every option a how-to names is the game's, under one how-to only; every condition one of

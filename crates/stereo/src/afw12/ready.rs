@@ -75,42 +75,23 @@ pub(super) static ON: AtomicBool = AtomicBool::new(false);
 pub(super) static FRAMEGEN: AtomicBool = AtomicBool::new(false);
 pub(super) static CHANNEL: Mutex<Option<ChannelName>> = Mutex::new(None);
 
-pub(super) struct Counters {
-    /// Presents whose frame had no fresh depth and camera (not warped).
-    pub(super) no_inputs: AtomicU64,
-    /// Pairs of the two newest real frames, a frame apart (a frame not warped).
-    pub(super) plain: AtomicU64,
-    pub(super) flat: AtomicU64,
-    pub(super) generated: AtomicU64,
-    pub(super) real: AtomicU64,
-    /// Our images without the HUD (no command list free, or a format it cannot go over).
-    pub(super) no_hud: AtomicU64,
-}
+pub(super) static COUNTERS: Counters = Counters::new();
 
-pub(super) static COUNTERS: Counters = Counters {
-    no_inputs: AtomicU64::new(0),
-    plain: AtomicU64::new(0),
-    flat: AtomicU64::new(0),
-    generated: AtomicU64::new(0),
-    real: AtomicU64::new(0),
-    no_hud: AtomicU64::new(0),
-};
-
-pub(super) const EVERY: [Every; 1] = [Every::millis(2000, log_report)];
+pub(super) const EVERY: [Every; 1] = [Every::millis(afw::REPORT_MS, log_report)];
 
 /// Frame warping for game `G` (AFW alone): each frame warped into the other eye, a pair of one
-/// moment at every present. The game says when it is on (`on`) and what it works on top of
-/// (`needs`: its eyes) by struct update; its pairs go out at the present loop's step
-/// ([`before_present`], joined at its install).
+/// moment at every present (the core's component, [`afw::component`]). The game says when it is
+/// on ([`afw::on`]) and what it works on top of (`needs`: its eyes) by struct update; its pairs go
+/// out at the present loop's step ([`before_present`], joined at its install).
 pub const fn frame_warping<G: Presents + FrameInputs + HudLayer>() -> Component<G> {
-    Component { name: "frame warping", needs_channel: true, install: install::<G>, every: &EVERY, release: close, ..Component::NONE }
+    afw::component(install::<G>, close, &EVERY, report, true)
 }
 
 /// Frame warping for game `G` on the same-frame loop (`crate::same_frame`) fed one eye per frame:
 /// each frame warped into the other eye, the pair going out through the loop's pair sink. The loop
 /// hands each frame over at its present ([`pair_present`]).
 pub const fn frame_warping_pairs<G: PresentsPairs + EyeSite + FrameInputs + HudLayer>() -> Component<G> {
-    Component { name: "frame warping", install: install_pairs::<G>, every: &EVERY, release: close, ..Component::NONE }
+    afw::component(install_pairs::<G>, close, &EVERY, report, false)
 }
 
 /// Frame generation, on top of [`frame_warping`] (or [`frame_warping_pairs`]): FSR frame generation

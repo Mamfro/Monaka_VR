@@ -54,7 +54,7 @@ fn each_projectile_leaves_where_dying_light_1_shot_it() {
             for velocity in [[0.0; 3], [0.0, 0.0, -300.0], [3.0, -1.0, -280.0], [-40.0, 2.0, 1.0]] {
                 let was = old_shot(&holder, aim, velocity);
                 let world = line.in_world(&holder).unwrap();
-                let fired = Fired { weapon: Weapon::Gun, game: Flight { from: [1.0, 2.0, 3.0], velocity }, aim: Some(aim) };
+                let fired = Fired { weapon: Weapon::Gun, game: Flight { from: [1.0, 2.0, 3.0], velocity }, aim: Some(aim), side: None };
                 let now = from_barrel(&fired, world.end().unwrap(), world.along).and_then(|shot| shot.flight(&fired.game));
                 match (now, was) {
                     (Some(now), Some(was)) => {

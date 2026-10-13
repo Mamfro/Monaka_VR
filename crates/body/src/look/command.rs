@@ -15,8 +15,8 @@
 //! head is not put into the angles. After a pause the share is held for the first commands
 //! ([`PAUSE_HOLD_COMMANDS`]): the game lines its angles up with them. With only the head pitching
 //! (the pad's stick pitch taken) the player's own pitch is brought back toward level a step at a
-//! time. Its option (not shown by the launcher): `pause_hold=0` drops the share at once after a
-//! pause.
+//! time, where the game lets it (the delivery's `levels`). Its option (not shown by the launcher):
+//! `pause_hold=0` drops the share at once after a pause.
 
 use super::{Delivery, Looks, Share};
 use monaka_core::aim::Levelling;
@@ -55,7 +55,7 @@ fn no_head() -> Option<HeadPose> {
 pub(super) fn install<G: Looks>(start: &mut Start<'_, G>) -> Result<(), Lack> {
     PAUSE_HOLD.store(start.options.switch("pause_hold", true), Release);
     let head = match G::DELIVERY {
-        Delivery::Command { head } => head,
+        Delivery::Command { head, .. } => head,
         _ => no_head,
     };
     *GAME.locked() = Some(GameFns { camera_taken: camera_taken::<G>, head });
@@ -63,10 +63,19 @@ pub(super) fn install<G: Looks>(start: &mut Start<'_, G>) -> Result<(), Lack> {
 }
 
 /// Steering starts; while only the head pitches the view (the pad's stick pitch taken,
-/// `monaka_pad::feature::pitch_from_head`), the player's own pitch is kept level.
-pub(super) fn arm() {
-    LEVELLING.store(monaka_pad::feature::pitch_from_head(), Release);
+/// `monaka_pad::feature::pitch_from_head`), the player's own pitch is kept level where game `G`
+/// says it may be (its delivery's `levels`).
+pub(super) fn arm<G: Looks>() {
+    LEVELLING.store(levels::<G>() && monaka_pad::feature::pitch_from_head(), Release);
     AIMING.store(true, Release);
+}
+
+/// Whether game `G` lets the player's own pitch be kept level now.
+fn levels<G: Looks>() -> bool {
+    match G::DELIVERY {
+        Delivery::Command { levels, .. } => levels(),
+        _ => true,
+    }
 }
 
 /// The stop's first step: the head goes into no more commands.

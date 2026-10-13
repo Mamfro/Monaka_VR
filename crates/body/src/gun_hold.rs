@@ -8,9 +8,12 @@
 //! A game says, for each hand, what lines up ([`crate::hand_rig::HandRig::lined_up`]): where the
 //! barrel points as the game posed the weapon, the element it hangs from, and which elements turn
 //! ([`LinedUp`]). The rig does the rest ([`line_up`]), before the game's own adjustment.
+//!
+//! A game that places each held gun itself, the arms hanging from the guns, asks where the gun
+//! goes instead ([`on_controller`]): on its controller's palm.
 
 use crate::Frames;
-use monaka_core::camera::{Mat34, apply_3x3, compose, position, rigid_inverse};
+use monaka_core::camera::{IDENTITY_MATRIX, Mat34, apply_3x3, apply_head, compose, position, rigid_inverse};
 use monaka_core::math::{Vec3, dot, forward_axis, length, sub, unit};
 use monaka_core::protocol::HandPose;
 use monaka_core::reach::turn_about;
@@ -79,6 +82,12 @@ pub fn line_up(frames: &mut Frames, lined: &LinedUp, origin: &Mat34, palm: Optio
             now[joint] = compose(&reach, &now[joint]);
         }
     }
+}
+
+/// Where a gun held by its controller goes in the world (canonical): the controller's palm `palm`
+/// (tracking space) on `origin`, where the tracking space sits in the world as the view is drawn.
+pub fn on_controller(origin: &Mat34, palm: &HandPose) -> Mat34 {
+    compose(origin, &apply_head(&IDENTITY_MATRIX, palm.orientation, palm.position))
 }
 
 /// The shortest turn about `pivot` taking direction `from` onto `to`; none for directions nearly

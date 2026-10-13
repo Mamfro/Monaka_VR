@@ -10,7 +10,7 @@
 //! both eyes' ([`pair_depth`]); frame warping and per-eye frame generation send their own. Menus
 //! and other flat frames go without.
 
-use crate::afw12::Rendered;
+use crate::afw::Rendered;
 use crate::alternate12::FrameDepth;
 use crate::pairs12::{EyeDepth12, PairDepth};
 use crate::providers::FrameInputs;

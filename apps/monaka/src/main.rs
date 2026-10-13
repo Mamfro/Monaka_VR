@@ -10,6 +10,7 @@
 mod screenshot;
 mod theme;
 
+use monaka_core::manifest::{DIAGNOSTIC_LOGGING, DIAGNOSTIC_MARKER};
 use monaka_launch::games::{self, Game, Kind, Launch, MONAKA, Manifest, Opt, PLAY_WITH, Shown, TABS, Values, number_text};
 use monaka_launch::session::{self, Console, Event, State, Stop};
 use monaka_launch::settings::Settings;
@@ -222,10 +223,10 @@ fn send(hwnd: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
 /// its own help and what it turns off.
 fn help_text(game: &Manifest, values: &Values, opt: &Opt) -> String {
     if let Some((cause, rule)) = values.turned_off(game, opt.id) {
-        return format!("Off while {} is {}. {}", cause.label, value_name(cause, rule.value), rule.reason);
+        return format!("Off while {} is {}. {}", cause.label, value_name(cause, rule.value), rule.reason).trim_end().to_owned();
     }
     match opt.turns_off.and_then(|rule| game.option(rule.target).map(|target| (rule, target))) {
-        Some((rule, target)) => format!("{} {} turns off {}. {}", opt.help, set_to(opt, rule.value), target.label, rule.reason),
+        Some((rule, target)) => format!("{} {} turns off {}.", opt.help, set_to(opt, rule.value), target.label),
         None => opt.help.to_owned(),
     }
 }
@@ -530,8 +531,6 @@ struct App {
     /// scroll bar.
     scroll: i32,
     scrollbar: HWND,
-    /// The client height last asked of the window, so a size the screen cannot give is asked once.
-    asked_height: i32,
     /// `--screenshot`: where the picture goes.
     screenshot: Option<PathBuf>,
     /// Packs made for a newer Monaka still to tell the player about, and those told this run.
@@ -600,7 +599,6 @@ impl App {
             scroll: 0,
             // SBS_VERT: a vertical bar.
             scrollbar: child(hwnd, w!("SCROLLBAR"), "", 1, ID_SCROLL),
-            asked_height: 0,
             screenshot: None,
             too_new: catalogue.too_new.clone(),
             told_too_new: Vec::new(),
@@ -860,6 +858,9 @@ impl App {
         let device = row.opt.id == PLAY_WITH.id;
         saved.set(row.opt.id, value);
         let _ = self.settings.save();
+        if row.opt.id == DIAGNOSTIC_LOGGING.id {
+            self.mark_diagnostics();
+        }
         if device {
             // The aims on offer follow what the player holds: the option controls are made again,
             // once the drop-down list that changed it is done with this message.
@@ -1063,13 +1064,9 @@ impl App {
         b += start_height + s(8);
         place(self.state_line, x, b, w, state_height);
 
-        // Tall enough for every option, as far as the screen goes; past that the options scroll.
-        let fits_all = area_top + content + s(8) + bottom_block + margin;
-        self.min_client = (s(760), fits_all.min(self.screen_client_height()));
-        if height < self.min_client.1 && height > 0 && self.asked_height != self.min_client.1 {
-            self.asked_height = self.min_client.1;
-            self.grow_to_fit();
-        }
+        // Room for a few options at least; the rest scroll, so a long tab never grows the window.
+        let fits_some = area_top + content.min(s(240)) + s(8) + bottom_block + margin;
+        self.min_client = (s(760), fits_some.min(self.screen_client_height()));
     }
 
     /// The tallest client area the window's screen gives it (its work area, less the frame).
@@ -1115,20 +1112,6 @@ impl App {
         }
     }
 
-    /// Makes the window tall enough for the current layout (more options shown).
-    fn grow_to_fit(&self) {
-        let mut window = RECT::default();
-        let mut client = RECT::default();
-        // SAFETY: our window's rectangles, then a resize; the WM_SIZE it sends is handled after.
-        unsafe {
-            let _ = GetWindowRect(self.hwnd, &mut window);
-            let _ = GetClientRect(self.hwnd, &mut client);
-            let extra = self.min_client.1 - client.bottom;
-            let _ = SetWindowPos(self.hwnd, None, 0, 0, window.right - window.left, window.bottom - window.top + extra, SWP_NOMOVE | SWP_NOZORDER);
-            let _ = PostMessageW(Some(self.hwnd), WM_SIZE, WPARAM(0), LPARAM(0));
-        }
-    }
-
     /// Updates what is ready (SteamVR, the game) and what may be pressed.
     fn refresh_checks(&mut self) {
         self.steamvr_up = system::steamvr_running();
@@ -1168,8 +1151,9 @@ impl App {
 
     fn set_running_controls(&self, running: bool) {
         enable(self.games, !running);
+        // Diagnostic logging may change mid-run (the producer follows the run folder's marker).
         for row in &self.rows {
-            enable(row.control, !running);
+            enable(row.control, !running || row.opt.id == DIAGNOSTIC_LOGGING.id);
         }
         enable(self.reset, !running);
         enable(self.add_pack, !running);
@@ -1243,7 +1227,11 @@ impl App {
                     self.detail(&format!("Error: {line}"));
                 }
                 Event::Detail(line) => self.detail(&format!("  {line}")),
-                Event::RunFolder(folder) => self.run_folder = Some(folder),
+                Event::RunFolder(folder) => {
+                    self.run_folder = Some(folder);
+                    // A run restarted mid-session takes the setting as it is now.
+                    self.mark_diagnostics();
+                }
             }
         }
     }
@@ -1279,6 +1267,14 @@ impl App {
         let _ = self.settings.save();
         self.select(self.selected);
         self.say(&format!("{}: options back to their defaults.", game.name), false);
+    }
+
+    /// Leaves or takes away the diagnostic-logging marker in the running run's folder, as the
+    /// setting is now; the producer follows it within a second.
+    fn mark_diagnostics(&self) {
+        let (Some(_), Some(folder)) = (&self.running, &self.run_folder) else { return };
+        let marker = folder.join(DIAGNOSTIC_MARKER);
+        let _ = if self.settings.monaka.switch(&MONAKA, DIAGNOSTIC_LOGGING.id) { std::fs::write(&marker, "") } else { std::fs::remove_file(&marker) };
     }
 
     fn open_logs(&self) {

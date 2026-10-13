@@ -33,6 +33,17 @@ pub fn find_adapter(adapter: Luid) -> Result<IDXGIAdapter1> {
     }
 }
 
+/// The adapter's name, memory and driver version, for logs.
+pub fn describe_adapter(adapter: &IDXGIAdapter1) -> String {
+    // SAFETY: COM calls on a live adapter.
+    let (desc, umd) = unsafe { (adapter.GetDesc1(), adapter.CheckInterfaceSupport(&IDXGIDevice::IID)) };
+    let Ok(desc) = desc else { return "(no description)".into() };
+    let end = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
+    let name = String::from_utf16_lossy(&desc.Description[..end]);
+    let driver = umd.map_or_else(|_| "unknown".into(), |v| format!("{}.{}.{}.{}", v >> 48, (v >> 32) & 0xffff, (v >> 16) & 0xffff, v & 0xffff));
+    format!("{name}, {} MB, driver {driver}", desc.DedicatedVideoMemory / (1024 * 1024))
+}
+
 /// A hardware D3D11 device (feature level 11.0 or better) and its immediate context on `adapter`,
 /// or on the default adapter.
 pub fn create_device(adapter: Option<&IDXGIAdapter1>) -> Result<(ID3D11Device, ID3D11DeviceContext, D3D_FEATURE_LEVEL)> {

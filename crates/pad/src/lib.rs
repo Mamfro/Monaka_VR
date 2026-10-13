@@ -1,7 +1,8 @@
 //! The VR controllers as the game's gamepad: the viewer writes them as one Xbox-layout pad into
 //! the hand block ([`monaka_core::pad`]); this hands that pad to the game as XInput pad 0, merged
 //! with a real pad when one is plugged in. Every control and menu then works as with a real pad,
-//! with the game's own prompts, and nothing is mapped per game.
+//! with the game's own prompts; a game may move some of the controllers' buttons onto others for
+//! VR (`remap`).
 //!
 //! Three XInput calls are caught: reading the pad (`XInputGetState`, or `XInputGetStateEx`, #100,
 //! as SDL reads it) and asking what is plugged in (`XInputGetCapabilities`, which reports a pad in
@@ -23,6 +24,7 @@ pub mod focus;
 pub mod gameinput;
 pub mod mouse;
 pub mod probe;
+pub mod remap;
 mod presses;
 mod stick;
 mod vr_pad;

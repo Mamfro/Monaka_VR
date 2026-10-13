@@ -130,12 +130,14 @@ pub fn release() {
     *CHANNEL.locked() = None;
 }
 
-/// The VR pad, while the viewer keeps it fresh.
+/// The VR pad, while the viewer keeps it fresh, its buttons as the game's VR button layout has them
+/// ([`crate::remap`]).
 pub(super) fn vr_pad() -> Option<Gamepad> {
     if !ACTIVE.load(Acquire) {
         return None;
     }
-    CHANNEL.lock().ok()?.as_mut()?.read_pad(PAD_MAX_AGE_MS)
+    let pad = CHANNEL.lock().ok()?.as_mut()?.read_pad(PAD_MAX_AGE_MS)?;
+    Some(crate::remap::controllers(pad))
 }
 
 /// Whether the viewer keeps the VR pad fresh now (a producer can then tell its game a pad is there).

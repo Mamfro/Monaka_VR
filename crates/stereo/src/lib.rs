@@ -23,15 +23,20 @@
 //! - [`alternate12`]: the same over a D3D12 swapchain and the fence channel.
 //! - [`pairs11`]: same-frame pairs over a D3D11 swapchain, each eye copied at its present.
 //! - [`pairs12`]: any two D3D12 textures published as one pair, each eye with its own pose.
-//! - [`afw11`]: AFW on D3D11 (alternate-eye rendering with depth): a pair every frame, the other eye
-//!   reprojected from the real one and its gaps filled from that eye's own last real frame.
-//! - [`afw12`]: the same on D3D12 (alternate frame warping): the real eye warped into the other
-//!   at the same head pose, a pair of one moment at every present, both eyes' depth with it; its
-//!   components ready-made (`frame_warping()`, `frame_generation()`).
+//! - [`afw`]: AFW (alternate frame warping), one implementation: a pair of one moment at every
+//!   present, the real eye warped into the other and its gaps filled from that eye's own last real
+//!   frame. The core shared by its backends (which eye is real, the poses, the gaps' rules, each
+//!   eye's history, what goes out, the counts, the component's shape).
+//! - [`afw11`]: AFW's D3D11 backend, its component ready-made (`frame_warping()`).
+//! - [`afw12`]: AFW's D3D12 backend, both eyes' depth with each pair; its components ready-made
+//!   (`frame_warping()`, `frame_generation()`, `frame_warping_pairs()`).
 //! - [`framegen12`]: per-eye FSR frame generation for alternate eyes, its component ready-made
 //!   (`per_eye()`), and for same-frame pairs (`pairs::per_eye_pairs()`).
 //! - [`hud_layer`]: the HUD layer's base component (`hud_layer()`): the feature, the HUD's size and
-//!   distance options, on while the HUD is shown; every method's HUD component builds on it.
+//!   distance options, on while the HUD is shown; every method's HUD component builds on it. With
+//!   the lay-over of a D3D12 game's HUD layer at its present request (`hud_layer::present12`).
+//! - [`hud_panels`]: the dynamic HUD, the HUD's pieces on the hands, draw-level (D3D11, OpenGL) or
+//!   by crops of a D3D12 HUD layer.
 //! - [`hud11`]: a D3D11 game's HUD placed in front of each eye (viewport of the draws after the
 //!   scene copy).
 //! - [`hudover12`]: a D3D12 game's UI layer laid back over each eye frame at the HUD's place, on
@@ -46,6 +51,7 @@
 //! Depth-based stereo from a single centre render is `monaka_warp`, with its math in
 //! `monaka_core::depth`.
 
+pub mod afw;
 pub mod afw11;
 pub mod afw12;
 pub mod alternate;

@@ -10,7 +10,8 @@
 //! - [`GameQueue`]: the game's D3D12 direct queue (its device, the command lists it executes).
 //! - [`HudLayer`]: the game's HUD kept out of its frames as a layer and laid back over each eye at
 //!   its present request, also over the images features make of their own ([`before_hud`],
-//!   [`lay_hud_beside`]).
+//!   [`lay_hud_beside`]); on D3D12 the layer itself ([`HudLayer12`]), for the lay-over
+//!   (`crate::hud_layer::present12`).
 //!
 //! A feature bounds its game on the providers it reads (`crate::afw12::frame_warping`,
 //! `crate::depth_layer::depth_layer`, `crate::foveate12::foveation`, `crate::framegen12::per_eye`),
@@ -295,6 +296,23 @@ pub trait HudLayer: FrameLabels {
     /// How the layer goes over eye `eye`'s image of `size` (`None`: the eye of the frame about to
     /// present): its place, size and disparity. `None` while the game's own layout stands.
     fn over(size: (u32, u32), eye: Option<usize>) -> Option<Params>;
+}
+
+/// A D3D12 game's HUD layer itself, for the lay-over at its present request
+/// (`crate::hud_layer::present12`): taken there with the frame's HUD, given back after.
+pub trait HudLayer12: HudLayer {
+    /// The layer with this frame's HUD (premultiplied RGBA of `size`, in COMMON), at the present;
+    /// `None` until the HUD has been drawn into one.
+    fn take_layer(queue: &ID3D12CommandQueue, size: (u32, u32)) -> Option<ID3D12Resource>;
+    /// After the present's work with the layer: given back for the next frame's HUD.
+    fn return_layer(queue: &ID3D12CommandQueue);
+    /// The HUD is kept out of the frame (the lay-over puts it back); else it is drawn in as well.
+    fn kept_out() -> bool;
+    /// From the next frame's draws on, the HUD goes to the frame as the game draws it (`through`,
+    /// a menu shown whole) or is kept out again.
+    fn let_through(through: bool);
+    /// Once a frame, at the present, after the layer's work.
+    fn frame_end() {}
 }
 
 /// A feature's work on the frame (in PRESENT) before the HUD goes over it.

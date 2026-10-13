@@ -100,6 +100,12 @@ impl HeadAim {
         if c.yaw_per_radian == 0.0 { 0.0 } else { self.yaw_share / c.yaw_per_radian }
     }
 
+    /// The game wrote the targets itself: none of the head's share is in them any more. The share
+    /// is dropped without writing anything back (the targets are the game's as they are).
+    pub fn forget(&mut self) {
+        *self = Self { owner: self.owner, ..Self::default() };
+    }
+
     pub fn holds_share(&self) -> bool {
         self.yaw_share != 0.0 || self.pitch_share != 0.0
     }

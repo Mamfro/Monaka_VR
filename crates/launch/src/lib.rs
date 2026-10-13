@@ -4,6 +4,8 @@
 //! - [`games`]: every game the launcher offers, its options, and what those become.
 //! - [`packs`]: game packs read from their DLLs, and the games folder they are added to.
 //! - [`session`]: one VR session (find or start the game, attach, view, restart, stop).
+//! - [`run_log`]: each run's `monaka.log` (what ran where, and what the run reported), and
+//!   pruning old run folders.
 //! - [`attach`]: injecting a producer and calling its `MonakaStart`/`MonakaStop` (also `monaka_loader`).
 //! - [`system`]: processes and their command lines, SteamVR's OpenXR files, Steam libraries, the
 //!   Documents folder.
@@ -17,6 +19,7 @@ pub mod attach;
 pub mod check;
 pub mod games;
 pub mod packs;
+pub mod run_log;
 pub mod session;
 pub mod settings;
 pub mod system;

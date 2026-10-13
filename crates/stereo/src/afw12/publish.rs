@@ -48,7 +48,7 @@ pub(super) fn pair_depth(pair: &Pair, units_per_metre: f32) -> Option<PairDepth>
 pub(super) fn send_due(due: Due) {
     let common = D3D12_RESOURCE_STATE_COMMON;
     send([(&due.images[0], common), (&due.images[1], common)], Some([due.pose; 2]), due.depth.as_ref());
-    COUNTERS.real.fetch_add(1, Relaxed);
+    Counters::add(&COUNTERS.real);
 }
 
 /// The alternate-eye loop's step while [`enabled`] ([`present_step`]): the frame about to present
@@ -100,26 +100,29 @@ pub(super) fn publish(queue: &ID3D12CommandQueue, frame: Frame, game: GameFns) -
     let Some(state) = state_for(&mut guard, queue) else { return Step::Failed };
     let prepared = state.prepared.take().filter(|p| p.present == present && label.is_some_and(|l| l.eye.min(1) == p.eye));
     let common = D3D12_RESOURCE_STATE_COMMON;
-    if flat.is_some() {
-        forget(state);
-        drop(guard);
-        COUNTERS.flat.fetch_add(1, Relaxed);
-        return PACING.now_then(|| send([presented; 2], None, None), None);
-    }
-    let Some(label) = label else {
-        // A lone unlabelled frame in play is skipped (a flat frame would flash); the pause screen
-        // and loading (the player camera is not updated) go to both eyes with the newest pose.
-        if state.last_labelled.is_some_and(|t| t.elapsed().as_millis() < 200) {
-            return Step::Waiting;
-        }
-        forget(state);
-        drop(guard);
-        let pose = game.head().current().unwrap_or_default();
-        return PACING.now_then(|| send([presented; 2], Some([pose; 2]), None), None);
-    };
     let now = Instant::now();
-    state.last_labelled = Some(now);
-    let Some(prepared) = prepared else { return plain(state, queue, presented, label.eye.min(1), label.pose, present) };
+    let out = state.presents.out(flat.is_some(), label.is_some(), prepared.is_some(), now);
+    if out.forgets() {
+        forget(state);
+    }
+    let prepared = match (out, label, prepared) {
+        (Out::Flat, ..) => {
+            drop(guard);
+            Counters::add(&COUNTERS.flat);
+            return PACING.now_then(|| send([presented; 2], None, None), None);
+        }
+        // The pause screen and loading (the player camera is not updated) go to both eyes with the
+        // newest pose.
+        (Out::BothEyes, ..) => {
+            drop(guard);
+            let pose = game.head().current().unwrap_or_default();
+            return PACING.now_then(|| send([presented; 2], Some([pose; 2]), None), None);
+        }
+        (Out::Plain, Some(label), _) => return plain(state, queue, presented, label.eye.min(1), label.pose, present),
+        (Out::Warped, _, Some(prepared)) => prepared,
+        // A lone unlabelled frame in play is skipped (a flat frame would flash).
+        _ => return Step::Waiting,
+    };
     let Prepared { eye, pose, pair, shown, generated, .. } = prepared;
     let depth = pair_depth(&pair, game.units_per_metre);
     let Some(shown) = shown else {
@@ -135,14 +138,14 @@ pub(super) fn publish(queue: &ID3D12CommandQueue, frame: Frame, game: GameFns) -
     let real = Due { images: shown, pose, depth };
     match (generated, outputs) {
         (Some(halfway), Some(outputs)) => {
-            COUNTERS.generated.fetch_add(1, Relaxed);
+            Counters::add(&COUNTERS.generated);
             // Halfway between the last pair and this one: this (the newer) pair's depth.
             let depth = real.depth.clone();
             PACING.now_then(|| send([(&outputs[0], common), (&outputs[1], common)], Some([halfway; 2]), depth.as_ref()), Some((due, real)))
         }
         _ => PACING.now_then(
             || {
-                COUNTERS.real.fetch_add(1, Relaxed);
+                Counters::add(&COUNTERS.real);
                 send([(&real.images[0], common), (&real.images[1], common)], Some([real.pose; 2]), real.depth.as_ref())
             },
             None,
@@ -158,21 +161,18 @@ pub(super) fn plain(state: &mut State, queue: &ID3D12CommandQueue, presented: (&
     let (buffer, buffer_state) = presented;
     // SAFETY: reads a descriptor.
     let desc = unsafe { buffer.GetDesc() };
-    let kept = state.plain[eye].take().map(|(texture, ..)| texture);
-    let mut slot = kept;
+    let mut slot = state.plain[eye].take();
+    state.presents.lose_plain(eye);
     let Some(copy) = d3d12::fitting(&mut slot, &device, desc.Width, desc.Height, desc.Format, D3D12_RESOURCE_FLAG_NONE) else { return Step::Failed };
     let Ok(Some(list)) = state.recorder.begin() else { return Step::Waiting };
     d3d12::copy_whole(&list, &copy, buffer, buffer_state);
     if state.recorder.submit(queue).is_err() {
         return Step::Failed;
     }
-    state.plain[eye] = Some((copy, pose, present));
-    let other = match &state.plain[1 - eye] {
-        Some((texture, pose, at)) if present.saturating_sub(*at) <= 1 => Some((texture.clone(), *pose)),
-        _ => None,
-    };
+    state.plain[eye] = Some(copy);
+    let other = state.presents.plain(eye, pose, present).and_then(|pose| Some((state.plain[1 - eye].clone()?, pose)));
     let Some((other, other_pose)) = other else { return Step::Waiting };
-    COUNTERS.plain.fetch_add(1, Relaxed);
+    Counters::add(&COUNTERS.plain);
     let images = in_eye_order(eye, presented, (&other, D3D12_RESOURCE_STATE_COMMON));
     let poses = in_eye_order(eye, pose, other_pose);
     PACING.now_then(|| send(images, Some(poses), None), None)
@@ -181,7 +181,7 @@ pub(super) fn plain(state: &mut State, queue: &ID3D12CommandQueue, presented: (&
 /// Both eyes' history dropped (a menu, a cut): the next pair starts afresh.
 pub(super) fn forget(state: &mut State) {
     state.afw.forget();
-    state.previous = None;
+    state.presents.forget();
     state.streams.iter_mut().flatten().for_each(|s| s.primed = false);
 }
 
@@ -210,30 +210,10 @@ pub(super) fn log_report(_: f64) {
     log!("{}", report());
 }
 
-/// The periodic report's line.
+/// The periodic report's line (the core's, [`afw::report_line`]).
 pub fn report() -> String {
     let warped = STATE.lock().ok().and_then(|s| s.as_ref().map(|s| s.afw.counts())).unwrap_or_default();
-    let count = |c: &AtomicU64| c.load(Relaxed);
-    let collected = inputs::copies();
-    let mut line = format!(
-        "frame warping: inputs L/R {}/{}, warped pairs {} (gaps from the eye's own frame {}), GPU busy {}, failed {}, frames without inputs {}, plain pairs {}, flat {}, without the HUD {}",
-        collected[0],
-        collected[1],
-        warped.pairs,
-        warped.filled,
-        warped.busy,
-        warped.failures,
-        count(&COUNTERS.no_inputs),
-        count(&COUNTERS.plain),
-        count(&COUNTERS.flat),
-        count(&COUNTERS.no_hud),
-    );
     let with_depth = PUBLISHER.lock().ok().and_then(|p| p.as_ref().map(|p| p.pairs_with_depth())).unwrap_or(0);
-    if with_depth > 0 {
-        line += &format!(", pairs with depth {with_depth}");
-    }
-    if framegen_running() {
-        line += &format!("; in-between pairs {}, real pairs {}, eyes not generated {}", count(&COUNTERS.generated), count(&COUNTERS.real), monaka_framegen::eyes_skipped());
-    }
-    line
+    let framegen = framegen_running().then(monaka_framegen::eyes_skipped);
+    afw::report_line(inputs::copies(), warped, &COUNTERS, with_depth, framegen)
 }
