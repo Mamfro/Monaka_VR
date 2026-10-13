@@ -61,7 +61,8 @@ pub const fn per_eye<G: Game>() -> Component<G> {
     }
 }
 
-/// Each eye's frames go to its own upscaler history now, by either method.
+/// Each eye's frames go to its own upscaler history now, by either method (not merely armed: the
+/// game's upscaler options passed on, its twin context made, nothing broken).
 pub fn running() -> bool {
-    monaka_streamline::per_eye::enabled() || upscale_per_eye::running()
+    monaka_streamline::per_eye::running() || upscale_per_eye::running()
 }

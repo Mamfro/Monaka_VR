@@ -106,7 +106,7 @@ fn every_splat_lands_where_it_did() {
             for (offset, (frame, color, depth)) in [-0.064f32, 0.064, 1.0].into_iter().zip(shapes) {
                 let view = View { projection, camera: moved(&real, offset), mapping, width: frame.0, height: frame.1 };
                 let old = before(&view, color, depth, &projection, &real).unwrap();
-                let new = Constants::redraw(&view, None).splat(&view, color, depth, &projection, &real).unwrap();
+                let new = Constants::redraw(&view, None, [0, 0]).splat(&view, color, ([0, 0], depth), [0.0; 2], &projection, &real).unwrap();
                 assert_eq!(
                     (new.width, new.height, new.source_width, new.source_height, new.depth_width, new.depth_height, new.near_a, new.near_b),
                     (old.width, old.height, old.source_width, old.source_height, old.depth_width, old.depth_height, old.near_a, old.near_b)
@@ -141,7 +141,7 @@ fn far_from_the_origin_the_shared_matrix_lands_closer_to_true() {
     let (projection, mapping) = projections()[2];
     let real = camera([3000.0, 40.0, -2500.0], 0.6, -0.2);
     let view = View { projection, camera: moved(&real, 0.064), mapping, width: 1440, height: 1600 };
-    let new = Constants::redraw(&view, None).splat(&view, (1440, 1600), (1440, 1600), &projection, &real).unwrap();
+    let new = Constants::redraw(&view, None, [0, 0]).splat(&view, (1440, 1600), ([0, 0], (1440, 1600)), [0.0; 2], &projection, &real).unwrap();
     let old = before(&view, (1440, 1600), (1440, 1600), &projection, &real).unwrap();
     let truth = truth(&view, &projection, &real);
     let ndc = [0.3, -0.2, 0.05];

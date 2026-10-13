@@ -3,34 +3,76 @@ use monaka_core::depth::DepthMapping;
 use monaka_core::math::Vec3;
 use monaka_core::protocol::DepthParams;
 use monaka_framegen::ffx::Float2;
-use monaka_framegen::inputs::Place;
+use monaka_framegen::inputs::{Place, PreviousFrame};
 use monaka_framegen::upscale::{GameDispatch, GameResource, create};
 use monaka_streamline::{Constants, constants as at};
 
+/// `v` (a row vector) through `m`.
+fn row(v: [f32; 4], m: &Mat44) -> [f32; 4] {
+    std::array::from_fn(|c| (0..4).map(|k| v[k] * m[k * 4 + c]).sum())
+}
+
+/// Where a point seen by `from` at `ndc` (with its depth) lands in `to`'s normalised coordinates,
+/// through the motion passes' matrix.
+fn landed(from: &Rendered, to: &Rendered, ndc: [f32; 3]) -> [f32; 3] {
+    let moved = row([ndc[0], ndc[1], ndc[2], 1.0], &to_clip(from, to).unwrap());
+    [moved[0] / moved[3], moved[1] / moved[3], moved[2] / moved[3]]
+}
+
 #[test]
-fn the_parallax_moves_a_point_by_the_eyes_disparity() {
-    // DLSS's view to clip (row vectors): reverse-Z infinite, near 0.05.
-    let near = 0.05f32;
-    let view_to_clip: Mat44 = [1.036, 0.0, 0.0, 0.0, 0.0, 1.84, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, near, 0.0];
-    let row = |v: [f32; 4], m: &Mat44| -> [f32; 4] { std::array::from_fn(|c| (0..4).map(|k| v[k] * m[k * 4 + c]).sum()) };
-    for (eye, distance) in [(0, 2.0f32), (1, 2.0), (0, 0.5), (1, 30.0)] {
-        // A point `distance` ahead, a little right: its clip position in this eye.
-        let clip = row([0.3, -0.1, -distance, 1.0], &view_to_clip);
-        let ndc = [clip[0] / clip[3], clip[1] / clip[3], clip[2] / clip[3]];
-        let moved = row([ndc[0], ndc[1], ndc[2], 1.0], &parallax(&view_to_clip, eye, 0.064).unwrap());
-        let shift = moved[0] / moved[3] - ndc[0];
-        // The other eye sees it further right for the left eye (left for the right eye): from
-        // there to here is this much, the other way.
+fn the_clip_to_clip_matrix_moves_a_point_by_the_eyes_disparity() {
+    let left = left_eye();
+    let right = left.other_eye(0, 0.064, None);
+    for distance in [0.5f32, 2.0, 30.0] {
+        // A point `distance` ahead, a little right and down, as the left eye sees it.
+        let c = &left.camera;
+        let point = std::array::from_fn(|k| c[k * 4 + 3] - distance * c[k * 4 + 2] + 0.3 * c[k * 4] - 0.1 * c[k * 4 + 1]);
+        let ndc = seen(&left, point);
+        let in_right = landed(&left, &right, ndc);
+        // The right eye sees it further left, by the eyes' disparity; the left eye where it was.
         let disparity = 0.064 * 1.036 / distance;
-        let expected = if eye == 0 { disparity } else { -disparity };
-        assert!((shift - expected).abs() < 1e-4, "eye {eye} at {distance} m: {shift} {expected}");
-        assert!((moved[1] / moved[3] - ndc[1]).abs() < 1e-5, "no vertical move");
+        assert!((ndc[0] - in_right[0] - disparity).abs() < 2e-3, "{distance} m: {} -> {}", ndc[0], in_right[0]);
+        assert!((in_right[1] - ndc[1]).abs() < 1e-4, "no vertical move");
+        let same = landed(&left, &left, ndc);
+        assert!(same.iter().zip(ndc).all(|(a, b)| (a - b).abs() < 1e-5), "{same:?} {ndc:?}");
     }
-    // The fix keeps the game's vectors (its previous camera the identity) and adds the parallax.
-    let fix = fix_constants(&view_to_clip, [0.5, -0.5], 1, 0.064).unwrap();
-    assert_eq!(fix.game_to_prev, std::array::from_fn(|i| if i % 5 == 0 { 1.0 } else { 0.0 }));
-    assert_eq!(fix.same_to_prev, parallax(&view_to_clip, 1, 0.064).unwrap());
-    assert_eq!((fix.mvec_scale, fix.object_scale, fix.size), ([0.5, -0.5], 1.0, [0, 0]));
+}
+
+#[test]
+fn the_motion_passes_rebase_onto_each_eyes_previous_image_from_what_the_game_measured() {
+    let left = left_eye();
+    let right = left.other_eye(0, 0.064, None);
+    // The right eye real with the head still: the left eye warped from it. The pair before: the
+    // left eye real, the right eye warped. Each eye's newest frame before: its own real one.
+    let views = [left, right];
+    let previous = [Some(left), Some(right)];
+    let scale = [0.5, -0.5];
+    let c = &left.camera;
+    let point: Vec3 = std::array::from_fn(|k| c[k * 4 + 3] - 2.0 * c[k * 4 + 2] + 0.3 * c[k * 4]);
+    let seen_by_right = seen(&right, point);
+    let through = |m: &Mat44, ndc: [f32; 3]| {
+        let moved = row([ndc[0], ndc[1], ndc[2], 1.0], m);
+        moved[0] / moved[3] - ndc[0]
+    };
+    let disparity = 0.064 * 1.036 / 2.0;
+    // The game had the left eye's frame before: its vectors reach it, over one frame.
+    let other = motion_constants(&views, &previous, 1, PreviousFrame::OtherEye, &views, scale, [1440, 1600]).unwrap();
+    let (real, warped) = (other[1], other[0]);
+    assert!((through(&real.game_to_prev, seen_by_right) - disparity).abs() < 2e-3, "the game's previous frame is the left eye's");
+    assert!(through(&real.same_to_prev, seen_by_right).abs() < 1e-5, "the right eye's previous image is its own view, the head still");
+    assert_eq!((real.object_scale, real.mvec_scale, real.size), (1.0, scale, [0, 0]));
+    assert_eq!(warped.game_to_prev, real.game_to_prev, "the warped eye reads the real eye's vectors");
+    assert!(through(&warped.same_to_prev, seen(&left, point)).abs() < 1e-5, "the warped left eye's previous image is its own real frame");
+    assert!((through(&warped.target_to_source, seen(&left, point)) + disparity).abs() < 2e-3, "from the warped eye's pixels to the real eye's");
+    assert_eq!(warped.size, [1440, 1600]);
+    // The game rendered the right eye against its own frame before, two frames back: its vectors
+    // reach that frame, and carry two frames of object motion.
+    let own = motion_constants(&views, &previous, 1, PreviousFrame::OwnEye { frames_back: 2 }, &views, scale, [1440, 1600]).unwrap();
+    assert!(through(&own[1].game_to_prev, seen_by_right).abs() < 1e-5, "the game's previous frame is the right eye's own");
+    assert_eq!(own[1].object_scale, 0.5);
+    // Without the frame the game's vectors reach, nothing.
+    assert!(motion_constants(&views, &[Some(left), None], 1, PreviousFrame::OwnEye { frames_back: 2 }, &views, scale, [1440, 1600]).is_none());
+    assert!(motion_constants(&views, &[None, Some(right)], 1, PreviousFrame::OtherEye, &views, scale, [1440, 1600]).is_none());
 }
 
 #[test]
@@ -270,7 +312,7 @@ fn each_present_makes_a_pair_whose_gaps_come_from_the_warped_eyes_own_last_frame
         let (color, depth) = frame(&device, &queue, size, rgba, NEAR / 2.0);
         let (rendered, other) = if eye == 0 { (left, right) } else { (right, left) };
         let shot = Shot { eye, pose: HeadPose::default(), rendered, other };
-        let real = RealEye { color: &color, color_state: common, depth: &depth, depth_state: common };
+        let real = RealEye { color: &color, color_state: common, depth: &depth, depth_state: common, depth_rect: None, jitter: [0.0; 2] };
         let pair = afw.warp(&queue, &shot, &real).unwrap().unwrap();
         assert!(afw.idle(2000));
         pair
@@ -285,6 +327,7 @@ fn each_present_makes_a_pair_whose_gaps_come_from_the_warped_eyes_own_last_frame
     // from the left eye's own last real frame.
     let pair = present(&mut afw, 1, green);
     assert_eq!((pair.real_eye, pair.filled), (1, true));
+    assert_eq!(pair.previous, [Some(left), None], "the left eye's frame before; the right eye had none");
     assert_eq!(pixel(&queue, &pair.images[1], 30, 4), [0, 255, 0, 255], "the real eye on the right");
     assert_eq!(pixel(&queue, &pair.images[0], 40, 4), [0, 255, 0, 255], "warped from the right eye");
     assert_eq!(pixel(&queue, &pair.images[0], 5, 4), [255, 0, 0, 255], "the gap from its own last frame");

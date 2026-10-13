@@ -47,9 +47,20 @@ pub fn use_game_history(on: bool) {
     }
 }
 
-/// Whether per-eye DLSS runs (armed, and not given back).
+/// Whether per-eye DLSS is armed (and not given back).
 pub fn enabled() -> bool {
     ENABLED.load(Relaxed)
+}
+
+/// Whether each eye's frames go to their own DLSS history now: armed, the game's DLSS options
+/// passed on to both eye viewports, and nothing broken since. Before the options come, or after a
+/// failure, the game's frames pass through as they are, with one history for both eyes.
+pub fn running() -> bool {
+    if !enabled() {
+        return false;
+    }
+    let s = state();
+    s.options_applied && !s.broken
 }
 
 /// What an eye's motion vectors are rebased by: the game's clip-to-previous (onto the frame before,

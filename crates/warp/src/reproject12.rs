@@ -3,14 +3,16 @@
 //! rendering with depth, the other eye of this moment is this frame reprojected (the primary), and
 //! what this frame could not see is filled from that eye's own last real frame reprojected to now
 //! (the fill). The colour is read at its own size and the depth at the render size (UV scaled), so
-//! a frame upscaled after its depth was made reprojects at the display size. Besides the image, the
+//! a frame upscaled after its depth was made reprojects at the display size; a depth texture larger
+//! than the frame's render area is read in the part that lines up with the image
+//! ([`Source::depth_rect`]), moved by the jitter the frame was rendered with. Besides the image, the
 //! target's depth is written at a size of the caller's choice (the render size, beside the real
-//! eye's), in the target projection's own depth convention.
+//! eye's), in the same part of its texture, in the target projection's own depth convention.
 //!
 //! Recorded on a command list of the caller's; the caller owns the outputs, and every texture it
 //! passes is in COMMON and left there.
 
-use crate::reproject::Constants;
+use crate::reproject::{Constants, DepthRect, depth_area};
 use crate::{Error, Result, View};
 use monaka_channel::d3d12::compute::{self, DescriptorHeap, Table, srv_desc, uav_desc};
 use monaka_channel::d3d12::{self, barrier, uav_barrier};
@@ -29,22 +31,27 @@ pub const REPROJECT12_SOURCE: &str = concat!("#define IMAGE float4\n", include_s
 const CONSTANTS: u32 = (size_of::<Constants>() / 4) as u32;
 
 /// One frame to redraw: its colour (any size) and depth (plane 0 as R32: `R32_TYPELESS` or
-/// `R32_FLOAT`, at the render size), both in COMMON, with the canonical camera and projection it
-/// was rendered with.
+/// `R32_FLOAT`, at the render size, or larger with the render area at `depth_rect`), both in
+/// COMMON, the sub-pixel jitter the depth was rendered with (in its pixels), and the canonical
+/// camera and projection it was rendered with.
 #[derive(Clone, Copy)]
 pub struct Source<'a> {
     pub color: &'a ID3D12Resource,
     pub depth: &'a ID3D12Resource,
+    pub depth_rect: DepthRect,
+    pub jitter: [f32; 2],
     pub projection: Mat44,
     pub camera: Mat34,
 }
 
 /// Where a redraw goes: `color` (the view's size, a format with unordered access, see
-/// [`uav_format`]) and, optionally, `depth` (R32, any size, with unordered access). Both in COMMON.
+/// [`uav_format`]) and, optionally, `depth` (R32, any size, with unordered access; written in the
+/// part `depth_rect` names, the primary's by default). Both in COMMON.
 #[derive(Clone, Copy)]
 pub struct Targets<'a> {
     pub color: &'a ID3D12Resource,
     pub depth: Option<&'a ID3D12Resource>,
+    pub depth_rect: DepthRect,
 }
 
 /// One layer's depth-test keys and painted image.
@@ -151,7 +158,8 @@ impl Reprojector12 {
         let base = (self.next % SETS) * VIEWS * PASSES;
         self.next = self.next.wrapping_add(1);
         let layers = self.layers.as_ref().expect("made above");
-        let constants = Constants::redraw(view, out_depth.map(|depth| (depth.Width as u32, depth.Height)));
+        let out_area = out_depth.map(|depth| depth_area(out.depth_rect.or(primary.depth_rect), (depth.Width as u32, depth.Height)));
+        let constants = Constants::redraw(view, out_area.map(|(_, size)| size), out_area.map_or([0, 0], |(origin, _)| origin));
         // The two splats, each with its source's views and its layer's.
         let sources = [Some(primary), fill];
         let mut splats: [Option<Constants>; 2] = [None, None];
@@ -264,7 +272,8 @@ impl Reprojector12 {
     fn source_constants(&self, view: &View, source: &Source, base: &Constants) -> Option<Constants> {
         // SAFETY: reads resource descriptors.
         let (color, depth) = unsafe { (source.color.GetDesc(), source.depth.GetDesc()) };
-        base.splat(view, (color.Width as u32, color.Height), (depth.Width as u32, depth.Height), &source.projection, &source.camera)
+        let area = depth_area(source.depth_rect, (depth.Width as u32, depth.Height));
+        base.splat(view, (color.Width as u32, color.Height), area, source.jitter, &source.projection, &source.camera)
     }
 
     /// Null views for the source colour and depth of the set at `set`.

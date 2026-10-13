@@ -27,6 +27,11 @@
 //!   keys only with focus).
 //! - `key <name>`: a key pressed and let go on the keyboard (esc, enter, space, tab, f1..f12,
 //!   a..z, 0..9), for the window in front.
+//! - `depth on` (or `off`): saved pairs also write each eye's depth the producer sent with them
+//!   (`<name>-depth-left.png`, `-right`; nearer is brighter, each image spread over its own range).
+//! - `unpause` / `pause`: the gamepad's Start pressed (a tenth of a second) only when it changes
+//!   the game's state: the next pair shows whether a menu is up (a producer sends a menu flat, the
+//!   same image to both eyes). The pad, not Esc: a key would put the game in keyboard mode.
 //! - `end`: stop.
 //!
 //! Only one reader may hold a channel: run it instead of the viewer.
@@ -60,6 +65,9 @@ enum Step {
     Reticle(Option<(usize, bool)>),
     Focus(String),
     Key(u16),
+    /// Esc pressed only if the next pair is not what this asks: a menu up (true) or not (false).
+    Menu(bool),
+    Depth(bool),
     End,
 }
 
@@ -84,6 +92,10 @@ fn scan_code(name: &str) -> Option<u16> {
 }
 
 /// Presses and lets go of a key by scan code (what DirectInput games read).
+/// A saved pair: its name, the eyes, its pose record, the ring's point (tracking space) and its
+/// sequence.
+type SavedPair = (String, [ID3D11Texture2D; 2], Option<RenderedPair>, Option<[f32; 3]>, u64);
+
 fn press_key(scan: u16) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, SendInput};
     let event = |up: bool| INPUT {
@@ -235,6 +247,9 @@ fn parse_script(text: &str) -> Result<Vec<(u64, Step)>, String> {
             }),
             Some("focus") => Step::Focus(words.get(2).ok_or_else(|| bad("focus takes a program"))?.to_string()),
             Some("key") => Step::Key(words.get(2).and_then(|k| scan_code(k)).ok_or_else(|| bad("unknown key"))?),
+            Some("depth") => Step::Depth(words.get(2) != Some(&"off")),
+            Some("unpause") => Step::Menu(false),
+            Some("pause") => Step::Menu(true),
             Some("end") => Step::End,
             _ => return Err(bad("unknown command")),
         };
@@ -363,8 +378,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut gamepad = Gamepad::default();
     let mut wanted: Vec<String> = Vec::new();
     let mut reticle: Option<(usize, bool)> = None;
-    // Each saved pair: its name, the eyes, its pose record and the ring's point (tracking space).
-    let mut saved: Vec<(String, [ID3D11Texture2D; 2], Option<RenderedPair>, Option<[f32; 3]>)> = Vec::new();
+    let mut menu_wanted: Option<bool> = None;
+    let mut start_until: Option<Instant> = None;
+    let mut save_depth = false;
+    let mut saved_depths: Vec<(String, [ID3D11Texture2D; 2])> = Vec::new();
+    let mut saved: Vec<SavedPair> = Vec::new();
     // The HUD panels' readers (opened as their channels appear) and the panels saved with a pair.
     let mut panels: Vec<(&'static str, Option<(AnyReader, ID3D11Texture2D, windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC)>)> = PANELS.iter().map(|p| (*p, None)).collect();
     let mut saved_panels: Vec<(String, ID3D11Texture2D)> = Vec::new();
@@ -397,12 +415,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 Step::Key(scan) => press_key(*scan),
+                Step::Menu(open) => menu_wanted = Some(*open),
+                Step::Depth(on) => save_depth = *on,
                 Step::End => ended = true,
             }
             next += 1;
         }
         // The script done and every frame asked for saved.
-        if (ended || next >= script.len()) && wanted.is_empty() {
+        if (ended || next >= script.len()) && wanted.is_empty() && menu_wanted.is_none() && start_until.is_none() {
             break;
         }
         poses.write_head(&head);
@@ -418,15 +438,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let aims = located.map(|h| h.map_or(HandPose::default(), |h| h.0));
         let grips = located.map(|h| h.map_or(HandPose::default(), |h| h.1));
         hands.write(&aims, &grips);
-        hands.write_pad(&PadState { gamepad, valid: 1, received_tick: tick() });
+        // Start held a tenth of a second for `unpause` / `pause`, over the script's buttons.
+        let mut sent = gamepad;
+        if start_until.is_some_and(|until| Instant::now() < until) {
+            sent.buttons |= button::START;
+        } else {
+            start_until = None;
+        }
+        hands.write_pad(&PadState { gamepad: sent, valid: 1, received_tick: tick() });
         let fingers_now = finger_bends.map(|bend| match bend {
             Some(b) => FingerPose { valid: 1, received_tick: tick(), fingers: [[b, b, b, 0.0]; 5], ..FingerPose::default() },
             None => FingerPose::default(),
         });
         fingers.write(&fingers_now);
-        if let Some(pair) = reader.read(&context, targets, seen)? {
+        let read = if save_depth { reader.read_with_depth(&context, targets, seen)?.map(|(pair, depth)| (pair, depth.is_some())) } else { reader.read(&context, targets, seen)?.map(|pair| (pair, false)) };
+        if let Some((pair, with_depth)) = read {
             seen = pair.sequence;
             pairs += 1;
+            if let Some(open) = menu_wanted.take() {
+                // A menu goes out flat: the same image to both eyes.
+                let copies = [texture()?, texture()?];
+                copy_texture(&context, &copies[0], targets[0]);
+                copy_texture(&context, &copies[1], targets[1]);
+                let flat = read_image(&device, &context, &copies[0])?.2 == read_image(&device, &context, &copies[1])?.2;
+                if flat != open {
+                    start_until = Some(Instant::now() + Duration::from_millis(100));
+                }
+                println!("{:>6} ms: {} (pair {}), {}", started.elapsed().as_millis(), if flat { "a menu is up" } else { "no menu" }, pair.sequence, if flat != open { "Start pressed" } else { "left as it is" });
+            }
             // The ring as the viewer places it now: 10 m along the controller's aim, from its palm
             // (the grip's place) or from the head.
             let ring = reticle.and_then(|(side, palm)| {
@@ -441,7 +480,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let copies = [texture()?, texture()?];
                 copy_texture(&context, &copies[0], targets[0]);
                 copy_texture(&context, &copies[1], targets[1]);
-                saved.push((save.clone(), copies, poses.read_pair(pair.sequence), ring));
+                saved.push((save.clone(), copies, poses.read_pair(pair.sequence), ring, pair.sequence));
+                if with_depth && let Some(depths) = reader.depth_textures() {
+                    let desc = monaka_channel::d3d::texture_desc(depths[0]);
+                    let copies = [create_texture(&device, &desc)?, create_texture(&device, &desc)?];
+                    copy_texture(&context, &copies[0], depths[0]);
+                    copy_texture(&context, &copies[1], depths[1]);
+                    saved_depths.push((save.clone(), copies));
+                }
                 for (piece, slot) in &mut panels {
                     if slot.is_none()
                         && let Some(panel_name) = name.panel(piece)
@@ -470,7 +516,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::thread::sleep(Duration::from_millis(1));
     }
     println!("pairs read {pairs}");
-    for (name, eyes, record, ring) in &saved {
+    for (name, eyes, record, ring, sequence) in &saved {
         for (index, (eye, side)) in eyes.iter().zip(["left", "right"]).enumerate() {
             let (w, h, mut rgba) = read_image(&device, &context, eye)?;
             unpack_10_bit(eye, &mut rgba);
@@ -480,7 +526,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             write_png(&folder.join(format!("{name}-{side}.png")), w, h, &rgba, drawn)?;
         }
-        println!("saved {name}{}", if ring.is_some() && record.is_none() { " (no pose record: ring not drawn)" } else { "" });
+        println!("saved {name} (pair {sequence}){}", if ring.is_some() && record.is_none() { " (no pose record: ring not drawn)" } else { "" });
+    }
+    for (name, depths) in &saved_depths {
+        for (depth, side) in depths.iter().zip(["left", "right"]) {
+            let Ok((w, h, texels)) = read_image(&device, &context, depth) else {
+                println!("depth of {name}: not 4-byte texels");
+                break;
+            };
+            let values: Vec<f32> = texels.chunks_exact(4).map(|t| f32::from_le_bytes([t[0], t[1], t[2], t[3]])).collect();
+            let finite = values.iter().copied().filter(|v| v.is_finite());
+            let (low, high) = finite.fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
+            let spread = (high - low).max(1e-12);
+            // Reversed or standard depth: the brighter end is whichever holds less of the image (the near hands).
+            let near_high = values.iter().filter(|&&v| v > (low + high) * 0.5).count() < values.len() / 2;
+            let rgba: Vec<u8> = values
+                .iter()
+                .flat_map(|&v| {
+                    let t = ((v - low) / spread).clamp(0.0, 1.0);
+                    let g = ((if near_high { t } else { 1.0 - t }).powf(0.35) * 255.0) as u8;
+                    [g, g, g, 255]
+                })
+                .collect();
+            write_png(&folder.join(format!("{name}-depth-{side}.png")), w, h, &rgba, None)?;
+        }
     }
     for (name, panel) in &saved_panels {
         let (w, h, mut rgba) = read_image(&device, &context, panel)?;

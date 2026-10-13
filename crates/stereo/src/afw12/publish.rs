@@ -41,7 +41,7 @@ pub(super) fn pair_depth(pair: &Pair, units_per_metre: f32) -> Option<PairDepth>
         return None;
     }
     let params = pair.views[pair.real_eye].depth_params(units_per_metre)?;
-    Some(PairDepth { eyes: pair.depths.clone().map(|texture| EyeDepth12 { texture, state: D3D12_RESOURCE_STATE_COMMON, rect: None }), params })
+    Some(PairDepth { eyes: pair.depths.clone().map(|texture| EyeDepth12 { texture, state: D3D12_RESOURCE_STATE_COMMON, rect: pair.depth_rect }), params })
 }
 
 /// Frame generation's real pair, at its time.

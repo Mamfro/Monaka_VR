@@ -398,12 +398,11 @@ impl Before12 {
             Some((rendered, at)) if self.presents - at <= FILL_AGE => Some(rendered),
             _ => None,
         };
-        let filled = fill.is_some();
         let warped = Warped12 { eye, target: other_view, primary: rendered, fill, views: in_eye_order(eye, rendered, other_view) };
         let mut prepared = Prepared12 { present: p.present, eye, pose: label.pose, shown: false, generated: None };
         let generation = p.framegen.then(|| {
             let previous = self.previous.take();
-            let continuous = previous.is_some_and(|(_, e, at)| e != eye && at + 1 == prepared.present) && !reset && filled;
+            let continuous = previous.is_some_and(|(_, e, at)| e != eye && at + 1 == prepared.present) && !reset;
             if p.generate_busy {
                 return (continuous, None);
             }
@@ -495,11 +494,10 @@ impl Now12 {
         }
         let warp = self.history.warp(&shot);
         assert_eq!(warp.eye, 1 - other);
-        let filled = warp.fill.is_some();
         let warped = Warped12 { eye: warp.eye, target: warp.target, primary: warp.primary, fill: warp.fill, views: shot.views() };
         let mut prepared = Prepared12 { present: p.present, eye: shot.eye, pose: shot.pose, shown: false, generated: None };
         let generation = p.framegen.then(|| {
-            let (previous, continuous) = self.presents.generation(shot.eye, prepared.present, reset, filled);
+            let (previous, continuous) = self.presents.generation(shot.eye, prepared.present, reset);
             if p.generate_busy {
                 return (continuous, None);
             }

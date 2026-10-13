@@ -151,7 +151,8 @@ pub fn on_same_frame() -> bool {
 }
 
 pub(super) fn install_framegen<G: FrameInputs + HudLayer>(_: &mut Start<'_, G>) -> Result<(), Lack> {
-    // Frame generation's motion vectors: the game's, as it made them.
+    // Frame generation's motion vectors: the game's, as it made them (rebased per eye at the
+    // present, from the cameras).
     inputs::want(Motion::Float, None);
     FRAMEGEN.store(true, Release);
     log!("frame warping: in-between frames added");

@@ -231,6 +231,11 @@ impl History {
         Warp { eye: shot.eye, primary: shot.rendered, target: shot.other, fill }
     }
 
+    /// Eye `eye`'s newest real frame, as it was rendered (whatever its age).
+    pub fn kept(&self, eye: usize) -> Option<Rendered> {
+        self.kept[eye.min(1)].map(|(rendered, _)| rendered)
+    }
+
     /// Both eyes' frames forgotten (a menu, a cut, new sizes): the next warp fills its gaps from
     /// neighbours only.
     pub fn forget(&mut self) {
@@ -333,11 +338,12 @@ impl Presents {
 
     /// Frame generation starts on eye `eye`'s pair at `present`: the last pair (taken: it is this
     /// pair's once both streams were given it, [`Presents::generated`]), and whether the history
-    /// runs on: the last pair was the other eye's frame of the present before, the game kept its
-    /// own history (no `reset`) and the warped eye's gaps came from its own last frame (`filled`).
-    pub fn generation(&mut self, eye: usize, present: u64, reset: bool, filled: bool) -> (Option<Previous>, bool) {
+    /// runs on: the last pair was the other eye's frame of the present before and the game kept its
+    /// own history (no `reset`). A warped eye whose gaps got no fill from its own last frame keeps
+    /// its history: a stretched gap interpolates worse than a pair lost to a reset shows.
+    pub fn generation(&mut self, eye: usize, present: u64, reset: bool) -> (Option<Previous>, bool) {
         let previous = self.previous.take();
-        let continuous = previous.is_some_and(|p| p.eye != eye && p.present + 1 == present) && !reset && filled;
+        let continuous = previous.is_some_and(|p| p.eye != eye && p.present + 1 == present) && !reset;
         (previous, continuous)
     }
 

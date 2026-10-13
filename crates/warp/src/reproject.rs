@@ -39,25 +39,43 @@ pub(crate) struct Constants {
     pub out_depth_height: u32,
     pub near_a: f32,
     pub near_b: f32,
+    /// The source depth's jitter, in its pixels (what its content moved by).
+    pub jitter: [f32; 2],
+    /// Where the area that lines up with the image starts in the source depth and the output depth.
+    pub depth_origin: [u32; 2],
     pub pad: [u32; 2],
 }
 
-const _: () = assert!(size_of::<Constants>() == 28 * 4);
+const _: () = assert!(size_of::<Constants>() == 32 * 4);
+
+/// The part of a depth texture that lines up with the image: left, top, width, height in texels
+/// (`None`: all of it), as `monaka_framegen::inputs::rect` gives it.
+pub type DepthRect = Option<[u32; 4]>;
+
+/// `rect`'s origin and size for a depth texture of `size`.
+pub(crate) fn depth_area(rect: DepthRect, size: (u32, u32)) -> ([u32; 2], (u32, u32)) {
+    match rect {
+        Some([left, top, width, height]) if width > 0 && height > 0 && left + width <= size.0 && top + height <= size.1 => ([left, top], (width, height)),
+        _ => ([0, 0], size),
+    }
+}
 
 impl Constants {
-    /// A redraw into `view`, its depth written at `out_depth` (width, height) when asked: the
-    /// constants of its clears and resolves.
-    pub(crate) fn redraw(view: &View, out_depth: Option<(u32, u32)>) -> Self {
+    /// A redraw into `view`, its depth written at `out_depth` (width, height) when asked, from
+    /// `origin` in the output texture: the constants of its clears and resolves.
+    pub(crate) fn redraw(view: &View, out_depth: Option<(u32, u32)>, origin: [u32; 2]) -> Self {
         let (out_depth_width, out_depth_height) = out_depth.unwrap_or((0, 0));
-        Self { width: view.width, height: view.height, out_depth_width, out_depth_height, near_a: view.mapping.a, near_b: view.mapping.b, ..Default::default() }
+        Self { width: view.width, height: view.height, out_depth_width, out_depth_height, near_a: view.mapping.a, near_b: view.mapping.b, depth_origin: origin, ..Default::default() }
     }
 
     /// The splat of a source frame into this redraw's `view`: its colour of `color` size, its depth
-    /// of `depth` size, rendered with `projection` and `camera`. `None` when its cameras make no
-    /// reprojection (left out, as a missing fill).
-    pub(crate) fn splat(&self, view: &View, color: (u32, u32), depth: (u32, u32), projection: &Mat44, camera: &Mat34) -> Option<Self> {
+    /// `depth` (the origin and size of the area that lines up with the image) rendered with `jitter`,
+    /// `projection` and `camera`. `None` when its cameras make no reprojection (left out, as a
+    /// missing fill).
+    pub(crate) fn splat(&self, view: &View, color: (u32, u32), depth: ([u32; 2], (u32, u32)), jitter: [f32; 2], projection: &Mat44, camera: &Mat34) -> Option<Self> {
         let m = source_matrix(view, projection, camera)?;
-        Some(Self { m, source_width: color.0, source_height: color.1, depth_width: depth.0, depth_height: depth.1, ..*self })
+        let (origin, (depth_width, depth_height)) = depth;
+        Some(Self { m, source_width: color.0, source_height: color.1, depth_width, depth_height, jitter, depth_origin: origin, ..*self })
     }
 }
 
@@ -183,7 +201,7 @@ impl Reprojector {
         let groups = |w: u32, h: u32| (w.div_ceil(8), h.div_ceil(8));
         let saved = SavedCompute::take(context);
         self.constants.bind(context);
-        let redraw = Constants::redraw(view, None);
+        let redraw = Constants::redraw(view, None, [0, 0]);
         // SAFETY: binds our own shaders and views on the game's context, dispatches, and restores
         // what was bound.
         unsafe {
@@ -195,8 +213,8 @@ impl Reprojector {
                 context.CSSetShader(&self.clear, None);
                 context.Dispatch(gx, gy, 1);
                 let Some(frame) = frame else { continue };
-                let sizes = ((frame.color.width, frame.color.height), (frame.depth.width, frame.depth.height));
-                let Some(splat) = redraw.splat(view, sizes.0, sizes.1, &frame.projection, &frame.camera) else { continue };
+                let sizes = ((frame.color.width, frame.color.height), ([0, 0], (frame.depth.width, frame.depth.height)));
+                let Some(splat) = redraw.splat(view, sizes.0, sizes.1, [0.0; 2], &frame.projection, &frame.camera) else { continue };
                 self.constants.update(context, &splat);
                 context.CSSetShaderResources(0, Some(&[Some(frame.color.view.clone()), Some(frame.depth.view.clone())]));
                 let (sx, sy) = groups(frame.color.width, frame.color.height);

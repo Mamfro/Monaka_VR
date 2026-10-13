@@ -1,10 +1,11 @@
 // Reprojection: a rendered frame (colour at its own size, depth at the render size, from its own
 // camera and projection) redrawn from another camera, the same on D3D11 (`reproject.rs`) and D3D12
 // (`reproject12.rs`); each defines IMAGE, the type its images are written as, before this source.
-// Each source colour pixel takes its depth at the same place of the depth image (UV scaled) and
-// goes through one matrix (target projection * target view * source camera * inverse source
-// projection) to its target pixel; the nearest wins a depth test (Splat keys, then Paint the
-// winners). Two layers are made this way: the primary (the real frame of this moment, from the
+// Each source colour pixel takes its depth at the same place of the depth image (UV scaled onto the
+// part of it that lines up with the image, from its origin, moved by the jitter the depth was
+// rendered with) and goes through one matrix (target projection * target view * source camera *
+// inverse source projection) to its target pixel; the nearest wins a depth test (Splat keys, then
+// Paint the winners). Two layers are made this way: the primary (the real frame of this moment, from the
 // other eye) and the fill (this eye's own previous real frame). Resolve takes the primary, then the
 // primary's own surface across a crack in it (Crack), then the fill where the primary left a gap
 // (unless the fill is nearer than the surface behind the gap: a near thing that moved since the fill's
@@ -14,8 +15,10 @@
 cbuffer Reproject : register(b0) {
     row_major float4x4 M;
     uint W, H, SW, SH;
-    uint DW, DH, OW, OH;  // source depth size, output depth size
+    uint DW, DH, OW, OH;  // the source depth's area that lines up with the image, the output depth's
     float NearA, NearB;   // target nearness = NearA * depth + NearB
+    float2 Jitter;        // the source depth's jitter, in its pixels (the content moved by it)
+    uint2 DepthOrigin;    // where the area starts in the source depth and in the output depth
     uint Pad0, Pad1;
 };
 Texture2D<float4> Color : register(t0);
@@ -38,7 +41,9 @@ static const float KEY_SCALE = 4294967040.0;
 // Where source pixel `p` lands in the target, and its key (larger is nearer; 0 means none).
 bool Land(uint2 p, out uint2 target, out uint key) {
     target = uint2(0, 0); key = 0;
-    float d = Depth.Load(int3(p.x * DW / SW, p.y * DH / SH, 0));
+    float2 at = (float2(p) + 0.5) * float2(DW, DH) / float2(SW, SH) + Jitter;
+    int2 texel = clamp(int2(floor(at)), int2(0, 0), int2(DW, DH) - 1) + int2(DepthOrigin);
+    float d = Depth.Load(int3(texel, 0));
     float2 ndc = float2((p.x + 0.5) / SW * 2 - 1, 1 - (p.y + 0.5) / SH * 2);
     float4 clip = mul(M, float4(ndc, d, 1));
     if (!(clip.w > 0)) return false;
@@ -131,5 +136,5 @@ int2 Crack(uint2 p) {
         key = FillsGap(fill, column, behind) ? fill : column >= 0 ? behind : 1;
     }
     float nearness = (key - 1) / KEY_SCALE;
-    OutDepth[id.xy] = (nearness - NearB) / NearA;
+    OutDepth[id.xy + DepthOrigin] = (nearness - NearB) / NearA;
 }

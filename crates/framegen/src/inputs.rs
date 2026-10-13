@@ -21,7 +21,12 @@
 //!
 //! The inputs are always the game's own, as it made them for its upscaler: a per-eye upscaler's
 //! rewrite of the motion vectors and constants (`monaka_streamline::per_eye`,
-//! `crate::upscale_per_eye`) comes after the provider in each call and is never seen here.
+//! `crate::upscale_per_eye`) comes after the provider in each call and is never seen here. What
+//! the game's motion vectors point at depends on how the game was made to render: its own previous
+//! frame (with alternate eyes the other eye's) or, when a producer hands each eye's render its own
+//! previous camera, that eye's own previous frame. The producer says which ([`set_previous`]) and
+//! each frame's inputs carry it ([`EyeInputs::previous`]), so a consumer rebases or chains only
+//! what needs it.
 
 use crate::ffx::{Camera, Float2};
 use crate::motion::{self, MotionFix};
@@ -47,10 +52,57 @@ pub enum Motion {
     /// Copied whole into the float member of their family ([`float_format`]); not taken in another
     /// format.
     Float,
-    /// The game's (toward the frame before: the other eye's) chained over the frame before's own
-    /// onto this eye's previous frame (`motion_compose.hlsl`), into R16G16B16A16 float. A frame
-    /// whose chain does not hold ([`chain_holds`]) starts its history over.
+    /// Onto this eye's own previous frame: the game's (toward the frame before, the other eye's)
+    /// chained over the frame before's own (`motion_compose.hlsl`), into R16G16B16A16 float; a frame
+    /// whose chain does not hold ([`chain_holds`]) starts its history over. A frame whose vectors
+    /// already reach this eye's own previous frame ([`PreviousFrame::OwnEye`]) is copied as `Float`.
     Chained,
+}
+
+/// What a frame's motion vectors point at: the frame the game treated as its previous one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PreviousFrame {
+    /// The game's own previous frame: with alternate eyes the other eye's, one frame back.
+    #[default]
+    OtherEye,
+    /// This eye's own previous frame, `frames_back` game frames back (two with alternate eyes, one
+    /// with both eyes in a frame): a producer handed the render that eye's own previous camera.
+    OwnEye { frames_back: u8 },
+}
+
+impl PreviousFrame {
+    /// How many frames back the vectors reach.
+    pub fn frames_back(self) -> u8 {
+        match self {
+            PreviousFrame::OtherEye => 1,
+            PreviousFrame::OwnEye { frames_back } => frames_back.max(1),
+        }
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            PreviousFrame::OtherEye => 0,
+            PreviousFrame::OwnEye { frames_back } => frames_back.max(1),
+        }
+    }
+
+    fn from_code(code: u8) -> Self {
+        if code == 0 { PreviousFrame::OtherEye } else { PreviousFrame::OwnEye { frames_back: code } }
+    }
+}
+
+/// What the frames being rendered now have as their previous frame ([`set_previous`]).
+static PREVIOUS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// The producer says, before a frame's upscaler calls, what that frame's motion vectors point at
+/// (it stays until said again; the game's own previous frame unless said).
+pub fn set_previous(previous: PreviousFrame) {
+    PREVIOUS.store(previous.code(), Relaxed);
+}
+
+/// What the frame being rendered has as its previous frame.
+pub fn previous() -> PreviousFrame {
+    PreviousFrame::from_code(PREVIOUS.load(Relaxed))
 }
 
 /// Where a frame's camera was in the world: its position and axes (view space looks down
@@ -192,6 +244,9 @@ pub struct EyeInputs {
     pub rendering: Option<Rendering>,
     /// The frame starts a history over: the game reset its own, or the motion vectors' chain broke.
     pub reset: bool,
+    /// What the motion vectors point at, as the frame was rendered (chained vectors reach this eye's
+    /// own previous frame whatever this says).
+    pub previous: PreviousFrame,
     /// The part of the depth that lines up with the image ([`rect`]).
     pub rect: Option<[u32; 4]>,
     pub fresh: Fresh,
@@ -226,6 +281,12 @@ struct Staged {
     motion: Option<(usize, u32)>,
     /// The size the frame is rendered at (DLSS's input colour).
     render: Option<(u32, u32)>,
+    /// The depth textures the frame's tags named, in order (some games name two: [`settled_depth`]).
+    depths: [Option<(usize, u32)>; 2],
+    /// The depth texture the frames have settled on, and one newly named last, waiting for a
+    /// second frame ([`settled_depth`]).
+    settled: Option<usize>,
+    newcomer: Option<usize>,
     /// The game's motion vectors of the frame before (a copy), and its eye.
     previous_motion: Option<ID3D12Resource>,
     previous_eye: Option<usize>,
@@ -240,6 +301,9 @@ static STAGED: Mutex<Staged> = Mutex::new(Staged {
     depth: None,
     motion: None,
     render: None,
+    depths: [None; 2],
+    settled: None,
+    newcomer: None,
     previous_motion: None,
     previous_eye: None,
     composer: None,
@@ -282,10 +346,53 @@ fn take_frame(s: &mut Staged, list: &ID3D12GraphicsCommandList, frame: &Upscaled
         demand.accepts.iter().all(|accept| accept(&frame.rendering)).then_some(demand.motion)
     };
     let Some(wanted) = wanted else { return };
-    match wanted {
-        Motion::Chained => chained(s, list, frame),
-        Motion::None | Motion::Float => copied(list, frame, wanted),
+    match (wanted, previous()) {
+        (Motion::Chained, PreviousFrame::OtherEye) => chained(s, list, frame),
+        // The game's vectors already reach this eye's own previous frame: the chain is not needed,
+        // and does not run across such a frame.
+        (Motion::Chained, PreviousFrame::OwnEye { .. }) => {
+            s.previous_eye = None;
+            copied(list, frame, Motion::Float);
+        }
+        (Motion::None | Motion::Float, _) => copied(list, frame, wanted),
     }
+}
+
+// --- Which depth, when a frame's tags name two -------------------------------------------------------
+
+/// Frames whose last named depth was passed over for the settled one ([`settled_depth`]).
+static PASSED_OVER: AtomicU64 = AtomicU64::new(0);
+
+/// The depth a frame gives, from `last` (the texture its tags named last, and its state). Some
+/// games (The Beast) name two depth textures every frame, the current one last, and swap their
+/// roles now and then; but for a single frame now and then the one named last is the other,
+/// still holding the frame before (with alternate eyes, the other eye's depth: a warp from it
+/// leaves near things where the other eye saw them). So while a frame names two, a newly last one
+/// is taken from its second frame in a row, the settled one until then. A frame naming one depth
+/// gives it.
+fn settled_depth(s: &mut Staged, last: (usize, u32)) -> (usize, u32) {
+    let named: Vec<usize> = s.depths.iter().flatten().map(|&(d, _)| d).collect();
+    let (chosen, settled, newcomer) = settle(s.settled, s.newcomer, &named, last.0);
+    (s.settled, s.newcomer) = (settled, newcomer);
+    if chosen == last.0 {
+        return last;
+    }
+    PASSED_OVER.fetch_add(1, Relaxed);
+    s.depths.iter().flatten().copied().find(|&(d, _)| d == chosen).unwrap_or(last)
+}
+
+/// [`settled_depth`]'s rule: of the depth textures a frame `named`, `last` the one named last, the
+/// texture to take, and the settled one and newcomer after it.
+fn settle(settled: Option<usize>, newcomer: Option<usize>, named: &[usize], last: usize) -> (usize, Option<usize>, Option<usize>) {
+    match settled {
+        Some(kept) if named.len() == 2 && named.contains(&kept) && kept != last && newcomer != Some(last) => (kept, Some(kept), Some(last)),
+        _ => (last, Some(last), None),
+    }
+}
+
+/// Frames whose last named depth was passed over for the settled one (a game naming two).
+pub fn depths_passed_over() -> u64 {
+    PASSED_OVER.load(Relaxed)
 }
 
 // --- Labelled at the Streamline constants ----------------------------------------------------------
@@ -297,6 +404,7 @@ pub fn at_constants(constants: *const u8, eye: Option<usize>) {
     }
     let mut s = STAGED.locked();
     (s.eye, s.rendering, s.depth, s.motion, s.render) = (None, None, None, None, None);
+    s.depths = [None; 2];
     let Some(eye) = eye.filter(|&e| e < 2) else { return };
     let Some(read) = Constants::read(constants) else { return };
     (s.rendering, s.reset) = (Some(Rendering::from_constants(&read)), read.reset());
@@ -312,7 +420,15 @@ pub fn at_tags(tags: &[Tag]) {
     }
     for tag in tags.iter().filter(|t| t.resource_type == RESOURCE_TEX2D) {
         match tag.kind {
-            buffer::DEPTH => s.depth = Some((tag.native, tag.state)),
+            buffer::DEPTH => {
+                s.depth = Some((tag.native, tag.state));
+                if !s.depths.iter().flatten().any(|&(d, _)| d == tag.native) {
+                    match s.depths.iter_mut().find(|d| d.is_none()) {
+                        Some(free) => *free = Some((tag.native, tag.state)),
+                        None => s.depths = [s.depths[1], Some((tag.native, tag.state))],
+                    }
+                }
+            }
             buffer::MOTION_VECTORS => s.motion = Some((tag.native, tag.state)),
             buffer::SCALING_INPUT_COLOR => s.render = tag.size(),
             _ => {}
@@ -330,6 +446,7 @@ pub fn at_evaluate(native_list: Option<ID3D12GraphicsCommandList>) {
         return;
     };
     s.eye = None;
+    let (depth, depth_state) = settled_depth(&mut s, (depth, depth_state));
     let Some(list) = native_list else {
         s.previous_eye = None;
         return;
@@ -362,6 +479,7 @@ fn copied(list: &ID3D12GraphicsCommandList, frame: &Upscaled, motion: Motion) {
     inputs.motion_format = format.unwrap_or(DXGI_FORMAT_UNKNOWN);
     inputs.rendering = Some(frame.rendering);
     inputs.reset = frame.reset;
+    inputs.previous = previous();
     inputs.rect = rect((depth_desc.Width as u32, depth_desc.Height), frame.render);
     inputs.fresh = Fresh { depth: true, motion: motion_copy.is_some() };
     COPIES[frame.eye].fetch_add(1, Relaxed);
@@ -401,7 +519,7 @@ fn chained(s: &mut Staged, list: &ID3D12GraphicsCommandList, frame: &Upscaled) {
     let chained = match (&previous, s.composer.as_mut()) {
         (Some(previous), Some(composer)) => {
             d3d12::barrier(list, previous, D3D12_RESOURCE_STATE_COMMON, motion::READABLE);
-            let recorded = composer.record(list, previous, motion, &motion::Constants::chaining(frame.chain_scale));
+            let recorded = composer.record(list, &[previous, motion], &motion::Constants::chaining(frame.chain_scale));
             d3d12::barrier(list, previous, motion::READABLE, D3D12_RESOURCE_STATE_COMMON);
             match recorded.and_then(|()| composer.output(motion_desc.Width as u32, motion_desc.Height)) {
                 Ok(output) => {
@@ -425,6 +543,7 @@ fn chained(s: &mut Staged, list: &ID3D12GraphicsCommandList, frame: &Upscaled) {
     inputs.motion_format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     inputs.rendering = Some(frame.rendering);
     inputs.reset = frame.reset || !chained;
+    inputs.previous = PreviousFrame::OtherEye;
     inputs.rect = rect((depth_desc.Width as u32, depth_desc.Height), frame.render);
     inputs.fresh = Fresh { depth: true, motion: true };
     COPIES[frame.eye].fetch_add(1, Relaxed);
@@ -464,6 +583,7 @@ pub fn tagged(list: &ID3D12GraphicsCommandList, eye: usize, input: Input, source
     let desc = unsafe { source.GetDesc() };
     let none = D3D12_RESOURCE_FLAG_NONE;
     let inputs = &mut entry.inputs;
+    inputs.previous = previous();
     match input {
         Input::Depth if late => {
             entry.late_depth = Some((source.clone(), state));
@@ -639,6 +759,22 @@ mod tests {
     use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
 
     #[test]
+    fn a_depth_named_last_for_one_frame_is_passed_over_and_a_lasting_one_taken() {
+        let (a, b) = (0xa, 0xb);
+        // Settled on b; a frame names a last once: b still, a waits.
+        assert_eq!(settle(Some(b), None, &[b, a], a), (b, Some(b), Some(a)));
+        // The next frame names b last again: b, nothing waits.
+        assert_eq!(settle(Some(b), Some(a), &[a, b], b), (b, Some(b), None));
+        // a named last a second frame in a row: a from now on.
+        assert_eq!(settle(Some(b), Some(a), &[b, a], a), (a, Some(a), None));
+        // A frame naming one depth gives it, whatever was settled (a game alternating its one).
+        assert_eq!(settle(Some(b), None, &[a], a), (a, Some(a), None));
+        // Nothing settled yet, or the settled texture not named: the last.
+        assert_eq!(settle(None, None, &[b, a], a), (a, Some(a), None));
+        assert_eq!(settle(Some(0xc), None, &[b, a], a), (a, Some(a), None));
+    }
+
+    #[test]
     fn the_rect_is_the_render_size_part() {
         assert_eq!(rect((1920, 1080), Some((1920, 1080))), None, "the whole texture");
         assert_eq!(rect((1920, 1080), None), None, "render size not known");
@@ -653,6 +789,18 @@ mod tests {
         assert_eq!(float_format(DXGI_FORMAT_R16G16B16A16_FLOAT), Some(DXGI_FORMAT_R16G16B16A16_FLOAT));
         assert_eq!(float_format(DXGI_FORMAT_R32G32_TYPELESS), Some(DXGI_FORMAT_R32G32_FLOAT));
         assert_eq!(float_format(DXGI_FORMAT_R8G8B8A8_UNORM), None);
+    }
+
+    #[test]
+    fn the_previous_frame_is_said_once_and_carried_by_the_inputs() {
+        assert_eq!(previous(), PreviousFrame::OtherEye, "the game's own previous frame unless said");
+        set_previous(PreviousFrame::OwnEye { frames_back: 2 });
+        assert_eq!(previous(), PreviousFrame::OwnEye { frames_back: 2 });
+        assert_eq!(previous().frames_back(), 2);
+        set_previous(PreviousFrame::OwnEye { frames_back: 0 });
+        assert_eq!(previous(), PreviousFrame::OwnEye { frames_back: 1 }, "at least one frame back");
+        set_previous(PreviousFrame::OtherEye);
+        assert_eq!(previous().frames_back(), 1);
     }
 
     #[test]
@@ -897,6 +1045,19 @@ mod tests {
         at_evaluate(Some(list.clone()));
         frame(Some(1));
         assert!(take(1).unwrap().reset, "an evaluate with no labelled frame");
+        frame(Some(0));
+        assert!(!take(0).unwrap().reset, "it holds again");
+        // A frame rendered against its eye's own previous frame: its vectors copied as they are, in
+        // their own format, and the chain does not run over it.
+        set_previous(PreviousFrame::OwnEye { frames_back: 2 });
+        frame(Some(1));
+        let own = take(1).unwrap();
+        assert_eq!((own.reset, own.previous, own.motion_format), (false, PreviousFrame::OwnEye { frames_back: 2 }, DXGI_FORMAT_R16G16_FLOAT));
+        set_previous(PreviousFrame::OtherEye);
+        frame(Some(0));
+        let after = take(0).unwrap();
+        assert!(after.reset && after.previous == PreviousFrame::OtherEye, "no chain over the own-eye frame");
+        frame(Some(1));
         frame(Some(0));
         assert!(!take(0).unwrap().reset, "it holds again");
         at_constants(still.as_ptr(), Some(1));

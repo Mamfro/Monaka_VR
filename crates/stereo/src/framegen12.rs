@@ -14,7 +14,9 @@
 //! (`monaka_framegen::inputs`, chained). The camera rebase per-eye DLSS uses is not used here: it
 //! takes everything as still world, so it moves the weapon and arms, which move with the head, by
 //! the eyes' parallax, and they ghost. With per-eye upscaling on (`crate::upscaler`) the inputs
-//! stay the game's own and are chained here as without it. The HUD goes through the interpolation.
+//! stay the game's own and are chained here as without it; a game that renders each eye against its
+//! own previous frame (its provider says so, `inputs::PreviousFrame::OwnEye`) gives vectors that
+//! already reach it, and the inputs pass them as they are. The HUD goes through the interpolation.
 //!
 //! Each pair carries both eyes' depth for the headset while it goes there ([`crate::depth_layer`]).
 //!

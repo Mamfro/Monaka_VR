@@ -12,6 +12,7 @@ cbuffer Constants : register(b0)
 {
     row_major float4x4 Unused0;
     row_major float4x4 Unused1;
+    row_major float4x4 Unused2;
     uint2 Size;
     float2 MvecScale;
     float ObjectScale;

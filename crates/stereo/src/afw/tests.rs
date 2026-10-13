@@ -95,7 +95,7 @@ fn menus_go_flat_and_a_lone_unlabelled_frame_waits() {
     presents.generated(Previous { pose: HeadPose::default(), eye: 0, present: 1 });
     assert_eq!(presents.out(false, true, true, at(0)), Out::Warped);
     assert_eq!(presents.out(false, false, false, at(100)), Out::Nothing, "a moment after a labelled frame");
-    assert_eq!(presents.generation(1, 2, false, true), (Some(Previous { pose: HeadPose::default(), eye: 0, present: 1 }), true), "nothing forgotten yet");
+    assert_eq!(presents.generation(1, 2, false), (Some(Previous { pose: HeadPose::default(), eye: 0, present: 1 }), true), "nothing forgotten yet");
     let out = presents.out(false, false, false, at(300));
     assert!(out == Out::BothEyes && out.forgets());
     assert_eq!(presents.out(true, true, true, at(310)), Out::Flat);
@@ -121,12 +121,12 @@ fn a_plain_pair_needs_the_other_eyes_frame_just_before() {
 fn frame_generations_history_runs_on_only_from_the_other_eye_just_before() {
     let mut presents = Presents::new(Rules::WHOLE);
     let last = Previous { pose: HeadPose::default(), eye: 0, present: 7 };
-    for (eye, present, reset, filled, runs_on) in [(1, 8, false, true, true), (0, 8, false, true, false), (1, 9, false, true, false), (1, 8, true, true, false), (1, 8, false, false, false)] {
+    for (eye, present, reset, runs_on) in [(1, 8, false, true), (0, 8, false, false), (1, 9, false, false), (1, 8, true, false)] {
         presents.generated(last);
-        assert_eq!(presents.generation(eye, present, reset, filled), (Some(last), runs_on), "{eye} {present} {reset} {filled}");
-        assert_eq!(presents.generation(eye, present, reset, filled).0, None, "taken");
+        assert_eq!(presents.generation(eye, present, reset), (Some(last), runs_on), "{eye} {present} {reset}");
+        assert_eq!(presents.generation(eye, present, reset).0, None, "taken");
     }
     presents.generated(last);
     presents.forget();
-    assert_eq!(presents.generation(1, 8, false, true), (None, false));
+    assert_eq!(presents.generation(1, 8, false), (None, false));
 }

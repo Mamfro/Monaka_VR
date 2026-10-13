@@ -100,19 +100,19 @@ fn other_eye_from_this_frame_and_gaps_from_its_own_last_frame() {
     let mapping = DepthMapping::from_projection(&projection, near).unwrap();
     // The camera positions far from the origin, as a game world's are.
     let view = View { projection, camera: camera(300.5), mapping, width: w, height: h };
-    let primary = Source { color: &left, depth: &depth, projection, camera: camera(299.5) };
-    let fill = Source { color: &last_right, depth: &depth, projection, camera: camera(300.5) };
-    let targets = Targets { color: &out, depth: Some(&out_depth) };
-    let run = |reprojector: &mut Reprojector12, fill: Option<&Source>| {
+    let primary = Source { color: &left, depth: &depth, depth_rect: None, jitter: [0.0; 2], projection, camera: camera(299.5) };
+    let fill = Source { color: &last_right, depth: &depth, depth_rect: None, jitter: [0.0; 2], projection, camera: camera(300.5) };
+    let targets = Targets { color: &out, depth: Some(&out_depth), depth_rect: None };
+    let run = |reprojector: &mut Reprojector12, primary: &Source, fill: Option<&Source>, targets: &Targets| {
         let mut recorder = Recorder::new(&device, 1).unwrap();
         let list = recorder.begin().unwrap().unwrap();
-        reprojector.record(&list, &view, &primary, fill, &targets).unwrap();
+        reprojector.record(&list, &view, primary, fill, targets).unwrap();
         recorder.submit(&queue).unwrap();
         assert!(recorder.idle(2000));
     };
 
     // Cameras 1 m apart, wall 2 m away: the right eye sees each column 16 pixels further left.
-    run(&mut reprojector, Some(&fill));
+    run(&mut reprojector, &primary, Some(&fill), &targets);
     assert_eq!(pixel(&queue, &out, 20, 3), [36 * 4, 0, 0, 255]);
     // The right edge was out of the left camera's view: its own last frame fills it.
     assert_eq!(pixel(&queue, &out, 55, 3), [0, 255, 0, 255]);
@@ -120,6 +120,33 @@ fn other_eye_from_this_frame_and_gaps_from_its_own_last_frame() {
     assert!((depth_at(&queue, &out_depth, 10, 2) - wall).abs() < 1e-6);
     assert!((depth_at(&queue, &out_depth, 28, 2) - wall).abs() < 1e-6, "filled from the last frame's depth");
     // Without a fill frame, the gap continues its neighbour instead.
-    run(&mut reprojector, None);
+    run(&mut reprojector, &primary, None, &targets);
     assert_eq!(pixel(&queue, &out, 55, 3), [63 * 4, 0, 0, 255]);
+
+    // A depth texture twice the render area, the wall in its top-left part and a far surface (depth
+    // 0, infinity) elsewhere: read in the part that lines up with the image, the same picture, and
+    // the output depth written in that part.
+    let far_outside: Vec<u8> = (0..h).flat_map(|y| (0..w).flat_map(move |x| if x < w / 2 && y < h / 2 { wall.to_le_bytes() } else { 0f32.to_le_bytes() })).collect();
+    let large = upload(&device, &queue, (w, h), DXGI_FORMAT_R32_TYPELESS, &far_outside);
+    let large_out = d3d12::texture(&device, w, h, DXGI_FORMAT_R32_TYPELESS, uav).unwrap();
+    let rect = Some([0, 0, w / 2, h / 2]);
+    let primary_large = Source { depth: &large, depth_rect: rect, ..primary };
+    let fill_large = Source { depth: &large, depth_rect: rect, ..fill };
+    let targets_large = Targets { color: &out, depth: Some(&large_out), depth_rect: rect };
+    run(&mut reprojector, &primary_large, Some(&fill_large), &targets_large);
+    assert_eq!(pixel(&queue, &out, 20, 3), [36 * 4, 0, 0, 255]);
+    assert_eq!(pixel(&queue, &out, 55, 3), [0, 255, 0, 255]);
+    assert!((depth_at(&queue, &large_out, 10, 2) - wall).abs() < 1e-6, "written in the render area");
+    // The depth read moved by its jitter: a far column (depth 0, infinity) at depth pixel 30 is read
+    // by colour pixels 60 and 61 as rendered, by 58 and 59 with a jitter of one depth pixel. A far
+    // pixel lands on itself (no disparity), where no wall pixel lands (they all move 16 left).
+    let notch: Vec<u8> = (0..h / 2).flat_map(|_| (0..w / 2).flat_map(|x| if x == 30 { 0f32.to_le_bytes() } else { wall.to_le_bytes() })).collect();
+    let notched = upload(&device, &queue, (w / 2, h / 2), DXGI_FORMAT_R32_TYPELESS, &notch);
+    let primary_notched = Source { depth: &notched, jitter: [0.0, 0.0], ..primary };
+    run(&mut reprojector, &primary_notched, None, &targets);
+    assert_eq!(pixel(&queue, &out, 60, 3), [60 * 4, 0, 0, 255], "far as rendered");
+    let primary_jittered = Source { jitter: [1.0, 0.0], ..primary_notched };
+    run(&mut reprojector, &primary_jittered, None, &targets);
+    assert_eq!(pixel(&queue, &out, 58, 3), [58 * 4, 0, 0, 255], "far with the jitter");
+    assert_eq!(pixel(&queue, &out, 60, 3), [59 * 4, 0, 0, 255], "a gap now, continued from its neighbour");
 }

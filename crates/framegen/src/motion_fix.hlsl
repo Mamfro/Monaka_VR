@@ -11,6 +11,7 @@ cbuffer Constants : register(b0)
 {
     row_major float4x4 GameToPrev;
     row_major float4x4 SameToPrev;
+    row_major float4x4 Unused2;
     uint2 Size;
     float2 MvecScale;
     float ObjectScale;

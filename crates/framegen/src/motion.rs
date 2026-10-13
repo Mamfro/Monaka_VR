@@ -3,7 +3,9 @@
 //! upscaler, frame generation). Either the vectors are rebased onto this eye's previous frame by the
 //! camera (`motion_fix.hlsl`: the game's depth and motion vectors in), or the game's own vectors are
 //! chained over two frames (`motion_compose.hlsl`: the previous frame's vectors and this frame's
-//! in), into a texture of our own given instead. Recorded on the game's own command list just
+//! in), or, for an eye warped from the other eye's frame, the real eye's vectors are carried into
+//! the warped eye's view (`motion_warp.hlsl`: the warped depth, the real eye's depth and its
+//! vectors in), into a texture of our own given instead. Recorded on the game's own command list just
 //! before the consumer runs, reading the game's textures in a shader-readable state and leaving
 //! them so. The vector conventions are The Beast's (DLSS, frame generation); Kingdom Come:
 //! Deliverance II (FSR) uses the chaining.
@@ -19,17 +21,27 @@ use windows::core::s;
 const SOURCE: &str = include_str!("motion_fix.hlsl");
 /// The chaining of the game's vectors over two frames ([`MotionFix::composer`]).
 const COMPOSE_SOURCE: &str = include_str!("motion_compose.hlsl");
-/// Descriptor sets in the ring (three each: depth, motion, output), so a set still read by a frame
-/// in flight on the GPU is not rewritten.
+/// The carrying of the real eye's vectors into the warped eye's view ([`MotionFix::warper`]).
+const WARP_SOURCE: &str = include_str!("motion_warp.hlsl");
+/// Descriptor sets in the ring (the inputs, then the output), so a set still read by a frame in
+/// flight on the GPU is not rewritten.
 const SETS: u32 = 8;
+/// The most inputs a pass reads.
+const MAX_INPUTS: u32 = 3;
 const THREADS: u32 = 8;
 
-/// The shader's constants (40 root constants).
+/// The shaders' constants (56 root constants), the matrices row-major with row vectors as
+/// Streamline's: from this frame's clip space to the game's previous frame's (`game_to_prev`) and
+/// to the consumer's previous image of this eye (`same_to_prev`), and, for a warped eye, from its
+/// clip space to the real eye's (`target_to_source`); the output's size (0: the last input's), the
+/// game's motion-vector scale, and how far object motion is carried (`object_scale`: the consumer's
+/// frame interval over the game's).
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct Constants {
     pub game_to_prev: [f32; 16],
     pub same_to_prev: [f32; 16],
+    pub target_to_source: [f32; 16],
     pub size: [u32; 2],
     pub mvec_scale: [f32; 2],
     pub object_scale: f32,
@@ -53,6 +65,8 @@ pub struct MotionFix {
     root: ID3D12RootSignature,
     pipeline: ID3D12PipelineState,
     heap: DescriptorHeap,
+    /// How many textures the pass reads, in shader order.
+    inputs: u32,
     output: Option<(ID3D12Resource, u32, u32)>,
     next: u32,
 }
@@ -70,24 +84,30 @@ fn read_format(format: DXGI_FORMAT) -> Option<DXGI_FORMAT> {
 }
 
 impl MotionFix {
-    /// The rebase onto this eye's previous frame by the camera (`motion_fix.hlsl`; its first input is
-    /// the depth).
+    /// The rebase onto this eye's previous frame by the camera (`motion_fix.hlsl`; its inputs the
+    /// depth, then the motion vectors).
     pub fn new(device: &ID3D12Device) -> Result<Self, String> {
-        Self::with_shader(device, SOURCE, "motion_fix.hlsl", s!("Fix"))
+        Self::with_shader(device, SOURCE, "motion_fix.hlsl", s!("Fix"), 2)
     }
 
-    /// The chaining of the game's vectors over two frames (`motion_compose.hlsl`; its first input is
-    /// the previous frame's motion vectors, in [`READABLE`] while recorded).
+    /// The chaining of the game's vectors over two frames (`motion_compose.hlsl`; its inputs the
+    /// previous frame's motion vectors, in [`READABLE`] while recorded, then this frame's).
     pub fn composer(device: &ID3D12Device) -> Result<Self, String> {
-        Self::with_shader(device, COMPOSE_SOURCE, "motion_compose.hlsl", s!("Compose"))
+        Self::with_shader(device, COMPOSE_SOURCE, "motion_compose.hlsl", s!("Compose"), 2)
     }
 
-    fn with_shader(device: &ID3D12Device, source: &str, name: &str, entry: windows::core::PCSTR) -> Result<Self, String> {
-        // The constants, then one table: the two inputs and the output.
-        let root = compute::root_signature(device, (size_of::<Constants>() / 4) as u32, &[Table { srvs: 2, uavs: 1 }])?;
+    /// The carrying of the real eye's vectors into an eye warped from its frame (`motion_warp.hlsl`;
+    /// its inputs the warped eye's depth, the real eye's depth, then the real eye's motion vectors).
+    pub fn warper(device: &ID3D12Device) -> Result<Self, String> {
+        Self::with_shader(device, WARP_SOURCE, "motion_warp.hlsl", s!("Warp"), 3)
+    }
+
+    fn with_shader(device: &ID3D12Device, source: &str, name: &str, entry: windows::core::PCSTR, inputs: u32) -> Result<Self, String> {
+        // The constants, then one table: the inputs and the output.
+        let root = compute::root_signature(device, (size_of::<Constants>() / 4) as u32, &[Table { srvs: inputs, uavs: 1 }])?;
         let pipeline = compute::shader_pipeline(device, &root, source, name, entry)?;
-        let heap = DescriptorHeap::new(device, SETS * 3)?;
-        Ok(Self { device: device.clone(), root, pipeline, heap, output: None, next: 0 })
+        let heap = DescriptorHeap::new(device, SETS * (MAX_INPUTS + 1))?;
+        Ok(Self { device: device.clone(), root, pipeline, heap, inputs, output: None, next: 0 })
     }
 
     /// Our output for motion vectors of this size, made on first use (in [`READABLE`]).
@@ -117,17 +137,26 @@ impl MotionFix {
         Ok(texture)
     }
 
-    /// Records the rebase on `list` (the game's native list, before DLSS evaluates): `depth` and
-    /// `motion` are the game's tagged textures (shader-readable, left so); the result goes into
-    /// [`MotionFix::output`] of the motion vectors' size, which ends in [`READABLE`].
-    pub fn record(&mut self, list: &ID3D12GraphicsCommandList, depth: &ID3D12Resource, motion: &ID3D12Resource, constants: &Constants) -> Result<(), String> {
-        // SAFETY: descriptor reads of live resources.
-        let (depth_desc, motion_desc) = unsafe { (depth.GetDesc(), motion.GetDesc()) };
-        let depth_format = read_format(depth_desc.Format).ok_or_else(|| format!("depth format {} not handled", depth_desc.Format.0))?;
-        let motion_format = read_format(motion_desc.Format).ok_or_else(|| format!("motion vector format {} not handled", motion_desc.Format.0))?;
-        let (width, height) = (motion_desc.Width as u32, motion_desc.Height);
+    /// Records the pass on `list` (the game's native list before DLSS evaluates, or a list of the
+    /// caller's): `inputs` are its textures in shader order (plane 0 of a depth, motion vectors;
+    /// shader-readable, left so), as many as the pass reads; the result goes into
+    /// [`MotionFix::output`], of `constants.size` or, when that is zero, of the last input's size,
+    /// which ends in [`READABLE`].
+    pub fn record(&mut self, list: &ID3D12GraphicsCommandList, inputs: &[&ID3D12Resource], constants: &Constants) -> Result<(), String> {
+        if inputs.len() != self.inputs as usize {
+            return Err(format!("{} inputs for a pass of {}", inputs.len(), self.inputs));
+        }
+        let mut formats = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            // SAFETY: a descriptor read of a live resource.
+            let desc = unsafe { input.GetDesc() };
+            formats.push(read_format(desc.Format).ok_or_else(|| format!("input format {} not handled", desc.Format.0))?);
+        }
+        // SAFETY: a descriptor read of a live resource.
+        let last = unsafe { inputs.last().ok_or("no inputs")?.GetDesc() };
+        let (width, height) = if constants.size == [0, 0] { (last.Width as u32, last.Height) } else { (constants.size[0], constants.size[1]) };
         let output = self.output(width, height)?;
-        let base = (self.next % SETS) * 3;
+        let base = (self.next % SETS) * (MAX_INPUTS + 1);
         self.next = self.next.wrapping_add(1);
         let mut constants = *constants;
         constants.size = [width, height];
@@ -135,9 +164,10 @@ impl MotionFix {
         // being recorded, with our heap, root signature and pipeline (DLSS's evaluate, right after,
         // sets its own and Streamline puts the game's back).
         unsafe {
-            self.device.CreateShaderResourceView(depth, Some(&srv_desc(depth_format)), self.heap.cpu(base));
-            self.device.CreateShaderResourceView(motion, Some(&srv_desc(motion_format)), self.heap.cpu(base + 1));
-            self.device.CreateUnorderedAccessView(&output, None, Some(&uav_desc(DXGI_FORMAT_R16G16B16A16_FLOAT)), self.heap.cpu(base + 2));
+            for (k, (input, format)) in inputs.iter().zip(&formats).enumerate() {
+                self.device.CreateShaderResourceView(*input, Some(&srv_desc(*format)), self.heap.cpu(base + k as u32));
+            }
+            self.device.CreateUnorderedAccessView(&output, None, Some(&uav_desc(DXGI_FORMAT_R16G16B16A16_FLOAT)), self.heap.cpu(base + self.inputs));
             barrier(list, &output, READABLE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             list.SetDescriptorHeaps(&[Some(self.heap.heap().clone())]);
             list.SetComputeRootSignature(&self.root);
@@ -162,8 +192,8 @@ impl MotionRebase for MotionFix {
     }
 
     fn record(&mut self, list: &ID3D12GraphicsCommandList, depth: &ID3D12Resource, motion: &ID3D12Resource, rebase: &Rebase) -> Result<(), String> {
-        let constants = Constants { game_to_prev: rebase.game_to_prev, same_to_prev: rebase.same_to_prev, size: [0; 2], mvec_scale: rebase.mvec_scale, object_scale: rebase.object_scale, pad: [0.0; 3] };
-        MotionFix::record(self, list, depth, motion, &constants)
+        let constants = Constants { game_to_prev: rebase.game_to_prev, same_to_prev: rebase.same_to_prev, mvec_scale: rebase.mvec_scale, object_scale: rebase.object_scale, ..Constants::default() };
+        MotionFix::record(self, list, &[depth, motion], &constants)
     }
 
     fn readable(&self) -> D3D12_RESOURCE_STATES {
@@ -176,9 +206,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_shader_compiles_and_its_constants_fit() {
+    fn the_shaders_compile_and_their_constants_fit() {
         compute::compile(SOURCE, "motion_fix.hlsl", s!("Fix")).expect("motion_fix.hlsl compiles");
         compute::compile(COMPOSE_SOURCE, "motion_compose.hlsl", s!("Compose")).expect("motion_compose.hlsl compiles");
-        assert_eq!(size_of::<Constants>(), 40 * 4);
+        compute::compile(WARP_SOURCE, "motion_warp.hlsl", s!("Warp")).expect("motion_warp.hlsl compiles");
+        assert_eq!(size_of::<Constants>(), 56 * 4);
     }
 }

@@ -38,11 +38,14 @@
 //!   evenly spaced, for about one frame of latency. Menus go flat. Each pair carries both eyes'
 //!   depth for the headset while it goes there ([`crate::depth_layer`]).
 //!
-//! Frame generation's weak spot: frame generation's inputs for the warped eye are approximations.
-//! Its depth is the warped depth, but its motion vectors are the real eye's (in the real eye's
-//! pixel grid), carried onto each eye's previous image by the eyes' parallax ([`parallax`]: the
-//! game's vectors point at the other eye's frame). Near edges, where the eyes' images differ most,
-//! and in the filled gaps, which have no honest motion, the in-between frames may shimmer.
+//! Frame generation's motion vectors: each eye's stream has a previous image of its own (the real
+//! eye's is the frame warped into it the present before, the warped eye's its own real frame), so
+//! the game's vectors are rebased onto it per eye from the cameras (`request`): the camera's part by
+//! how each eye was and is seen, the objects' part as the game measured it, against whatever frame
+//! the game measured it ([`monaka_framegen::inputs::PreviousFrame`]). The warped eye's are carried
+//! into its view from the real eye's pixels (`monaka_framegen::motion::MotionFix::warper`); in the
+//! filled gaps, which have no honest motion, only the camera's part remains, and the in-between
+//! frames may shimmer there.
 //!
 //! Its parts: the warp itself ([`Afw12`], here), the ready-made components (`ready`), the work at
 //! the present request (`request`) and at the present loop's step (`publish`).
@@ -59,7 +62,6 @@ use monaka_channel::ChannelName;
 use monaka_channel::pose::HeadSource;
 use monaka_channel::d3d12::{self, Recorder, barrier};
 use monaka_core::camera::{Frustum, Mat44};
-use monaka_core::depth::{invert, multiply};
 use monaka_core::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_framegen::ffx::{Camera, Size2};
@@ -86,7 +88,7 @@ mod tests;
 
 pub use publish::{close, pair_present, report};
 pub use ready::{enabled, frame_generation, frame_warping, frame_warping_pairs, on_same_frame};
-pub use request::{lay_hud, parallax, warp};
+pub use request::{lay_hud, to_clip, warp};
 use publish::*;
 use ready::*;
 use request::*;
@@ -99,9 +101,12 @@ pub struct RealEye<'a> {
     /// The frame without its HUD (the display size), in `color_state`.
     pub color: &'a ID3D12Resource,
     pub color_state: D3D12_RESOURCE_STATES,
-    /// Its depth (the render size; plane 0 is copied), in `depth_state`.
+    /// Its depth (the render size, or larger with the render area at `depth_rect`; plane 0 is
+    /// copied), in `depth_state`, rendered with the sub-pixel `jitter` (in its pixels).
     pub depth: &'a ID3D12Resource,
     pub depth_state: D3D12_RESOURCE_STATES,
+    pub depth_rect: Option<[u32; 4]>,
+    pub jitter: [f32; 2],
 }
 
 /// Whether the pairs' images of frames in `format` have that format themselves (a pass made for
@@ -123,16 +128,23 @@ pub struct Pair {
     pub depths: [ID3D12Resource; 2],
     /// How each eye is seen (left, right): the real eye's, and the view it was warped into.
     pub views: [Rendered; 2],
+    /// The part of each depth that lines up with its image (`None`: all of it).
+    pub depth_rect: Option<[u32; 4]>,
+    /// How each eye's newest real frame before this one was seen (left, right): the real eye's own
+    /// frame before, and the other eye's newest, the frame the game had just before this one.
+    pub previous: [Option<Rendered>; 2],
     /// The warped eye's gaps came from its own last real frame (not only from neighbours).
     pub filled: bool,
 }
 
-/// An eye's newest real frame: copies of its colour and depth (how it was rendered and when it
-/// came are the core's [`History`]).
+/// An eye's newest real frame: copies of its colour and depth, the depth's area and jitter (how it
+/// was rendered and when it came are the core's [`History`]).
 #[derive(Default)]
 struct Kept {
     color: Option<ID3D12Resource>,
     depth: Option<ID3D12Resource>,
+    rect: Option<[u32; 4]>,
+    jitter: [f32; 2],
 }
 
 pub struct Afw12 {
@@ -212,6 +224,8 @@ impl Afw12 {
         let kept = &mut self.kept[eye];
         let color = d3d12::fitting(&mut kept.color, device, width as u64, height, format, none).ok_or("no frame copy")?;
         let kept_depth = d3d12::fitting(&mut kept.depth, device, depth_width as u64, depth_height, DXGI_FORMAT_R32_TYPELESS, none).ok_or("no depth copy")?;
+        (kept.rect, kept.jitter) = (real.depth_rect, real.jitter);
+        let previous = [self.history.kept(0), self.history.kept(1)];
         self.history.keep(shot);
         d3d12::copy_whole(&list, &color, real.color, real.color_state);
         d3d12::copy_plane0(&list, &kept_depth, real.depth, real.depth_state);
@@ -221,13 +235,16 @@ impl Afw12 {
         self.slot = (self.slot + 1) % self.warped.len();
         let warp = self.history.warp(shot);
         let view = warp.target.view(width, height);
-        let primary = Source { color: &color, depth: &kept_depth, projection: warp.primary.projection, camera: warp.primary.camera };
+        let primary = Source { color: &color, depth: &kept_depth, depth_rect: real.depth_rect, jitter: real.jitter, projection: warp.primary.projection, camera: warp.primary.camera };
         let fill = match (warp.fill, &self.kept[other]) {
-            (Some(rendered), Kept { color: Some(color), depth: Some(depth) }) => Some(Source { color, depth, projection: rendered.projection, camera: rendered.camera }),
+            (Some(rendered), Kept { color: Some(color), depth: Some(depth), rect, jitter }) => {
+                Some(Source { color, depth, depth_rect: *rect, jitter: *jitter, projection: rendered.projection, camera: rendered.camera })
+            }
             _ => None,
         };
         let filled = fill.is_some();
-        self.reprojector.record(&list, &view, &primary, fill.as_ref(), &Targets { color: &warped, depth: Some(&warped_depth) }).map_err(|e| e.to_string())?;
+        let targets = Targets { color: &warped, depth: Some(&warped_depth), depth_rect: real.depth_rect };
+        self.reprojector.record(&list, &view, &primary, fill.as_ref(), &targets).map_err(|e| e.to_string())?;
         self.recorder.submit(queue).map_err(|e| e.to_string())?;
         if filled {
             self.counts.filled += 1;
@@ -237,6 +254,8 @@ impl Afw12 {
             images: in_eye_order(eye, color, warped),
             depths: in_eye_order(eye, kept_depth, warped_depth),
             views: shot.views(),
+            depth_rect: real.depth_rect,
+            previous,
             filled,
         };
         self.last = Some(pair.clone());

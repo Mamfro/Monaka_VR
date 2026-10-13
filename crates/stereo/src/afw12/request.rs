@@ -1,9 +1,12 @@
 //! At the present request, before the HUD goes over the frame: the back buffer warped into the
 //! other eye ([`warp`]), frame generation's frame halfway between this pair and the one before
-//! generated per eye ([`generate`], its motion carried onto each eye by the eyes' [`parallax`]),
-//! and the HUD laid over the images made of the frame ([`lay_hud`]).
+//! generated per eye ([`generate`], the game's motion vectors rebased onto each eye's own previous
+//! image from the cameras, [`motion_constants`]), and the HUD laid over the images made of the
+//! frame ([`lay_hud`]).
 
 use super::*;
+use monaka_framegen::inputs::PreviousFrame;
+use monaka_warp::source_matrix;
 
 
 /// The real eye's inputs for its present.
@@ -12,9 +15,13 @@ pub(super) struct Inputs {
     pub(super) motion: Option<ID3D12Resource>,
     pub(super) rendered: Rendered,
     pub(super) camera: Camera,
-    /// The frame's view to clip (row vectors) and motion-vector scale (to the screen).
-    pub(super) view_to_clip: Mat44,
+    /// The motion vectors' scale (to the screen).
     pub(super) mvec_scale: [f32; 2],
+    /// The part of the depth that lines up with the image, and the jitter it was rendered with.
+    pub(super) rect: Option<[u32; 4]>,
+    pub(super) jitter: [f32; 2],
+    /// What the game's motion vectors point at.
+    pub(super) previous: PreviousFrame,
     pub(super) reset: bool,
 }
 
@@ -28,8 +35,10 @@ pub(super) fn take_inputs(eye: usize) -> Option<Inputs> {
         motion: taken.motion,
         rendered: Rendered::from_rendering(&rendering)?,
         camera,
-        view_to_clip: rendering.view_to_clip,
         mvec_scale: [camera.motion_vector_scale.x, camera.motion_vector_scale.y],
+        rect: taken.rect,
+        jitter: [camera.jitter.x, camera.jitter.y],
+        previous: taken.previous,
         reset: taken.reset,
     })
 }
@@ -54,8 +63,10 @@ pub(super) struct State {
     /// Our images can take the HUD: they have the back buffer's format.
     pub(super) hud_fits: bool,
     pub(super) streams: [Option<EyeStream>; 2],
-    pub(super) fix: Option<Result<MotionFix, ()>>,
-    pub(super) motion: Option<ID3D12Resource>,
+    /// The motion passes: the real eye's rebase and the warped eye's carry (none if the GPU cannot).
+    pub(super) passes: Option<Result<(MotionFix, MotionFix), ()>>,
+    /// Each eye's motion vectors for its stream (left, right).
+    pub(super) motion: [Option<ID3D12Resource>; 2],
     pub(super) shown: [[Option<ID3D12Resource>; 2]; SLOTS],
     pub(super) shown_slot: usize,
     pub(super) interval: Interval,
@@ -85,8 +96,8 @@ pub(super) fn state_for<'a>(guard: &'a mut Option<State>, queue: &ID3D12CommandQ
                     prepared: None,
                     hud_fits: false,
                     streams: [None, None],
-                    fix: None,
-                    motion: None,
+                    passes: None,
+                    motion: [None, None],
                     shown: Default::default(),
                     shown_slot: 0,
                     interval: Interval::new(Duration::from_millis(16)),
@@ -126,7 +137,9 @@ pub fn warp(queue: &ID3D12CommandQueue, buffer: &ID3D12Resource) {
     // SAFETY: reads a descriptor.
     let format = unsafe { buffer.GetDesc() }.Format;
     state.hud_fits = keeps_format(format);
-    let real = RealEye { color: buffer, color_state: D3D12_RESOURCE_STATE_PRESENT, depth: &inputs.depth, depth_state: D3D12_RESOURCE_STATE_COMMON };
+    let real = RealEye { color: buffer, color_state: D3D12_RESOURCE_STATE_PRESENT, depth: &inputs.depth, depth_state: D3D12_RESOURCE_STATE_COMMON, depth_rect: inputs.rect, jitter: inputs.jitter };
+    // How each eye was seen in the pair before: each stream's previous image.
+    let before = state.afw.last().map(|pair| pair.views);
     let pair = match state.afw.warp(queue, &shot, &real) {
         Ok(Some(pair)) => pair,
         Ok(None) => return,
@@ -137,21 +150,29 @@ pub fn warp(queue: &ID3D12CommandQueue, buffer: &ID3D12Resource) {
     };
     let mut prepared = Prepared { present, eye, pose: shot.pose, pair, shown: None, generated: None };
     if framegen_running() {
-        generate(state, queue, &mut prepared, &inputs, separation);
+        generate(state, queue, &mut prepared, &inputs, separation, before);
     }
     state.prepared = Some(prepared);
 }
 
+/// The render area of a depth of `size` with the part `rect` lining up with the image.
+pub(super) fn render_size(rect: Option<[u32; 4]>, size: (u32, u32)) -> Size2 {
+    match rect {
+        Some([_, _, width, height]) if width > 0 && height > 0 => Size2 { width: width.min(size.0), height: height.min(size.1) },
+        _ => Size2 { width: size.0, height: size.1 },
+    }
+}
+
 /// Frame generation: copies of this pair to show later, and each eye's frame halfway between the
-/// last pair and this one.
-pub(super) fn generate(state: &mut State, queue: &ID3D12CommandQueue, prepared: &mut Prepared, inputs: &Inputs, separation: f32) {
+/// last pair and this one (`before`: how each eye was seen in that pair).
+pub(super) fn generate(state: &mut State, queue: &ID3D12CommandQueue, prepared: &mut Prepared, inputs: &Inputs, separation: f32, before: Option<[Rendered; 2]>) {
     let Ok(device) = d3d12::device_of(queue) else { return };
     let (eye, pair) = (prepared.eye, &prepared.pair);
     // Whether the history runs on (the core's rule), the last pair taken.
-    let (previous, continuous) = state.presents.generation(eye, prepared.present, inputs.reset, pair.filled);
+    let (previous, continuous) = state.presents.generation(eye, prepared.present, inputs.reset);
     // SAFETY: reads descriptors.
     let (frame, depth) = unsafe { (pair.images[0].GetDesc(), pair.depths[0].GetDesc()) };
-    let render = Size2 { width: depth.Width as u32, height: depth.Height };
+    let render = render_size(pair.depth_rect, (depth.Width as u32, depth.Height));
     let Ok(Some(list)) = state.recorder.begin() else {
         skip("command lists busy");
         return;
@@ -164,7 +185,7 @@ pub(super) fn generate(state: &mut State, queue: &ID3D12CommandQueue, prepared: 
         d3d12::copy_whole(&list, &right, &pair.images[1], D3D12_RESOURCE_STATE_COMMON);
         prepared.shown = Some([left, right]);
     }
-    let motion = fixed_motion(state, &list, &device, eye, &pair.depths[eye], inputs, separation);
+    let motion = before.and_then(|before| eye_motion(state, &list, &device, pair, inputs, &before, render));
     let made = motion.map(|motion| {
         [0, 1].map(|e| {
             let camera = eye_camera(&inputs.camera, eye, e, separation).for_render(render);
@@ -172,7 +193,7 @@ pub(super) fn generate(state: &mut State, queue: &ID3D12CommandQueue, prepared: 
                 Ok(stream) => stream,
                 Err(why) => return skip(&format!("no context: {why}")),
             };
-            match stream.generate(&list, &camera, &pair.depths[e], &motion, None, &pair.images[e], !continuous, 16.7) {
+            match stream.generate(&list, &camera, &pair.depths[e], &motion[e], None, &pair.images[e], !continuous, 16.7) {
                 Ok(made) => made,
                 Err(why) => skip(&why),
             }
@@ -203,51 +224,95 @@ pub(super) fn eye_camera(camera: &Camera, eye: usize, e: usize, separation: f32)
     camera
 }
 
-/// The real eye's motion vectors (the game's: toward the other eye's frame before) carried onto
-/// each eye's previous image ([`parallax`]), recorded on `list` into a texture of ours in COMMON.
-pub(super) fn fixed_motion(
+/// Each eye's motion vectors for its stream (left, right), recorded on `list` into textures of ours
+/// in COMMON: the game's (the real eye's) rebased onto that eye's previous image, the frame warped
+/// into it the pair before, and carried into the warped eye's view onto its own real frame, that
+/// pair's real eye ([`motion_constants`]; `before`: how each eye was seen in that pair). None
+/// without the game's vectors, or the frames they reach, or a GPU that runs the passes.
+pub(super) fn eye_motion(
     state: &mut State,
     list: &ID3D12GraphicsCommandList,
     device: &ID3D12Device,
-    eye: usize,
-    depth: &ID3D12Resource,
+    pair: &Pair,
     inputs: &Inputs,
-    separation: f32,
-) -> Option<ID3D12Resource> {
+    before: &[Rendered; 2],
+    render: Size2,
+) -> Option<[ID3D12Resource; 2]> {
     let game = inputs.motion.as_ref()?;
-    let fix = state.fix.get_or_insert_with(|| MotionFix::new(device).map_err(|why| log!("frame warping: no in-between frames: motion vectors: {why}"))).as_mut().ok()?;
-    let constants = fix_constants(&inputs.view_to_clip, inputs.mvec_scale, eye, separation)?;
-    barrier(list, depth, D3D12_RESOURCE_STATE_COMMON, motion::READABLE);
-    barrier(list, game, D3D12_RESOURCE_STATE_COMMON, motion::READABLE);
-    let recorded = fix.record(list, depth, game, &constants);
-    barrier(list, game, motion::READABLE, D3D12_RESOURCE_STATE_COMMON);
-    barrier(list, depth, motion::READABLE, D3D12_RESOURCE_STATE_COMMON);
+    let (eye, other) = (pair.real_eye, 1 - pair.real_eye);
+    let make = || MotionFix::new(device).and_then(|rebase| Ok((rebase, MotionFix::warper(device)?)));
+    let (rebase, warper) = state.passes.get_or_insert_with(|| make().map_err(|why| log!("frame warping: no in-between frames: motion vectors: {why}"))).as_mut().ok()?;
+    let constants = motion_constants(&pair.views, &pair.previous, eye, inputs.previous, before, inputs.mvec_scale, [render.width, render.height])?;
+    let (real_depth, warped_depth) = (&pair.depths[eye], &pair.depths[other]);
+    for texture in [real_depth, warped_depth, game] {
+        barrier(list, texture, D3D12_RESOURCE_STATE_COMMON, motion::READABLE);
+    }
     // SAFETY: reads a descriptor.
     let desc = unsafe { game.GetDesc() };
-    let output = recorded.and_then(|()| fix.output(desc.Width as u32, desc.Height)).map_err(|why| skip(&format!("motion vectors: {why}"))).ok()?;
-    let target = d3d12::fitting(&mut state.motion, device, desc.Width, desc.Height, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_NONE)?;
-    d3d12::copy_whole(list, &target, &output, motion::READABLE);
-    Some(target)
+    let recorded = rebase
+        .record(list, &[real_depth, game], &constants[eye])
+        .and_then(|()| rebase.output(desc.Width as u32, desc.Height))
+        .and_then(|real| Ok((real, warper.record(list, &[warped_depth, real_depth, game], &constants[other]).and_then(|()| warper.output(render.width, render.height))?)));
+    for texture in [real_depth, warped_depth, game] {
+        barrier(list, texture, motion::READABLE, D3D12_RESOURCE_STATE_COMMON);
+    }
+    let (real, warped) = recorded.map_err(|why| skip(&format!("motion vectors: {why}"))).ok()?;
+    let outputs = in_eye_order(eye, real, warped);
+    let mut targets: [Option<ID3D12Resource>; 2] = [None, None];
+    for e in 0..2 {
+        // SAFETY: reads a descriptor.
+        let out = unsafe { outputs[e].GetDesc() };
+        let target = d3d12::fitting(&mut state.motion[e], device, out.Width, out.Height, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_NONE)?;
+        d3d12::copy_whole(list, &target, &outputs[e], motion::READABLE);
+        targets[e] = Some(target);
+    }
+    let [Some(left), Some(right)] = targets else { return None };
+    Some([left, right])
 }
 
-/// The motion-vector fix's constants for eye `eye`'s frame: the game's vectors kept (its "previous"
-/// camera the identity), each pixel moved on by the eyes' [`parallax`].
-pub(super) fn fix_constants(view_to_clip: &Mat44, mvec_scale: [f32; 2], eye: usize, separation: f32) -> Option<motion::Constants> {
-    let identity: Mat44 = std::array::from_fn(|i| if i % 5 == 0 { 1.0 } else { 0.0 });
-    Some(motion::Constants { game_to_prev: identity, same_to_prev: parallax(view_to_clip, eye, separation)?, size: [0; 2], mvec_scale, object_scale: 1.0, pad: [0.0; 3] })
+/// The motion passes' constants for a pair, by eye (left, right): the real eye's rebase and the
+/// warped eye's carry. `views`: how each eye is seen in this pair; `previous`: how each eye's newest
+/// real frame before it was seen; `before`: how each eye was seen in the pair before, each stream's
+/// previous image; `game_previous`: what the game's vectors point at, the frame it had before this
+/// one (`previous` of the other eye) or the real eye's own frame before (`previous` of the real
+/// eye), over as many frames as it says; `size`: the warped eye's output. None without the frame the
+/// game's vectors reach or a matrix between two views.
+pub(super) fn motion_constants(
+    views: &[Rendered; 2],
+    previous: &[Option<Rendered>; 2],
+    real_eye: usize,
+    game_previous: PreviousFrame,
+    before: &[Rendered; 2],
+    mvec_scale: [f32; 2],
+    size: [u32; 2],
+) -> Option<[motion::Constants; 2]> {
+    let (eye, other) = (real_eye.min(1), 1 - real_eye.min(1));
+    let reached = match game_previous {
+        PreviousFrame::OtherEye => previous[other],
+        PreviousFrame::OwnEye { .. } => previous[eye],
+    }?;
+    let now = &views[eye];
+    let game_to_prev = to_clip(now, &reached)?;
+    let object_scale = 1.0 / game_previous.frames_back() as f32;
+    let real = motion::Constants { game_to_prev, same_to_prev: to_clip(now, &before[eye])?, mvec_scale, object_scale, ..Default::default() };
+    let warped = motion::Constants {
+        game_to_prev,
+        same_to_prev: to_clip(&views[other], &before[other])?,
+        target_to_source: to_clip(&views[other], now)?,
+        size,
+        mvec_scale,
+        object_scale,
+        ..Default::default()
+    };
+    Some(in_eye_order(eye, real, warped))
 }
 
-/// For the motion-vector fix (`motion_fix.hlsl`'s "same eye's previous" camera, row vectors as
-/// DLSS's): from eye `eye`'s clip space to that of a view `separation` further from the other
-/// eye. A point's move between the two is its parallax between the eyes (it is linear in the
-/// camera's move), from the other eye's image to this eye's: what carries the game's vectors,
-/// which end in the other eye's frame, onto this eye's previous image, warped from that frame.
-pub fn parallax(view_to_clip: &Mat44, eye: usize, separation: f32) -> Option<Mat44> {
-    // The view moved away from the other eye: left for the left eye.
-    let away = if eye == 0 { -separation } else { separation };
-    let mut translate: Mat44 = std::array::from_fn(|i| if i % 5 == 0 { 1.0 } else { 0.0 });
-    translate[12] = -away;
-    Some(multiply(&multiply(&invert(view_to_clip)?, &translate), view_to_clip))
+/// From `from`'s clip space to `to`'s, for a point `from` sees (its normalised position and depth,
+/// w 1), as the motion passes take it: row vectors, as Streamline's matrices. None when the cameras
+/// make no reprojection.
+pub fn to_clip(from: &Rendered, to: &Rendered) -> Option<Mat44> {
+    let m = source_matrix(&to.view(1, 1), &from.projection, &from.camera)?;
+    Some(std::array::from_fn(|i| m[(i % 4) * 4 + i / 4]))
 }
 
 /// After the HUD went over the back buffer: the HUD `layer` (in COMMON) over this present's other

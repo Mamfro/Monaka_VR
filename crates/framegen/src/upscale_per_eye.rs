@@ -214,7 +214,7 @@ fn chain(s: &mut State, list: &ID3D12GraphicsCommandList, motion: &ID3D12Resourc
     let chained = match (previous, s.composer.as_mut()) {
         (Some(previous), Some(composer)) => {
             d3d12::barrier(list, &previous, D3D12_RESOURCE_STATE_COMMON, motion::READABLE);
-            let recorded = composer.record(list, &previous, motion, &motion::Constants::chaining(scale));
+            let recorded = composer.record(list, &[&previous, motion], &motion::Constants::chaining(scale));
             d3d12::barrier(list, &previous, motion::READABLE, D3D12_RESOURCE_STATE_COMMON);
             match recorded.and_then(|()| composer.output(desc.Width as u32, desc.Height)) {
                 Ok(output) => Some(output),
