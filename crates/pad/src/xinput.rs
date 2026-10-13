@@ -4,7 +4,7 @@
 //! ([`read`]); asking what is in slot 0 reports a pad while the VR one is live ([`describe`]).
 
 use crate::presses::pressed;
-use crate::stick::{TAKE_RIGHT, TAKE_RIGHT_Y, take_right};
+use crate::stick::{TAKE_RIGHT, TAKE_RIGHT_Y, take_right, walk_turned};
 use crate::presses::{flick, rewritten};
 use crate::vr_pad::{ACTIVE, CHANNEL, MASK_REAL, open_block, vr_pad};
 use monaka_channel::ChannelName;
@@ -282,6 +282,7 @@ unsafe fn read(original: &Original<GetStateFn>, user: u32, state: *mut XInputSta
             // SAFETY: the game's out-structure, filled by XInput.
             unsafe {
                 take_right(&mut (*state).gamepad);
+                walk_turned(&mut (*state).gamepad);
                 rewritten(&mut (*state).gamepad);
             }
         }
@@ -316,6 +317,7 @@ unsafe fn read(original: &Original<GetStateFn>, user: u32, state: *mut XInputSta
         // Held back by the gate.
         pad.left_trigger = 0;
     }
+    walk_turned(&mut pad);
     rewritten(&mut pad);
     let packet = {
         let Ok(mut last) = LAST.lock() else { return result };

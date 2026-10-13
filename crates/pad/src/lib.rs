@@ -32,7 +32,7 @@ mod xinput;
 
 // The pad's calls, by the names the games and the other modules use.
 pub use presses::{flick_right_stick, hold, hold_buttons, let_go, press, rewrite};
-pub use stick::{buttons, gate_left_trigger, left_trigger, left_trigger_held_back, open_left_trigger, right_stick, take_right_stick, take_right_stick_y};
+pub use stick::{buttons, gate_left_trigger, left_trigger, left_trigger_held_back, open_left_trigger, right_stick, take_right_stick, take_right_stick_y, turn_walk};
 pub use vr_pad::{announce, live, mask_real, release, stop};
 pub(crate) use vr_pad::{right_stick_rules, virtual_pad};
 pub use xinput::{XInputCapabilities, XInputState, install, install_optional, report};

@@ -12,8 +12,10 @@
 //!   the face button in that direction (up Y, right B, down A, left X) until it comes back past
 //!   [`CENTRE`], as a player picking with that button would; each pick buzzes. A game that picks
 //!   with its right stick instead (`--menu-pick stick`, [`PickWith`]) is handed the flick as its
-//!   right stick, and nothing else there while the menu is open. A stick already pushed when the
-//!   menu opened (running) picks nothing until it has been back at the centre.
+//!   right stick, and nothing else there while the menu is open; its left stick reads centred
+//!   then (its wheels follow either stick, and a player's thumb on the d-pad is off the stick). A
+//!   stick already pushed when the menu opened (running) picks nothing until it has been back at
+//!   the centre.
 //! - **Closing.** The hand leaving the zone ([`out_of_zone`], a little wider than the way in) lets
 //!   go of the d-pad: the game closes the menu with the last pick made, or none. So does a hand the
 //!   headset stops tracking for [`LOST_FOR`], and a menu open longer than [`OPEN_FOR`].
@@ -244,7 +246,9 @@ impl Reach {
             match self.with {
                 PickWith::Buttons => pad.buttons |= held,
                 PickWith::Stick => {
-                    // The game's right stick carries the flick (from the centre) and nothing else.
+                    // The game's right stick carries the flick (from the centre) and nothing else;
+                    // its left stick, which its wheels also follow, nothing.
+                    Stick::Left.take(pad);
                     Stick::Right.take(pad);
                     if held != 0 {
                         let axis = |v: f32| (v.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
@@ -383,6 +387,17 @@ mod tests {
         let (pad, _) = frame(&mut reach, ms(t, 300), SHOULDER_L, FRONT_R, (0, 0), (MAX, 0));
         assert_eq!((pad.thumb_rx, pad.thumb_ry), (0, 0));
         assert_eq!(parse_with("stick"), Ok(PickWith::Stick));
+        // The right hand's menu, walking forward: the right stick picks, the left reaches the game
+        // centred (its wheel follows it too).
+        let mut reach = Reach::new(Pick::Same, button::DPAD_LEFT | button::DPAD_RIGHT, DEPTH).picking_with(PickWith::Stick);
+        frame(&mut reach, t, FRONT_L, SHOULDER_R, (0, MAX), (0, 0));
+        let (pad, _) = frame(&mut reach, ms(t, 200), FRONT_L, SHOULDER_R, (0, MAX), (0, 0));
+        assert_eq!((pad.buttons, pad.thumb_lx, pad.thumb_ly), (button::DPAD_RIGHT, 0, 0), "open: no walking into the wheel");
+        let (pad, _) = frame(&mut reach, ms(t, 250), FRONT_L, SHOULDER_R, (0, MAX), (0, MAX));
+        assert_eq!((pad.thumb_ly, pad.thumb_ry), (0, MAX), "the right stick's flick picks");
+        // The hand comes down: walking again.
+        let (pad, _) = frame(&mut reach, ms(t, 300), FRONT_L, FRONT_R, (0, MAX), (0, 0));
+        assert_eq!((pad.buttons, pad.thumb_ly), (0, MAX));
     }
 
     #[test]

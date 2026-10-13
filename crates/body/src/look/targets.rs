@@ -253,6 +253,10 @@ pub fn steer(fields: LookFields, character: usize, head: Option<HeadPose>, count
         let aim = aimed(&settings, monaka_channel::tick(), head.orientation, crate::controllers::palm, |_| settings.hand_rig && aims_itself());
         match steering.steer(character, aim.yaw, aim.pitch) {
             Some((written, own)) => {
+                // The character's look follows the aim, the view the head: the game walks along
+                // its look, so the stick is turned back to where the player looks.
+                let head_yaw = monaka_core::camera::head_yaw_pitch(head.orientation).0;
+                monaka_pad::turn_walk(monaka_core::math::wrap_radians(aim.yaw - head_yaw));
                 let update = UPDATES.fetch_add(1, Relaxed);
                 // A left trigger press waits for the left controller's aim.
                 TOOL.gate(TOOL.possible(&settings), aim.tool, update);

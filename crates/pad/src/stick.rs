@@ -124,6 +124,43 @@ pub fn buttons(max_age_ms: u64) -> Option<u16> {
     Some(BUTTONS.load(Acquire) as u16)
 }
 
+/// How far the game's look is turned from the head (radians, positive left; `f32` bits), and when
+/// it was said (`monaka_channel::tick`, 0: never) ([`turn_walk`]).
+static WALK_TURN: AtomicU32 = AtomicU32::new(0);
+static WALK_TURN_TICK: AtomicU64 = AtomicU64::new(0);
+/// A walk turn older than this (ms) is let go: whoever said it no longer steers.
+const WALK_TURN_FRESH_MS: u64 = 100;
+
+/// The game's look is turned `radians` (positive left) from where the player looks, as a
+/// producer's hand aim turns it toward a gun while the view stays the head's: the game walks
+/// along its look, so the left stick is turned back by as much ([`walk_turned`]) and the player
+/// walks where they look. Said again at each update; it lapses after [`WALK_TURN_FRESH_MS`].
+pub fn turn_walk(radians: f32) {
+    WALK_TURN.store(radians.to_bits(), Release);
+    WALK_TURN_TICK.store(monaka_channel::tick().max(1), Release);
+}
+
+/// `pad`'s left stick turned back by the walk turn ([`turn_walk`]) while it is fresh.
+pub(super) fn walk_turned(pad: &mut Gamepad) {
+    let tick = WALK_TURN_TICK.load(Acquire);
+    if tick == 0 || monaka_channel::tick().saturating_sub(tick) > WALK_TURN_FRESH_MS {
+        return;
+    }
+    (pad.thumb_lx, pad.thumb_ly) = turned(pad.thumb_lx, pad.thumb_ly, f32::from_bits(WALK_TURN.load(Acquire)));
+}
+
+/// A stick (x right, y forward) as the game must read it to move along the stick in the player's
+/// frame when its own forward is turned `turn` radians left of the player's: turned `turn` right.
+fn turned(x: i16, y: i16, turn: f32) -> (i16, i16) {
+    if turn.abs() < 1e-3 || !turn.is_finite() {
+        return (x, y);
+    }
+    let (sin, cos) = turn.sin_cos();
+    let (x, y) = (f32::from(x), f32::from(y));
+    let axis = |v: f32| v.round().clamp(-32767.0, 32767.0) as i16;
+    (axis(x * cos + y * sin), axis(y * cos - x * sin))
+}
+
 /// Keeps `pad`'s right stick, left trigger and buttons for the producer ([`right_stick`],
 /// [`left_trigger`], [`buttons`]); with [`TAKE_RIGHT`] also centres the stick for the game.
 pub(super) fn take_right(pad: &mut Gamepad) {
@@ -139,5 +176,26 @@ pub(super) fn take_right(pad: &mut Gamepad) {
         pad.thumb_ry = 0;
     } else if TAKE_RIGHT_Y.load(Acquire) {
         pad.thumb_ry = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::turned;
+
+    #[test]
+    fn the_stick_is_turned_back_to_the_players_forward() {
+        const MAX: i16 = 32767;
+        // The game's forward a quarter turn left of the player's (a gun pointed left): forward on
+        // the stick goes to the game as its right, which is the player's forward.
+        assert_eq!(turned(0, MAX, std::f32::consts::FRAC_PI_2), (MAX, 0));
+        // Pointed behind (the rifle over the shoulder): forward goes as back.
+        assert_eq!(turned(0, MAX, std::f32::consts::PI), (0, -MAX));
+        // Right a quarter turn: forward goes as left; no turn leaves the stick alone.
+        assert_eq!(turned(0, MAX, -std::f32::consts::FRAC_PI_2), (-MAX, 0));
+        assert_eq!(turned(1200, -800, 0.0), (1200, -800));
+        // A full diagonal stays within the axis.
+        let (x, y) = turned(MAX, MAX, std::f32::consts::FRAC_PI_4);
+        assert!(x == MAX && y.abs() <= 1, "{x} {y}");
     }
 }
