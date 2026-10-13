@@ -62,7 +62,7 @@ impl Physical {
         let on = options.switch("physical_melee", true);
         let physical = Self {
             blade: options.number("melee_blade", 0.2, 2.5, 1.1),
-            fist: options.number("melee_fist", 0.05, 0.6, 0.15),
+            fist: options.number("melee_fist", 0.05, 1.0, 0.75),
             press_ms: attacks_on_release.then(|| options.number("swing_press_ms", 15.0, 300.0, 40.0) as u64),
         };
         (rig && on).then_some(physical)
