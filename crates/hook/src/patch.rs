@@ -327,8 +327,6 @@ pub enum Placement {
 pub mod slot {
     /// `IDXGISwapChain::Present`.
     pub const SWAPCHAIN_PRESENT: usize = 8;
-    /// `IDXGISwapChain::ResizeBuffers`.
-    pub const SWAPCHAIN_RESIZE_BUFFERS: usize = 13;
     /// `ID3D11DeviceContext::DrawIndexed`.
     pub const CONTEXT_DRAW_INDEXED: usize = 12;
     /// `ID3D11DeviceContext::Draw`.

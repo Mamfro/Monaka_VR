@@ -36,15 +36,6 @@ pub fn from_rows(m: &Mat43d) -> Mat4d {
     out
 }
 
-/// The rows of a 4x4 whose last column is `(0, 0, 0, 1)`.
-pub fn to_rows(m: &Mat4d) -> Mat43d {
-    let mut out = [0.0; 12];
-    for row in 0..4 {
-        out[row * 3..row * 3 + 3].copy_from_slice(&m[row * 4..row * 4 + 3]);
-    }
-    out
-}
-
 /// The inverse of a rigid transform (orthonormal axes): the axes transposed, the position taken
 /// back through them. `None` when the axes are not orthonormal.
 pub fn rigid_inverse(m: &Mat43d) -> Option<Mat43d> {
@@ -133,6 +124,15 @@ mod tests {
 
     fn close(a: &[f64], b: &[f64]) -> bool {
         a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1.0e-9)
+    }
+
+    /// The rows of a 4x4 whose last column is `(0, 0, 0, 1)`.
+    fn to_rows(m: &Mat4d) -> Mat43d {
+        let mut out = [0.0; 12];
+        for row in 0..4 {
+            out[row * 3..row * 3 + 3].copy_from_slice(&m[row * 4..row * 4 + 3]);
+        }
+        out
     }
 
     /// A camera turned 90 degrees about the up axis, at (1, 2, 3).

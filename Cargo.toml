@@ -11,7 +11,7 @@ license = "GPL-3.0-only"
 repository = "https://github.com/Mamfro/monaka_vr"
 
 [workspace.dependencies]
-monaka_arms = { path = "crates/arms" }
+monaka_body = { path = "crates/body" }
 monaka_core = { path = "crates/core" }
 monaka_channel = { path = "crates/channel" }
 monaka_openxr = { path = "crates/openxr" }

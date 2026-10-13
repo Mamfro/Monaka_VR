@@ -82,12 +82,6 @@ impl Placement {
         Self { frustum, centre: [toward_nose * 0.5 * ipd / distance.max(0.05), 0.0] }
     }
 
-    /// The layer's centre in the image's clip units (x right, y up, the image -1..1).
-    pub fn clip_centre(&self) -> [f32; 2] {
-        let f = &self.frustum;
-        [(2.0 * self.centre[0] - (f.right + f.left)) / (f.right - f.left), (2.0 * self.centre[1] - (f.up + f.down)) / (f.up - f.down)]
-    }
-
     /// Sideways pixels the layer's centre lies from straight ahead in an image `width` wide
     /// (the HUD's disparity, signed for this eye).
     pub fn shift_pixels(&self, width: f32) -> f32 {
@@ -139,17 +133,23 @@ mod tests {
     /// A 16:9 field: square pixels in a 3840x2160 image.
     const WIDE: Frustum = Frustum { left: -16.0 / 9.0, right: 16.0 / 9.0, up: 1.0, down: -1.0 };
 
+    /// The layer's centre in the image's clip units (x right, y up, the image -1..1).
+    fn clip_centre(p: &Placement) -> [f32; 2] {
+        let f = &p.frustum;
+        [(2.0 * p.centre[0] - (f.right + f.left)) / (f.right - f.left), (2.0 * p.centre[1] - (f.up + f.down)) / (f.up - f.down)]
+    }
+
     #[test]
     fn the_hud_shrinks_toward_straight_ahead_and_moves_toward_the_nose() {
         let base = Rect::sized(3840.0, 2160.0);
         let centred = Placement::new(WIDE, 0, 0.0, 2.0);
         assert_eq!(centred.rect(base, base.aspect(), 1.0), base);
         assert_eq!(centred.rect(base, base.aspect(), 0.5), Rect::new(960.0, 540.0, 1920.0, 1080.0));
-        assert_eq!(centred.clip_centre(), [0.0, 0.0]);
+        assert_eq!(clip_centre(&centred), [0.0, 0.0]);
         // A left eye reaching further out (left) than in, and further down than up: straight
         // ahead is right of and above the image centre (0.2 and 0.1 clip units), and the HUD goes there.
         let off = Placement::new(Frustum { left: -1.2 * WIDE.right, right: 0.8 * WIDE.right, up: 0.9, down: -1.1 }, 0, 0.0, 2.0);
-        let [ax, ay] = off.clip_centre();
+        let [ax, ay] = clip_centre(&off);
         assert!((ax - 0.2).abs() < 1e-5 && (ay - 0.1).abs() < 1e-5, "{ax} {ay}");
         let rect = off.rect(base, base.aspect(), 0.5);
         assert!((rect.x - (960.0 + 384.0)).abs() < 1e-2 && (rect.y - (540.0 - 108.0)).abs() < 1e-2, "{rect:?}");
@@ -163,7 +163,7 @@ mod tests {
         // At a 106 degree field (tangent 1.33 each side) and 64 mm this is 0.024 clip units over
         // the distance in metres, Dying Light 1's rule of thumb.
         let wide = Placement::new(Frustum { left: -1.3333, right: 1.3333, up: 1.0, down: -1.0 }, 0, 0.064, 2.0);
-        assert!((wide.clip_centre()[0] - 0.012).abs() < 1e-4);
+        assert!((clip_centre(&wide)[0] - 0.012).abs() < 1e-4);
     }
 
     #[test]

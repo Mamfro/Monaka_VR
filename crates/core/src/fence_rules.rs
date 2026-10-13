@@ -7,7 +7,7 @@
 //! copying and signals the `consumed` fence when done. Neither side waits. All header reads and
 //! writes happen under the header mutex.
 
-use crate::protocol::{FENCE_SLOTS, FenceHeader, NO_SLOT};
+use crate::protocol::{FENCE_SLOTS, FenceHeader};
 
 /// A slot the producer must not overwrite: the newest pair, or the slot the reader is still
 /// copying from.
@@ -33,14 +33,15 @@ pub fn reader_take(header: &FenceHeader, seen: u64, produced_completed: u64) -> 
         .max_by_key(|&(_, sequence)| sequence)
 }
 
-/// No pair yet: no slot is the newest or being read.
-pub fn empty_header() -> FenceHeader {
-    FenceHeader { latest_slot: NO_SLOT, reader_slot: NO_SLOT, ..FenceHeader::default() }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::NO_SLOT;
+
+    /// No pair yet: no slot is the newest or being read.
+    fn empty_header() -> FenceHeader {
+        FenceHeader { latest_slot: NO_SLOT, reader_slot: NO_SLOT, ..FenceHeader::default() }
+    }
 
     /// A header whose slots hold these pairs, the newest being `latest`.
     fn holding(sequences: [u64; FENCE_SLOTS]) -> FenceHeader {

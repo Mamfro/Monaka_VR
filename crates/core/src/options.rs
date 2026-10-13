@@ -114,15 +114,6 @@ pub fn parse_size(text: &str) -> Option<(u32, u32)> {
     ((256..=8192).contains(&w) && (256..=8192).contains(&h)).then_some((w, h))
 }
 
-/// `yaw [pitch]` in degrees (a synthetic head for PC runs): a finite yaw at most `yaw_limit`
-/// either way, and a pitch at most `pitch_limit` either way (0 when missing or out of range).
-pub fn parse_angles(text: &str, yaw_limit: f32, pitch_limit: f32) -> Option<(f32, f32)> {
-    let mut words = text.split_whitespace().map(str::parse::<f32>);
-    let yaw = words.next()?.ok().filter(|y| y.is_finite() && y.abs() <= yaw_limit)?;
-    let pitch = words.next().and_then(Result::ok).filter(|p| p.is_finite() && p.abs() <= pitch_limit).unwrap_or(0.0);
-    Some((yaw, pitch))
-}
-
 // ---- The settings every game reads alike ----
 
 /// What aims (the launcher's `aim` option: `hand_rig`, `head`, `controller` or `off`).
@@ -314,9 +305,6 @@ mod tests {
         assert_eq!(parse_size(" 2416 2644\n"), Some((2416, 2644)));
         assert_eq!(parse_size("100x2644"), None);
         assert_eq!(parse_size("2644"), None);
-        assert_eq!(parse_angles("30 -10", 180.0, 80.0), Some((30.0, -10.0)));
-        assert_eq!(parse_angles("30 95", 180.0, 80.0), Some((30.0, 0.0)), "a pitch out of range is level");
-        assert_eq!(parse_angles("200", 180.0, 80.0), None);
         let options = Options::parse("eye_size=2644x2644\nsynthetic_yaw=-30\nfar=270");
         assert_eq!(options.size("eye_size"), Some((2644, 2644)));
         assert_eq!(options.angle("synthetic_yaw", 180.0), Some(-30.0));

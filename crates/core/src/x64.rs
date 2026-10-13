@@ -70,11 +70,6 @@ impl Instruction {
         self.map == Map::Legacy && self.opcode == 0xff && self.reg.map(|r| r & 7) == Some(2)
     }
 
-    /// `jmp rel32` / `jmp rel8`.
-    pub fn is_jump(&self) -> bool {
-        self.map == Map::Legacy && matches!(self.opcode, 0xe9 | 0xeb)
-    }
-
     /// `ret`, `ret imm16`, an indirect `jmp`, `int3` or `ud2`: control does not fall through.
     pub fn ends_flow(&self) -> bool {
         match self.map {

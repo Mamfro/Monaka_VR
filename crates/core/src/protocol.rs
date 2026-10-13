@@ -428,7 +428,6 @@ pub fn dimensions_ok(width: u32, height: u32) -> bool {
 /// `DXGI_FORMAT` values the channels use, so this crate needs no Windows bindings.
 pub mod dxgi_format {
     pub const R10G10B10A2_UNORM: u32 = 24;
-    pub const R8G8B8A8_TYPELESS: u32 = 27;
     pub const R8G8B8A8_UNORM: u32 = 28;
     pub const R8G8B8A8_UNORM_SRGB: u32 = 29;
     pub const B8G8R8A8_UNORM: u32 = 87;

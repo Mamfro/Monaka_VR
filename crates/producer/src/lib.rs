@@ -25,6 +25,7 @@ pub mod builds;
 pub mod game;
 pub mod research;
 pub mod ledger;
+pub mod log;
 pub mod situation;
 
 /// Win32 codes the loader understands.

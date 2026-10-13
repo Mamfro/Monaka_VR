@@ -189,7 +189,7 @@ pub fn note_camera_match(known: bool, to_turned: f32, to_base: f32, within: f32,
         CAMERA_MATCH_WORST.fetch_max(to_turned.min(to_base).to_bits(), Relaxed);
     }
     let n = CAMERA_MATCHES[kind].fetch_add(1, Relaxed);
-    if kind == 2 && (n < 6 || (n + 1).is_power_of_two()) {
+    if kind == 2 && log::seldom(n + 1, 6) {
         log!(
             "eye {eye}: the render cache holds a camera the view did not see ({} so far; {to_turned:.3} from the nearest turn, {to_base:.3} from the nearest game camera; cutscene {cutscene}): made from it as the game set it",
             n + 1,

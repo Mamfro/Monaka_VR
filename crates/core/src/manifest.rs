@@ -985,7 +985,7 @@ pub const EYE_SEPARATION: Opt =
     line("eye_separation", "Eye distance (m)", "Used when the headset reports none.", Kind::Number { min: 0.03, max: 0.09, step: 0.001, default: 0.064 })
         .owned_by(Feature::Stereo);
 
-/// The character walks where the player steps (`monaka_arms::roomscale`).
+/// The character walks where the player steps (`monaka_body::roomscale`).
 pub const ROOM_SCALE: Opt =
     opt("room_scale", "Room-scale movement", "Your real steps and leans move your character; walls and enemies still stop it.", Kind::Switch { default: true })
         .on(Shown::Controls)

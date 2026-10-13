@@ -60,29 +60,6 @@ pub fn find_floats(object: usize, length: usize, mut matches: impl FnMut(f32) ->
     found
 }
 
-/// Offsets in `object..object+length` (4-byte aligned) where two consecutive u32 values are
-/// `first` and `second` (a stored width and height, for example).
-pub fn find_u32_pair(object: usize, length: usize, first: u32, second: u32) -> Vec<usize> {
-    let mut found = Vec::new();
-    let mut page = [0u8; 260];
-    let mut offset = 0;
-    while offset < length {
-        let size = 256.min(length - offset);
-        // Read 4 bytes past the page so a pair across pages is seen.
-        let read = mem::read_bytes(object + offset, &mut page[..size + 4]) || mem::read_bytes(object + offset, &mut page[..size]);
-        if read {
-            for i in (0..size).step_by(4) {
-                let a = u32::from_le_bytes(page[i..i + 4].try_into().expect("4 bytes"));
-                let b = u32::from_le_bytes(page[i + 4..i + 8].try_into().expect("4 bytes"));
-                if a == first && b == second {
-                    found.push(offset + i);
-                }
-            }
-        }
-        offset += size;
-    }
-    found
-}
 
 /// Labels a float that equals `angle` (radians) as radians or degrees, either sign, or as the
 /// sine of it (a direction's component).

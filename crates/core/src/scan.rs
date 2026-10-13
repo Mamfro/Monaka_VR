@@ -198,11 +198,6 @@ impl<'a> Code<'a> {
         self.chunk_index(rva).map(|i| self.chunks[i].primary)
     }
 
-    /// Whether a function begins exactly at `rva`.
-    pub fn is_function_start(&self, rva: u32) -> bool {
-        self.chunk_index(rva).is_some_and(|i| self.chunks[i].start == rva && self.chunks[i].primary == rva)
-    }
-
     /// How many functions the exception directory lists (pieces of split functions included).
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
@@ -357,22 +352,6 @@ impl<'a> Code<'a> {
                 if self.instruction_containing(site).is_some_and(|(start, i)| start == site && i.is_call()) {
                     hits.push(site);
                 }
-            }
-        }
-        hits
-    }
-
-    /// Places in data sections that store a pointer to `target` (vtable slots, tables).
-    pub fn pointers_to(&self, target: u32) -> Vec<u32> {
-        let value = (self.base + target as u64).to_le_bytes();
-        let mut hits = Vec::new();
-        for section in self.sections.iter().filter(|s| !s.executable) {
-            let mut from = 0;
-            while let Some(at) = find(&section.bytes[from..], &value).map(|i| i + from) {
-                if at % 8 == 0 {
-                    hits.push(section.rva + at as u32);
-                }
-                from = at + 1;
             }
         }
         hits

@@ -87,14 +87,6 @@ impl HeadAim {
         Some((Look { yaw: own.yaw + self.yaw_share, pitch }, own))
     }
 
-    /// The game wrote the pitch target itself since the last update (a cutscene steering the look):
-    /// none of the head's pitch is in it. Counted in anyway, the game's own pitch would drift a
-    /// share further every update until it looked implausible and the whole share was dropped, the
-    /// yaw's too, drawing frames without the head's turn.
-    pub fn pitch_replaced(&mut self) {
-        self.pitch_share = 0.0;
-    }
-
     /// The game's own targets to write back when head aim stops, if a share is held on `owner`.
     pub fn release(&mut self, owner: usize, stored: Look) -> Option<Look> {
         let held = owner == self.owner && (self.yaw_share != 0.0 || self.pitch_share != 0.0);
@@ -187,23 +179,6 @@ mod tests {
     }
 
     const DL2: Convention = Convention::DEGREES_YAW_RIGHT;
-
-    #[test]
-    fn a_pitch_the_game_keeps_writing_keeps_the_yaw_share() {
-        // A conversation writes pitch -27 every update over the head's -16; the head looks 120
-        // degrees left. Each update the targets carry the yaw written, the pitch the game's.
-        let head_yaw = 120f32.to_radians();
-        let mut aim = HeadAim::default();
-        let (mut write, _) = aim.apply(1, Look { yaw: -80.0, pitch: -27.0 }, head_yaw, -16f32.to_radians(), PitchMode::HeadOnly, &DL2).unwrap();
-        for update in 0..30 {
-            let stored = Look { yaw: write.yaw, pitch: -27.0 };
-            if (stored.pitch - write.pitch).abs() > 0.5 {
-                aim.pitch_replaced();
-            }
-            write = aim.apply(1, stored, head_yaw, -16f32.to_radians(), PitchMode::HeadOnly, &DL2).map(|(w, _)| w).unwrap_or_else(|| panic!("update {update}: share dropped"));
-            assert!((aim.yaw_share_radians(&DL2) - head_yaw).abs() < 1e-4, "update {update}");
-        }
-    }
 
     #[test]
     fn head_only_pitch_and_added_yaw() {
