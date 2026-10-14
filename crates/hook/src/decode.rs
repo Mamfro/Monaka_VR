@@ -1,8 +1,11 @@
 //! A deliberately small x86-64 (and 32-bit x86) decoder for function prologues, for inline hooks on code whose
 //! bytes are not known in advance (a system DLL that differs between Windows builds). It knows the
 //! instructions compilers put at function starts (pushes, stack adjustments, register moves, stores
-//! of saved registers, SSE spills) and refuses everything else, including any branch or call, so a
-//! prologue it cannot fully account for is never patched.
+//! of saved registers, SSE spills, sign and zero extensions) and refuses everything else, so a
+//! prologue it cannot fully account for is never patched. The one branch it takes is a conditional
+//! jump with a 32-bit displacement (an early-out test at a function's start): relocated like any
+//! rip-relative operand, and only when it lands past the bytes taken ([`prologue`]); a call, a short
+//! jump or a jump back into the taken bytes is refused.
 
 /// One decoded instruction: its length and, if it addresses memory relative to the instruction
 /// pointer, where its 32-bit displacement sits.
@@ -64,8 +67,13 @@ pub fn instruction(bytes: &[u8]) -> Option<Decoded> {
         0x0f => {
             let second = *bytes.get(at)?;
             match second {
-                // movups/movss/movsd, movaps, and the SSE arithmetic seen in prologues.
-                0x10 | 0x11 | 0x28 | 0x29 | 0x57 | 0x58 | 0x59 | 0x5c | 0x5e => with_modrm(at + 1, 0)?,
+                // movups/movss/movsd, movaps, and the SSE arithmetic seen in prologues; movzx and
+                // movsx.
+                0x10 | 0x11 | 0x28 | 0x29 | 0x57 | 0x58 | 0x59 | 0x5c | 0x5e | 0xb6 | 0xb7 | 0xbe | 0xbf => with_modrm(at + 1, 0)?,
+                // jcc rel32: its displacement is relative to the instruction's end, as a
+                // rip-relative operand's is (64-bit code only: 32-bit code's jumps are relocated
+                // the same way, but none was needed there).
+                0x80..=0x8f if crate::arch::LONG_MODE => Decoded { length: at + 5, rip_displacement: Some(at + 1) },
                 _ => return None,
             }
         }
@@ -90,16 +98,35 @@ fn x86_only(bytes: &[u8], at: usize, opcode: u8) -> Option<Decoded> {
 }
 
 /// Whole instructions covering at least `minimum` bytes from the start of `bytes`, or `None` if
-/// any of them is not one this decoder accepts.
+/// any of them is not one this decoder accepts, or a conditional jump among them lands inside the
+/// bytes taken (its target would be moved away with them).
 pub fn prologue(bytes: &[u8], minimum: usize) -> Option<Vec<Decoded>> {
     let mut decoded = Vec::new();
+    let mut starts = Vec::new();
     let mut at = 0;
     while at < minimum {
         let next = instruction(bytes.get(at..)?)?;
+        starts.push(at);
         at += next.length;
         decoded.push(next);
     }
+    for (start, d) in starts.iter().zip(&decoded) {
+        if let Some(target) = jump_target(&bytes[*start..*start + d.length])
+            && (0..at as isize).contains(&(*start as isize + target))
+        {
+            return None;
+        }
+    }
     Some(decoded)
+}
+
+/// Where a conditional jump with a 32-bit displacement goes, from its own start (none for other
+/// instructions).
+fn jump_target(instruction: &[u8]) -> Option<isize> {
+    match instruction {
+        [0x0f, 0x80..=0x8f, a, b, c, d] => Some(6 + i32::from_le_bytes([*a, *b, *c, *d]) as isize),
+        _ => None,
+    }
 }
 
 // x86-64 machine code; the 32-bit tests are in `arch/x86.rs`.
@@ -128,6 +155,22 @@ mod tests {
         assert_eq!(decoded, vec![Decoded { length: 4, rip_displacement: None }, Decoded { length: 8, rip_displacement: Some(4) }]);
         // lea r10, [rcx-0xd8]: disp32 without SIB.
         assert_eq!(instruction(&[0x4c, 0x8d, 0x91, 0x28, 0xff, 0xff, 0xff]).map(|d| d.length), Some(7));
+    }
+
+    #[test]
+    fn d3d11_map_and_bind_prologues() {
+        // d3d11.dll 10.0.26100: Map (sub; lea; movsx rax, byte [rdx+0xc9]) and VSSetConstantBuffers
+        // (test r8d, r8d; je +0x179; mov rax, rsp; mov [rax+0x10], rbx).
+        let map = [0x48, 0x83, 0xec, 0x48, 0x4c, 0x8d, 0x91, 0x28, 0xff, 0xff, 0xff, 0x48, 0x0f, 0xbe, 0x82, 0xc9, 0, 0, 0, 0x48];
+        assert_eq!(prologue(&map, 14).map(|d| d.iter().map(|i| i.length).collect::<Vec<_>>()), Some(vec![4, 7, 8]));
+        let bind = [0x45, 0x85, 0xc0, 0x0f, 0x84, 0x79, 0x01, 0, 0, 0x48, 0x8b, 0xc4, 0x48, 0x89, 0x58, 0x10, 0x4c];
+        let decoded = prologue(&bind, 14).unwrap();
+        assert_eq!(decoded.iter().map(|i| i.length).collect::<Vec<_>>(), vec![3, 6, 3, 4]);
+        assert_eq!(decoded[1].rip_displacement, Some(2), "the jump's displacement is relocated");
+        // A jump back into the bytes taken cannot be moved.
+        let inside = [0x45, 0x85, 0xc0, 0x0f, 0x84, 0xfa, 0xff, 0xff, 0xff, 0x48, 0x8b, 0xc4, 0x48, 0x89, 0x58, 0x10];
+        assert_eq!(prologue(&inside, 14), None);
+        assert_eq!(lengths(&[0x74, 0x05, 0x90, 0x90, 0x90, 0x90]), None, "a short jump");
     }
 
     #[test]

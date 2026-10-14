@@ -4,7 +4,7 @@
 //! ([`read`]); asking what is in slot 0 reports a pad while the VR one is live ([`describe`]).
 
 use crate::presses::pressed;
-use crate::stick::{TAKE_RIGHT, TAKE_RIGHT_Y, take_right, walk_turned};
+use crate::stick::{TAKE_RIGHT, take_right, takes_y, walk_turned};
 use crate::presses::{flick, rewritten};
 use crate::vr_pad::{ACTIVE, CHANNEL, MASK_REAL, open_block, vr_pad};
 use monaka_channel::ChannelName;
@@ -306,7 +306,7 @@ unsafe fn read(original: &Original<GetStateFn>, user: u32, state: *mut XInputSta
     if TAKE_RIGHT.load(Acquire) {
         pad.thumb_rx = 0;
         pad.thumb_ry = 0;
-    } else if TAKE_RIGHT_Y.load(Acquire) {
+    } else if takes_y() {
         pad.thumb_ry = 0;
     }
     // The producer's own flick goes through the take.

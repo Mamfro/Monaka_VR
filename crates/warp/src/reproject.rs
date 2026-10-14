@@ -10,7 +10,7 @@
 use crate::{ConstantBuffer, Error, Readable, Result, SavedCompute, color_formats, compute_shader, depth_formats, readable, shader_view, uav_texture};
 use monaka_channel::d3d;
 use monaka_core::camera::{Mat34, Mat44};
-use monaka_core::depth::{DepthMapping, reprojection};
+use monaka_core::depth::{DepthMapping, invert, reprojection};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32_UINT};
 use windows::core::s;
@@ -43,10 +43,17 @@ pub(crate) struct Constants {
     pub jitter: [f32; 2],
     /// Where the area that lines up with the image starts in the source depth and the output depth.
     pub depth_origin: [u32; 2],
-    pub pad: [u32; 2],
+    /// The fill where it shows the primary's surface (`monaka_stereo::afw::Rules::fill_first`).
+    pub fill_first: u32,
+    /// A debug view instead of the image ([`Reprojector::sources`]).
+    pub sources: u32,
+    /// Resolves: the target's clip to the primary's (`reproject.hlsl`'s `Seen`).
+    pub back: [f32; 16],
+    /// Resolves: the primary's depth area (origin, size; size 0: none).
+    pub primary_depth: [u32; 4],
 }
 
-const _: () = assert!(size_of::<Constants>() == 32 * 4);
+const _: () = assert!(size_of::<Constants>() == 52 * 4);
 
 /// The part of a depth texture that lines up with the image: left, top, width, height in texels
 /// (`None`: all of it), as `monaka_framegen::inputs::rect` gives it.
@@ -62,10 +69,21 @@ pub(crate) fn depth_area(rect: DepthRect, size: (u32, u32)) -> ([u32; 2], (u32, 
 
 impl Constants {
     /// A redraw into `view`, its depth written at `out_depth` (width, height) when asked, from
-    /// `origin` in the output texture: the constants of its clears and resolves.
-    pub(crate) fn redraw(view: &View, out_depth: Option<(u32, u32)>, origin: [u32; 2]) -> Self {
+    /// `origin` in the output texture, the fill first where it agrees (`fill_first`): the constants
+    /// of its clears and resolves.
+    pub(crate) fn redraw(view: &View, out_depth: Option<(u32, u32)>, origin: [u32; 2], fill_first: bool) -> Self {
         let (out_depth_width, out_depth_height) = out_depth.unwrap_or((0, 0));
-        Self { width: view.width, height: view.height, out_depth_width, out_depth_height, near_a: view.mapping.a, near_b: view.mapping.b, depth_origin: origin, ..Default::default() }
+        Self {
+            width: view.width,
+            height: view.height,
+            out_depth_width,
+            out_depth_height,
+            near_a: view.mapping.a,
+            near_b: view.mapping.b,
+            depth_origin: origin,
+            fill_first: fill_first as u32,
+            ..Default::default()
+        }
     }
 
     /// The splat of a source frame into this redraw's `view`: its colour of `color` size, its depth
@@ -76,6 +94,16 @@ impl Constants {
         let m = source_matrix(view, projection, camera)?;
         let (origin, (depth_width, depth_height)) = depth;
         Some(Self { m, source_width: color.0, source_height: color.1, depth_width, depth_height, jitter, depth_origin: origin, ..*self })
+    }
+
+    /// This redraw's resolves, asking the primary's eye about the fill (`primary`: its splat's
+    /// constants): the way back into its frame and its depth area. Without it, nothing to ask.
+    pub(crate) fn resolve(&self, primary: Option<&Self>) -> Self {
+        let back = primary.and_then(|p| Some((invert(&p.m)?, p)));
+        match back {
+            Some((back, p)) => Self { back, primary_depth: [p.depth_origin[0], p.depth_origin[1], p.depth_width, p.depth_height], ..*self },
+            None => *self,
+        }
     }
 }
 
@@ -121,6 +149,12 @@ struct Layer {
 }
 
 pub struct Reprojector {
+    /// The fill first where its depth agrees with the primary's (`reproject.hlsl`).
+    pub fill_first: bool,
+    /// A debug view instead of the image (`reproject.hlsl`'s `Shown`): 0 none, 1 each pixel tinted
+    /// by where it came from (the fill green, a neighbour solid blue, nothing magenta), 2 its nearness as
+    /// grey.
+    pub sources: u32,
     device: ID3D11Device,
     clear: ID3D11ComputeShader,
     splat: ID3D11ComputeShader,
@@ -136,6 +170,8 @@ impl Reprojector {
     pub fn new(device: &ID3D11Device) -> Result<Self> {
         let shader = |entry| compute_shader(device, REPROJECT_SOURCE, "reproject.hlsl", entry);
         Ok(Self {
+            fill_first: false,
+            sources: 0,
             device: device.clone(),
             clear: shader(s!("Clear"))?,
             splat: shader(s!("Splat"))?,
@@ -201,7 +237,9 @@ impl Reprojector {
         let groups = |w: u32, h: u32| (w.div_ceil(8), h.div_ceil(8));
         let saved = SavedCompute::take(context);
         self.constants.bind(context);
-        let redraw = Constants::redraw(view, None, [0, 0]);
+        let redraw = Constants { sources: self.sources, ..Constants::redraw(view, None, [0, 0], self.fill_first) };
+        let splat_of = |frame: &Frame| redraw.splat(view, (frame.color.width, frame.color.height), ([0, 0], (frame.depth.width, frame.depth.height)), [0.0; 2], &frame.projection, &frame.camera);
+        let resolve = redraw.resolve(splat_of(primary).as_ref());
         // SAFETY: binds our own shaders and views on the game's context, dispatches, and restores
         // what was bound.
         unsafe {
@@ -213,8 +251,7 @@ impl Reprojector {
                 context.CSSetShader(&self.clear, None);
                 context.Dispatch(gx, gy, 1);
                 let Some(frame) = frame else { continue };
-                let sizes = ((frame.color.width, frame.color.height), ([0, 0], (frame.depth.width, frame.depth.height)));
-                let Some(splat) = redraw.splat(view, sizes.0, sizes.1, [0.0; 2], &frame.projection, &frame.camera) else { continue };
+                let Some(splat) = splat_of(frame) else { continue };
                 self.constants.update(context, &splat);
                 context.CSSetShaderResources(0, Some(&[Some(frame.color.view.clone()), Some(frame.depth.view.clone())]));
                 let (sx, sy) = groups(frame.color.width, frame.color.height);
@@ -223,10 +260,17 @@ impl Reprojector {
                     context.Dispatch(sx, sy, 1);
                 }
             }
-            self.constants.update(context, &redraw);
+            self.constants.update(context, &resolve);
             context.CSSetUnorderedAccessViews(0, 3, Some([None, None, Some(output_uav.clone())].as_ptr()), None);
-            let resources =
-                [None, None, Some(layers[0].image_srv.clone()), Some(layers[1].image_srv.clone()), Some(layers[0].keys_srv.clone()), Some(layers[1].keys_srv.clone())];
+            // The primary's depth, for asking its eye about the fill.
+            let resources = [
+                None,
+                Some(primary.depth.view.clone()),
+                Some(layers[0].image_srv.clone()),
+                Some(layers[1].image_srv.clone()),
+                Some(layers[0].keys_srv.clone()),
+                Some(layers[1].keys_srv.clone()),
+            ];
             context.CSSetShaderResources(0, Some(&resources));
             context.CSSetShader(&self.resolve, None);
             let (gx, gy) = groups(view.width, view.height);

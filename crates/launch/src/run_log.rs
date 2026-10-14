@@ -45,6 +45,7 @@ impl RunLog {
             Event::Failed(text) => self.line(&format!("failed: {text}")),
             Event::Detail(text) => self.line(&format!("| {text}")),
             Event::RunFolder(folder) => self.line(&format!("run folder: {}", folder.display())),
+            Event::Setting(id, value) => self.line(&format!("set in the headset: {id}={value}")),
         }
     }
 }

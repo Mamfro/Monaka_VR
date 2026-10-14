@@ -125,7 +125,7 @@ impl Driver {
         let each_frame = state.pose_each_frame.is_some_and(|f| f());
         let pose = {
             let mut frames = self.frames.locked();
-            if Schedule::starts_pair(n) || each_frame {
+            if Schedule::starts_pair(n) || each_frame || self.own_schedule() {
                 let tracked = state.shared.head_tracking || state.shared.synthetic.is_some();
                 let mut pose = if tracked { self.head.current().unwrap_or_default() } else { HeadPose::default() };
                 if let Some(adjust) = state.adjust_pose {

@@ -61,6 +61,10 @@ pub enum Launch {
     Auto { settle_seconds: u64 },
     /// The player starts it (and gets into gameplay) first.
     Manual,
+    /// The player starts it, before or after VR: started after, Monaka joins it the moment it
+    /// starts, so the producer sees everything the game makes from its first moment; already
+    /// running, Monaka joins it at once.
+    AtStart,
 }
 
 /// One option's kind and default.
@@ -561,8 +565,8 @@ impl Manifest {
                     return Err(format!("{}: settle_seconds default is not the launch's {settle_seconds}", self.id));
                 }
             }
-            Launch::Manual if starts => return Err(format!("{}: launch options on a game the player starts", self.id)),
-            Launch::Manual => {}
+            Launch::Manual | Launch::AtStart if starts => return Err(format!("{}: launch options on a game the player starts", self.id)),
+            Launch::Manual | Launch::AtStart => {}
         }
         Ok(())
     }
@@ -664,14 +668,16 @@ impl Values {
     }
 
     /// The producer's options file for these values: one `id=value` line per producer option
-    /// that applies, then `extra`'s `key=value` pairs (which may override). Sizes the launcher
-    /// settled (`eye_size`) and anything PC-dependent are the caller's to add.
+    /// that applies (a text option only when it holds some), then `extra`'s `key=value` pairs
+    /// (which may override). Sizes the launcher settled (`eye_size`) and anything PC-dependent
+    /// are the caller's to add.
     pub fn producer_lines(&self, game: &Manifest) -> Vec<String> {
         let mut lines: Vec<String> = game
             .options
             .iter()
-            .filter(|opt| opt.producer && !matches!(opt.kind, Kind::Text | Kind::Size) && self.applies(game, opt))
-            .map(|opt| format!("{}={}", opt.id, self.text(game, opt.id)))
+            .filter(|opt| opt.producer && opt.kind != Kind::Size && self.applies(game, opt))
+            .filter(|opt| opt.kind != Kind::Text || !self.text(game, opt.id).trim().is_empty())
+            .map(|opt| format!("{}={}", opt.id, self.text(game, opt.id).trim()))
             .collect();
         lines.extend(self.text(game, "extra").split_whitespace().filter(|p| p.contains('=')).map(str::to_owned));
         lines
@@ -1085,11 +1091,56 @@ pub const DIAGNOSTIC_LOGGING: Opt =
 /// The run-folder file whose presence turns [`DIAGNOSTIC_LOGGING`] on in the producer.
 pub const DIAGNOSTIC_MARKER: &str = "diagnostic-logging.on";
 
+/// The headset's debug menu (Back held), for chasing a bug with a tester. The window hides it
+/// until its version is clicked 5 times; a build tree always has it ([`DEBUG_MENU_ARG`]).
+pub const DEBUG_MENU: Opt = opt("debug_menu", "Debug menu", "Back held opens it in the headset.", Kind::Switch { default: false })
+    .on(Shown::Monaka)
+    .launcher()
+    .viewer_args("1", &[DEBUG_MENU_ARG]);
+
+/// The viewer's switch for [`DEBUG_MENU`]: without it Back held is plain Back.
+pub const DEBUG_MENU_ARG: &str = "--debug-menu";
+
+/// The run-folder file whose presence tells the producer the debug menu is on: it opens the probe
+/// console then (`monaka_producer::console`).
+pub const DEBUG_MENU_MARKER: &str = "debug-menu.on";
+
+/// The viewer's switch for the 2D window: the run shown in a desktop window with the debug menu
+/// and its panels, no headset (the launcher's "Debug without VR").
+pub const DESKTOP_ARG: &str = "--desktop";
+
+/// The viewer's exit code when the player closed the 2D window: the session stops, as for Stop VR
+/// (any other end while the game runs starts the run again).
+pub const CLOSED_BY_PLAYER: i32 = 10;
+
+/// The options the viewer can change while VR runs (by id): the headset's Monaka menu (Start held)
+/// offers those the game offers. Their help is left out: a game's own words for one (its menus by
+/// reach) are not the viewer's to know.
+pub const LIVE: &[Opt] = &[CONTROLLER_SMOOTHING, menu_reach(""), MENU_REACH_DEPTH, CONTROLLER_PROXY];
+
+/// The viewer's argument naming the [`LIVE`] options on offer with their values,
+/// `id=value,id=value`.
+pub const LIVE_ARG: &str = "--live";
+
+/// How a viewer line starts when the player changed a [`LIVE`] option in the headset, followed by
+/// ` id=value`: the launcher saves it as the window would.
+pub const SETTING_LINE: &str = "Monaka setting:";
+
 pub const DISABLE_VIEW_BOBBING: Opt = opt(
     "disable_view_bobbing",
     "Disable view bobbing",
     "The view stays level while you walk and run, instead of rising and falling with the character's steps, in every game that can.",
     Kind::Switch { default: true },
+)
+.on(Shown::Monaka);
+
+/// The eye the player aims with. Where a stereo method draws one eye at a time (AFW), that eye
+/// gets the real frame every present and the other eye is warped from it.
+pub const DOMINANT_EYE: Opt = opt(
+    "dominant_eye",
+    "Dominant eye",
+    "The eye you aim with. Frame-warp (AFW) renders it for real every frame and warps the other eye from it.",
+    choice(&[("right", "Right"), ("left", "Left")], "right"),
 )
 .on(Shown::Monaka);
 
@@ -1109,7 +1160,7 @@ pub const MONAKA: Manifest = Manifest {
     launch: Launch::Manual,
     refused_arguments: &[],
     before: "",
-    options: &[CONTROLLER_SMOOTHING, DISABLE_VIEW_BOBBING, DIAGNOSTIC_LOGGING],
+    options: &[CONTROLLER_SMOOTHING, DISABLE_VIEW_BOBBING, DOMINANT_EYE, DIAGNOSTIC_LOGGING, DEBUG_MENU],
     licences: &[],
     left_hand_aims: false,
     weapon_ring: false,
@@ -1175,6 +1226,15 @@ mod tests {
         assert_eq!(ANY.runs_as(&values), ["Game.exe"]);
         let without_picker = Manifest { options: &[], ..ANY };
         assert!(without_picker.check().is_err());
+    }
+
+    #[test]
+    fn a_text_option_reaches_the_producer_only_when_it_holds_some() {
+        const NAMES: Manifest = Manifest { options: &[line("hide", "Hide", "", Kind::Text)], ..TEST };
+        let mut values = Values::default();
+        assert!(values.producer_lines(&NAMES).is_empty());
+        values.set("hide", " Arms,Legs ");
+        assert_eq!(values.producer_lines(&NAMES), ["hide=Arms,Legs"]);
     }
 
     #[test]

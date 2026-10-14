@@ -62,7 +62,8 @@ pub enum Motion {
 /// What a frame's motion vectors point at: the frame the game treated as its previous one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PreviousFrame {
-    /// The game's own previous frame: with alternate eyes the other eye's, one frame back.
+    /// The game's own previous frame, one frame back: the frame presented before, whichever eye
+    /// rendered it (the other eye's when the eyes take turns).
     #[default]
     OtherEye,
     /// This eye's own previous frame, `frames_back` game frames back (two with alternate eyes, one

@@ -110,11 +110,16 @@ impl<'a> Frames<'a> {
         self.now[element].iter().all(|v| v.is_finite()) && (self.placed[element] || self.now[element] != self.animated[element])
     }
 
+    /// The bones placed or changed, in index order: what [`Frames::flush`] writes.
+    pub fn changed(&self, skeleton: &dyn Skeleton) -> Vec<usize> {
+        let count = (skeleton.count().max(0) as usize).min(self.now.len());
+        (0..count).filter(|&e| self.written(e) && skeleton.is_bone(e as i32)).collect()
+    }
+
     /// Writes the elements placed or changed into `skeleton` (bones only, in index order) and
     /// returns them.
     pub fn flush(&self, skeleton: &dyn Skeleton) -> Vec<usize> {
-        let count = (skeleton.count().max(0) as usize).min(self.now.len());
-        let written: Vec<usize> = (0..count).filter(|&e| self.written(e) && skeleton.is_bone(e as i32)).collect();
+        let written = self.changed(skeleton);
         for &element in &written {
             skeleton.set_world(element as i32, &self.now[element]);
         }

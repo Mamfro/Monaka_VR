@@ -109,6 +109,12 @@ fn find_module(pid: u32, name: &str) -> Result<Option<RemoteModule>, Failure> {
     Ok(modules(pid)?.into_iter().find(|m| m.name.eq_ignore_ascii_case(name)))
 }
 
+/// Whether process `pid` has come far enough to be attached: its kernel32 is mapped (a process
+/// just made holds only its executable and ntdll, and its module list may not be readable yet).
+pub fn ready(pid: u32) -> bool {
+    matches!(find_module(pid, "kernel32.dll"), Ok(Some(_)))
+}
+
 /// A module mapped in the game, read by RVA.
 struct RemoteImage<'a> {
     process: &'a Handle,

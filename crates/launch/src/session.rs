@@ -10,7 +10,7 @@
 use crate::games::{EyeSize, Game, Launch, Values};
 use crate::run_log::{self, RunLog};
 use crate::{Paths, attach, system, text};
-use monaka_core::manifest::{DIAGNOSTIC_LOGGING, DIAGNOSTIC_MARKER, MONAKA};
+use monaka_core::manifest::{DEBUG_MENU_ARG, DEBUG_MENU_MARKER, DIAGNOSTIC_LOGGING, DIAGNOSTIC_MARKER, LIVE_ARG, MONAKA, SETTING_LINE};
 use std::io::{BufRead, BufReader};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -38,6 +38,8 @@ pub enum Event {
     Detail(String),
     /// The run folder of the current run.
     RunFolder(PathBuf),
+    /// The player changed an option in the headset's Monaka menu: its id and value, to save.
+    Setting(String, String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -152,16 +154,26 @@ pub enum Console {
     Shared,
 }
 
+/// What shows the run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shows {
+    /// The headset, through SteamVR's OpenXR.
+    Headset,
+    /// The 2D window on the desktop, with the debug menu and its panels: no headset
+    /// ([`monaka_core::manifest::DESKTOP_ARG`]).
+    Desktop,
+}
+
 /// Runs a session to its end. Blocks; call it on its own thread from a GUI.
-pub fn run(game: &Game, values: &Values, paths: &Paths, console: Console, stop: &Stop, report: &mut dyn FnMut(Event)) {
-    match session(game, values, paths, console, stop, report) {
+pub fn run(game: &Game, values: &Values, paths: &Paths, console: Console, shows: Shows, stop: &Stop, report: &mut dyn FnMut(Event)) {
+    match session(game, values, paths, console, shows, stop, report) {
         Ok(()) => {}
         Err(failure) => report(Event::Failed(failure)),
     }
     report(Event::State(State::Stopped));
 }
 
-fn session(game: &Game, values: &Values, paths: &Paths, console: Console, stop: &Stop, report: &mut dyn FnMut(Event)) -> Result<(), String> {
+fn session(game: &Game, values: &Values, paths: &Paths, console: Console, shows: Shows, stop: &Stop, report: &mut dyn FnMut(Event)) -> Result<(), String> {
     let viewer = paths.binaries.join("monaka_viewer.exe");
     let producer = game.dll(paths);
     for path in [&viewer, &producer] {
@@ -173,17 +185,58 @@ fn session(game: &Game, values: &Values, paths: &Paths, console: Console, stop: 
     if system::viewer_running() {
         return Err("Another VR session is already running (a Monaka VR viewer is open). Stop it first.".into());
     }
-    if !system::steamvr_running() {
-        return Err("Start SteamVR and connect the headset first.".into());
-    }
-    let openxr = system::steamvr_openxr()?;
+    // The 2D window needs no headset: no OpenXR runtime.
+    let openxr = match shows {
+        Shows::Headset if !system::steamvr_running() => return Err("Start SteamVR and connect the headset first.".into()),
+        Shows::Headset => Some(system::steamvr_openxr()?),
+        Shows::Desktop => None,
+    };
 
     report(Event::State(State::WaitingForGame));
-    let Some(pid) = find_game(game, values, stop, report)? else { return Ok(()) };
+    let mut restarts = 0;
+    loop {
+        let Some(pid) = find_game(game, values, stop, report)? else { return Ok(()) };
+        let joined = Instant::now();
+        play(game, values, paths, console, stop, report, &viewer, &producer, openxr.as_ref(), pid)?;
+        // A game joined at its start that ends at once may have started itself again (through
+        // Steam, or a launcher's own copy): it is waited for again, a few times.
+        let again = game.launch == Launch::AtStart && !stop.requested() && !system::alive(pid) && joined.elapsed() < AT_START_RESTART && restarts < 3;
+        if !again {
+            return Ok(());
+        }
+        restarts += 1;
+        report(Event::Info(format!("{} ended right after it started; waiting for it to start again.", game.name)));
+        report(Event::State(State::WaitingForGame));
+    }
+}
+
+/// A game joined at its start that ends within this is waited for again ([`Launch::AtStart`]).
+const AT_START_RESTART: Duration = Duration::from_secs(30);
+
+/// After the game is gone, how long the viewer has to end by itself before it is closed.
+const GAME_GONE_GRACE: Duration = Duration::from_secs(5);
+
+/// How long the viewer waits for the first frame of a game joined as it starts.
+const AT_START_PRODUCER_WAIT: Duration = Duration::from_secs(600);
+
+/// One game process played until it exits or a stop is asked for.
+#[allow(clippy::too_many_arguments)]
+fn play(
+    game: &Game,
+    values: &Values,
+    paths: &Paths,
+    console: Console,
+    stop: &Stop,
+    report: &mut dyn FnMut(Event),
+    viewer: &Path,
+    producer: &Path,
+    openxr: Option<&system::OpenXr>,
+    pid: u32,
+) -> Result<(), String> {
     // A 32-bit game takes the pack's 32-bit twin.
     let producer = match system::is_32_bit(pid) {
         Some(true) => game.dll_for(paths, true),
-        _ => producer,
+        _ => producer.to_path_buf(),
     };
     if !producer.exists() {
         return Err(format!("{} is missing: {} is a 32-bit game. Build first: cargo build --release --target i686-pc-windows-msvc", producer.display(), game.name));
@@ -198,21 +251,25 @@ fn session(game: &Game, values: &Values, paths: &Paths, console: Console, stop: 
     let eye = match crate::games::eye_size(values, game) {
         EyeSize::GameOwn => None,
         EyeSize::Fixed(w, h) => Some((w, h)),
-        EyeSize::Headset => {
-            let size = headset_eye_size(&viewer, &openxr, console);
+        // The 2D window: no headset to ask, so the game keeps its own resolution.
+        EyeSize::Headset => openxr.and_then(|openxr| {
+            let size = headset_eye_size(viewer, openxr, console);
             match size {
                 Some((w, h)) => report(Event::Info(format!("Headset eye size {w}x{h}"))),
                 None => report(Event::Warning("Headset eye size unavailable; the game keeps its own resolution.".into())),
             }
             size
-        }
+        }),
     };
 
-    report(Event::Info("VR is starting. Forward follows the headset: use its own recentre control.".into()));
+    report(Event::Info(match openxr {
+        Some(_) => "VR is starting. Forward follows the headset: use its own recentre control.".into(),
+        None => "The 2D window is starting: the game as the headset would get it, the debug menu and its panels in a window. Click it; the game keeps focus.".into(),
+    }));
     let mut quick_failures = 0;
     while system::alive(pid) && !stop.requested() {
         let started = Instant::now();
-        let ended = one_run(game, values, paths, &viewer, &producer, &openxr, pid, eye, console, stop, report);
+        let ended = one_run(game, values, paths, viewer, &producer, openxr, pid, eye, console, stop, report);
         if stop.requested() || !system::alive(pid) {
             if let Err(RunEnd::Fatal(why) | RunEnd::Retry(why)) = ended {
                 report(Event::Warning(why));
@@ -238,6 +295,31 @@ fn session(game: &Game, values: &Values, paths: &Paths, console: Console, stop: 
     Ok(())
 }
 
+/// The moment a game started after VR can be attached ([`Launch::AtStart`]): the player starts
+/// it, and it is joined as soon as its process can take the producer, before it makes anything.
+fn join_at_start(executables: &[&str], steam_app: u32, stop: &Stop, report: &mut dyn FnMut(Event)) -> Result<Option<u32>, String> {
+    report(Event::Info(format!("Start {} now: Monaka joins it as it starts.", executables.join(" or "))));
+    loop {
+        // The cheap check first; the Steam folder check once one is named so.
+        if !system::processes_named(executables).is_empty()
+            && let Some(process) = system::game_processes(executables, steam_app).first()
+        {
+            let seen = Instant::now();
+            while system::alive(process.pid) && seen.elapsed() < Duration::from_secs(10) {
+                if attach::ready(process.pid) {
+                    report(Event::Info(format!("{} started; joining it.", process.executable)));
+                    return Ok(Some(process.pid));
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        if stop.requested() {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// The game's process: already running, or started through Steam and given time to reach its menu
 /// (unless its `launch` option is off; `settle_seconds` overrides the wait).
 fn find_game(game: &Game, values: &Values, stop: &Stop, report: &mut dyn FnMut(Event)) -> Result<Option<u32>, String> {
@@ -248,7 +330,13 @@ fn find_game(game: &Game, values: &Values, stop: &Stop, report: &mut dyn FnMut(E
     let executables: Vec<&str> = runs_as.iter().map(String::as_str).collect();
     let running = system::game_processes(&executables, game.steam_app);
     if let Some(process) = running.first() {
+        if game.launch == Launch::AtStart {
+            report(Event::Info(format!("{} is running already: joining it now. What it made before stays unknown; start VR first, then the game, to see it all.", process.executable)));
+        }
         return Ok(Some(process.pid));
+    }
+    if game.launch == Launch::AtStart {
+        return join_at_start(&executables, game.steam_app, stop, report);
     }
     let Launch::Auto { settle_seconds } = game.launch else {
         return Err(format!("{} is not running. Start it from Steam first.", game.name));
@@ -309,7 +397,7 @@ fn one_run(
     paths: &Paths,
     viewer: &Path,
     producer: &Path,
-    openxr: &system::OpenXr,
+    openxr: Option<&system::OpenXr>,
     pid: u32,
     eye: Option<(u32, u32)>,
     console: Console,
@@ -323,7 +411,19 @@ fn one_run(
     let version = version();
     let folder = paths.runs.join(format!("{}-{version}", game.run_prefix));
     std::fs::create_dir_all(&folder).map_err(|e| fatal(format!("cannot make the run folder {}: {e}", folder.display())))?;
-    let plan = crate::games::plan(values, game, eye);
+    let mut plan = crate::games::plan(values, game, eye);
+    // A build tree always has the debug menu; an install only once the player turned it on.
+    if paths.dev_games.is_some() && !plan.viewer_args.iter().any(|a| a == DEBUG_MENU_ARG) {
+        plan.viewer_args.push(DEBUG_MENU_ARG.to_owned());
+    }
+    // A game joined as it starts shows its first frame only after its start-up (videos, loading).
+    if game.launch == Launch::AtStart {
+        plan.viewer_args.extend(["--producer-wait".to_owned(), AT_START_PRODUCER_WAIT.as_secs().to_string()]);
+    }
+    if !plan.live.is_empty() {
+        let live = plan.live.join(",");
+        plan.viewer_args.extend([LIVE_ARG.to_owned(), live]);
+    }
     let mut monaka_log = RunLog::create(&folder);
     for line in header(game, producer, pid, openxr, eye, &plan) {
         monaka_log.line(&line);
@@ -343,6 +443,10 @@ fn one_run(
     }
     if values.switch(&MONAKA, DIAGNOSTIC_LOGGING.id) {
         write(DIAGNOSTIC_MARKER, "")?;
+    }
+    // The debug menu's tools in the game (the probe console) come with the menu.
+    if plan.viewer_args.iter().any(|a| a == DEBUG_MENU_ARG) {
+        write(DEBUG_MENU_MARKER, "")?;
     }
     let notices = game.licence_folder(paths);
     for licence in &plan.licences {
@@ -369,7 +473,7 @@ fn one_run(
         )));
     }
 
-    let viewed = view(viewer, openxr, &channel, &plan.viewer_args, console, stop, report);
+    let viewed = view(viewer, openxr, &channel, &plan.viewer_args, &folder.join("captures"), pid, console, stop, report);
     // Always stop the producer while the game runs, whatever the viewer did.
     let stopped = if system::alive(pid) {
         report(Event::State(State::Stopping));
@@ -386,13 +490,13 @@ fn one_run(
 }
 
 /// What a run runs where, at the top of its log: the first thing to know about a player's report.
-fn header(game: &Game, producer: &Path, pid: u32, openxr: &system::OpenXr, eye: Option<(u32, u32)>, plan: &crate::games::Plan) -> Vec<String> {
+fn header(game: &Game, producer: &Path, pid: u32, openxr: Option<&system::OpenXr>, eye: Option<(u32, u32)>, plan: &crate::games::Plan) -> Vec<String> {
     let mut lines = vec![
         format!("Monaka {} (pack contract {}) on Windows {}", env!("CARGO_PKG_VERSION"), monaka_core::pack::CONTRACT, system::windows_build()),
         format!("game: {} ({}), process {pid} {}", game.name, game.id, system::process_path(pid).map_or_else(|| "(path unreadable)".into(), |p| p.display().to_string())),
         format!("producer: {} sha256 {}", producer.display(), file_sha256(producer).unwrap_or_else(|| "(unreadable)".into())),
         format!("pack: {}", game.credit()),
-        format!("OpenXR runtime: {}", openxr.runtime.display()),
+        format!("OpenXR runtime: {}", openxr.map_or_else(|| "none (the 2D window)".into(), |o| o.runtime.display().to_string())),
         format!("eye size: {}", eye.map_or_else(|| "the game's own".into(), |(w, h)| format!("{w}x{h}"))),
     ];
     for (name, contents) in &plan.files {
@@ -408,23 +512,30 @@ fn file_sha256(path: &Path) -> Option<String> {
     Some(monaka_core::sha256::hex(&hash.finish()))
 }
 
-/// Runs the viewer until it ends or a stop is asked for, forwarding its output.
+/// Runs the viewer until it ends, a stop is asked for or the game (`pid`) is gone, forwarding its
+/// output: in the headset through `openxr`, else in the 2D window. What it shows is saved into
+/// `captures` when asked for there (Start and Back held, or the debug menu's Save capture).
+#[allow(clippy::too_many_arguments)]
 fn view(
     viewer: &Path,
-    openxr: &system::OpenXr,
+    openxr: Option<&system::OpenXr>,
     channel: &str,
     extra: &[String],
+    captures: &Path,
+    pid: u32,
     console: Console,
     stop: &Stop,
     report: &mut dyn FnMut(Event),
 ) -> Result<(), String> {
     let mut command = Command::new(viewer);
+    command.args(["--gpu-map", channel, "--seconds", "86400", "--stop-event", &stop.event.name]);
+    match openxr {
+        Some(openxr) => command.arg("--loader").arg(&openxr.loader).arg("--runtime").arg(&openxr.runtime),
+        None => command.arg(monaka_core::manifest::DESKTOP_ARG),
+    };
     command
-        .args(["--gpu-map", channel, "--seconds", "86400", "--stop-event", &stop.event.name])
-        .arg("--loader")
-        .arg(&openxr.loader)
-        .arg("--runtime")
-        .arg(&openxr.runtime)
+        .arg("--captures")
+        .arg(captures)
         .args(extra)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -435,9 +546,10 @@ fn view(
     let lines = forward(&mut child);
     report(Event::State(State::Running));
     let mut stop_asked_at: Option<Instant> = None;
+    let mut game_gone_at: Option<Instant> = None;
     let status = loop {
         while let Ok(line) = lines.try_recv() {
-            report(Event::Detail(line));
+            report(viewer_line(line));
         }
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break status;
@@ -449,15 +561,35 @@ fn view(
                 let _ = child.kill();
             }
         }
+        // A game gone before its first frame leaves the viewer waiting for one: the run is over.
+        if !system::alive(pid) && game_gone_at.get_or_insert_with(Instant::now).elapsed() > GAME_GONE_GRACE {
+            let _ = child.kill();
+            let _ = child.wait();
+            report(Event::Info("The game ended; the viewer is closed.".into()));
+            return Ok(());
+        }
         std::thread::sleep(Duration::from_millis(50));
     };
     while let Ok(line) = lines.recv_timeout(Duration::from_millis(200)) {
-        report(Event::Detail(line));
+        report(viewer_line(line));
+    }
+    // The player closed the 2D window: that is Stop VR, not a run to start again.
+    if status.code() == Some(monaka_core::manifest::CLOSED_BY_PLAYER) {
+        stop.request();
     }
     if status.success() || stop.requested() { Ok(()) } else { Err(format!("the viewer stopped with exit code {}", status.code().unwrap_or(-1))) }
 }
 
 /// The viewer's stdout and stderr lines, read on their own threads.
+/// A viewer line as the player hears of it: a setting changed in the headset, or a detail.
+fn viewer_line(line: String) -> Event {
+    let setting = line.strip_prefix(SETTING_LINE).and_then(|rest| rest.trim().split_once('='));
+    match setting {
+        Some((id, value)) => Event::Setting(id.to_owned(), value.to_owned()),
+        None => Event::Detail(line),
+    }
+}
+
 pub(crate) fn forward(child: &mut Child) -> mpsc::Receiver<String> {
     let (send, receive) = mpsc::channel();
     if let Some(out) = child.stdout.take() {
@@ -483,6 +615,12 @@ pub(crate) fn log_tail(log: &Path, count: usize, report: &mut dyn FnMut(Event)) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_viewer_setting_line_is_a_setting() {
+        assert!(matches!(viewer_line(format!("{SETTING_LINE} menu_reach_depth=20")), Event::Setting(id, value) if id == "menu_reach_depth" && value == "20"));
+        assert!(matches!(viewer_line("GPU: something".into()), Event::Detail(_)));
+    }
 
     #[test]
     fn dates_are_civil() {

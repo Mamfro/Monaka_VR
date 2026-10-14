@@ -20,6 +20,8 @@ use std::sync::{Mutex, OnceLock};
 use monaka_core::sync::Locked;
 
 pub mod builds;
+pub mod console;
+pub mod debug;
 pub mod game;
 pub mod research;
 pub mod ledger;
@@ -385,8 +387,8 @@ macro_rules! producer {
         /// the file: the game list, options and tabs come from the pack, and who made it from the
         /// game crate's `authors` and `repository`.
         #[unsafe(no_mangle)]
-        pub static MONAKA_MANIFEST: [u8; $crate::pack::text_len(<$game as $crate::game::Game>::MANIFESTS, env!("CARGO_PKG_AUTHORS"), env!("CARGO_PKG_REPOSITORY"))] =
-            $crate::pack::text_bytes(<$game as $crate::game::Game>::MANIFESTS, env!("CARGO_PKG_AUTHORS"), env!("CARGO_PKG_REPOSITORY"));
+        pub static MONAKA_MANIFEST: [u8; $crate::pack::text_len(<$game as $crate::game::Game>::MANIFESTS, env!("CARGO_PKG_AUTHORS"), env!("CARGO_PKG_REPOSITORY"), env!("CARGO_PKG_VERSION"))] =
+            $crate::pack::text_bytes(<$game as $crate::game::Game>::MANIFESTS, env!("CARGO_PKG_AUTHORS"), env!("CARGO_PKG_REPOSITORY"), env!("CARGO_PKG_VERSION"));
 
         /// Called by the loader on a new thread in the game.
         #[unsafe(no_mangle)]
@@ -429,6 +431,7 @@ macro_rules! producer {
                 let read = $crate::pack::parse(text).unwrap_or_else(|why| panic!("{why}"));
                 assert_eq!(read.contract, $crate::pack::CONTRACT);
                 assert_eq!(read.about.source, env!("CARGO_PKG_REPOSITORY"));
+                assert_eq!(read.about.version, env!("CARGO_PKG_VERSION"));
                 assert!(read.manifests.iter().eq(manifests.iter()), "the manifest text does not read back as the manifests");
             }
         }

@@ -6,15 +6,22 @@
 //! A [`Canvas`] is a framebuffer of our own the game's own draw calls can be run into (a HUD piece
 //! cut out of its 2D layer), captured the same way.
 //!
+//! A GL depth texture goes into a D3D11 `R32_FLOAT` texture through a small shader pass
+//! ([`Bridge::capture_depth`], [`depth`]), for a depth warp or an upscaler.
+//!
 //! Everything here runs on the game's render thread with its GL context current (inside its
 //! `SwapBuffers`, see `monaka_hook::Hooks::import`). GL state the copy touches (framebuffer
 //! bindings, read buffer, scissor test, sRGB writes) is saved and put back.
 
+mod depth;
+
+pub use depth::texel_rect;
+use depth::DepthPass;
 use monaka_channel::d3d;
 use std::ffi::c_void;
 use std::fmt;
 use windows::Win32::Graphics::Direct3D11::{D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, ID3D11Device, ID3D11Texture2D};
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM;
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R8G8B8A8_UNORM};
 use windows::Win32::Graphics::OpenGL::{
     GL_BACK, GL_COLOR_BUFFER_BIT, GL_COLOR_CLEAR_VALUE, GL_COLOR_WRITEMASK, GL_DEPTH_BUFFER_BIT, GL_DEPTH_CLEAR_VALUE, GL_DEPTH_WRITEMASK,
     GL_NEAREST, GL_RGBA, GL_RGBA8, GL_SCISSOR_TEST, GL_STENCIL_BUFFER_BIT, GL_STENCIL_CLEAR_VALUE, GL_STENCIL_WRITEMASK, GL_TEXTURE_2D,
@@ -102,7 +109,7 @@ pub struct Functions {
     unlock_objects: DxLockObjects,
 }
 
-fn load<F: Copy>(name: &'static str) -> Result<F> {
+pub(crate) fn load<F: Copy>(name: &'static str) -> Result<F> {
     let mut text = name.as_bytes().to_vec();
     text.push(0);
     // SAFETY: asks the current context's driver for a function by NUL-terminated name.
@@ -169,6 +176,9 @@ pub struct Bridge {
     device: ID3D11Device,
     interop: *mut c_void,
     target: Option<Target>,
+    /// The depth copy's target (`R32_FLOAT`) and pass, made at the first depth copy.
+    depth_target: Option<Target>,
+    depth_pass: Option<DepthPass>,
 }
 
 impl Bridge {
@@ -180,7 +190,7 @@ impl Bridge {
         if interop.is_null() {
             return Err(Error::Failed("wglDXOpenDeviceNV (is the D3D11 device on the GL context's GPU?)"));
         }
-        Ok(Self { gl, device: device.clone(), interop, target: None })
+        Ok(Self { gl, device: device.clone(), interop, target: None, depth_target: None, depth_pass: None })
     }
 
     pub fn device(&self) -> &ID3D11Device {
@@ -188,7 +198,12 @@ impl Bridge {
     }
 
     fn release_target(&mut self) {
-        if let Some(target) = self.target.take() {
+        let target = self.target.take();
+        self.free(target);
+    }
+
+    fn free(&self, target: Option<Target>) {
+        if let Some(target) = target {
             // SAFETY: deletes the GL objects and the registration this bridge created, with the
             // context current.
             unsafe {
@@ -204,7 +219,23 @@ impl Bridge {
             return Ok(self.target.as_ref().expect("checked"));
         }
         self.release_target();
-        let mut desc = d3d::simple_texture_desc(width, height, DXGI_FORMAT_R8G8B8A8_UNORM);
+        self.target = Some(self.make_target(width, height, DXGI_FORMAT_R8G8B8A8_UNORM)?);
+        Ok(self.target.as_ref().expect("just made"))
+    }
+
+    fn depth_target(&mut self, width: u32, height: u32) -> Result<&Target> {
+        if self.depth_target.as_ref().is_some_and(|t| t.width == width && t.height == height) {
+            return Ok(self.depth_target.as_ref().expect("checked"));
+        }
+        let old = self.depth_target.take();
+        self.free(old);
+        self.depth_target = Some(self.make_target(width, height, DXGI_FORMAT_R32_FLOAT)?);
+        Ok(self.depth_target.as_ref().expect("just made"))
+    }
+
+    /// A D3D11 texture of `format` shared as a GL texture, with a framebuffer drawing into it.
+    fn make_target(&self, width: u32, height: u32, format: DXGI_FORMAT) -> Result<Target> {
+        let mut desc = d3d::simple_texture_desc(width, height, format);
         desc.BindFlags = (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32;
         let texture = d3d::create_texture(&self.device, &desc).map_err(Error::D3d)?;
         let gl = self.gl;
@@ -228,13 +259,13 @@ impl Bridge {
             let complete = (gl.check_framebuffer_status)(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
             (gl.bind_framebuffer)(GL_DRAW_FRAMEBUFFER, previous as u32);
             (gl.unlock_objects)(self.interop, 1, &mut object);
-            self.target = Some(Target { texture, gl_texture, framebuffer, object, width, height });
+            let target = Target { texture, gl_texture, framebuffer, object, width, height };
             if !complete {
-                self.release_target();
+                self.free(Some(target));
                 return Err(Error::Failed("the shared framebuffer is incomplete"));
             }
+            Ok(target)
         }
-        Ok(self.target.as_ref().expect("just made"))
     }
 
     fn save() -> SavedState {
@@ -296,10 +327,45 @@ impl Bridge {
         Ok(&self.target.as_ref().expect("made above").texture)
     }
 
+    /// Copies the depth of GL texture `source` (`size` its width and height; `multisampled`: its
+    /// sample 0), the part `region` covers (x, y from the top-left, width, height: fractions), into
+    /// a `width` x `height` D3D11 `R32_FLOAT` texture, top row first: the window depth (0..1) as the
+    /// game wrote it. The texture is reused until the size changes.
+    pub fn capture_depth(&mut self, source: u32, size: (u32, u32), multisampled: bool, region: [f32; 4], width: u32, height: u32) -> Result<&ID3D11Texture2D> {
+        if !monaka_core::protocol::dimensions_ok(width, height) || !monaka_core::protocol::dimensions_ok(size.0, size.1) {
+            return Err(Error::Failed("depth capture size"));
+        }
+        if self.depth_pass.is_none() {
+            self.depth_pass = Some(DepthPass::new()?);
+        }
+        let gl = self.gl;
+        let interop = self.interop;
+        let target = self.depth_target(width, height)?;
+        let (mut object, framebuffer) = (target.object, target.framebuffer);
+        let rect = texel_rect(size.0, size.1, region);
+        let pass = self.depth_pass.as_mut().expect("made above");
+        // SAFETY: the shared texture is locked around the GL pass that draws into it.
+        if unsafe { (gl.lock_objects)(interop, 1, &mut object) } == 0 {
+            return Err(Error::Failed("wglDXLockObjectsNV"));
+        }
+        let drawn = pass.draw(source, multisampled, rect, framebuffer, width, height, gl.bind_framebuffer);
+        // SAFETY: unlocks the object locked above.
+        if unsafe { (gl.unlock_objects)(interop, 1, &mut object) } == 0 {
+            return Err(Error::Failed("wglDXUnlockObjectsNV"));
+        }
+        drawn?;
+        Ok(&self.depth_target.as_ref().expect("made above").texture)
+    }
+
     /// Frees the GL objects and closes interop; call with the GL context current. Dropping a
     /// bridge without it leaves them to the context's own teardown.
     pub fn release(mut self) {
         self.release_target();
+        let depth = self.depth_target.take();
+        self.free(depth);
+        if let Some(pass) = self.depth_pass.take() {
+            pass.release();
+        }
         // SAFETY: closes the interop handle this bridge opened.
         unsafe { (self.gl.close_device)(self.interop) };
         self.interop = std::ptr::null_mut();
@@ -532,6 +598,53 @@ mod tests {
             assert_ne!(glIsEnabled(GL_SCISSOR_TEST), 0);
         }
         bridge.release();
+    }
+
+    #[test]
+    fn a_depth_texture_arrives_in_d3d11_top_down_as_floats() {
+        const GL_DEPTH_COMPONENT32F: i32 = 0x8CAC;
+        const GL_DEPTH_COMPONENT: u32 = 0x1902;
+        gl_context();
+        let (w, h) = (16u32, 8u32);
+        // The game's depth: the left half's top rows 0.25, its bottom rows 0.5, the right half 0.75
+        // (GL rows from the bottom).
+        let values: Vec<f32> = (0..h).flat_map(|row| (0..w).map(move |x| if x >= w / 2 { 0.75 } else if row >= h / 2 { 0.25 } else { 0.5 })).collect();
+        let source = unsafe {
+            let mut texture = 0u32;
+            glGenTextures(1, &mut texture);
+            glBindTexture(GL_TEXTURE_2D, texture);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, w as i32, h as i32, 0, GL_DEPTH_COMPONENT, GL_FLOAT, values.as_ptr().cast());
+            glBindTexture(GL_TEXTURE_2D, 0);
+            glViewport(1, 2, 3, 4);
+            glEnable(GL_DEPTH_TEST);
+            texture
+        };
+        let (device, context, _) = create_device(None).unwrap();
+        let mut bridge = Bridge::new(&device).unwrap();
+        // The left half, at its own size.
+        let texture = bridge.capture_depth(source, (w, h), false, [0.0, 0.0, 0.5, 1.0], w / 2, h).unwrap().clone();
+        unsafe { glFinish() };
+        let (width, height, texels) = monaka_channel::d3d::read_image(&device, &context, &texture).unwrap();
+        assert_eq!((width, height), (w / 2, h));
+        let at = |x: u32, y: u32| f32::from_le_bytes(texels[((y * width + x) * 4) as usize..][..4].try_into().unwrap());
+        assert_eq!(at(1, 0), 0.25, "top row");
+        assert_eq!(at(1, h - 1), 0.5, "bottom row");
+        assert_eq!(at(width - 1, 0), 0.25, "the right half left out");
+        // The game's state is put back.
+        unsafe {
+            let mut viewport = [0i32; 4];
+            glGetIntegerv(GL_VIEWPORT, viewport.as_mut_ptr());
+            assert_eq!(viewport, [1, 2, 3, 4]);
+            assert_ne!(glIsEnabled(GL_DEPTH_TEST), 0);
+        }
+        bridge.release();
+    }
+
+    #[test]
+    fn the_texel_rect_counts_from_the_bottom() {
+        assert_eq!(texel_rect(100, 50, [0.0, 0.0, 0.5, 1.0]), [0, 0, 50, 50]);
+        // The top fifth: from the bottom, rows 40 to 49.
+        assert_eq!(texel_rect(100, 50, [0.5, 0.0, 0.5, 0.2]), [50, 40, 50, 10]);
     }
 
     #[test]

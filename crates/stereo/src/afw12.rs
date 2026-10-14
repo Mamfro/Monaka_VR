@@ -32,6 +32,12 @@
 //!   this pair and the one before. Once the HUD is laid over the back buffer, it goes over the
 //!   other images too ([`lay_hud`], through `providers::lay_hud_beside`), each eye with its own
 //!   place and disparity.
+//! - Which eye renders: the dominant eye (Monaka's own setting) every present, the other eye every
+//!   [`REFRESH`]th, so the dominant eye never alternates between a real frame and a warped one and
+//!   the other eye's warp artefacts stand still instead of flickering ([`ready::dominant_eye`],
+//!   the present loop's eyes chosen through `Driver::choose_eyes`); the other eye's own real frame,
+//!   kept that long, fills its gaps and, where it shows the same surface as the warp, goes out in
+//!   its place ([`Rules::fill_first`]). The eyes taking turns, as before, by `afw_alternate=1`.
 //! - At the present loop's step ([`before_present`]): AFW alone publishes the back buffer and the
 //!   warped eye as one pair. Frame generation publishes the generated pair at once and the real
 //!   pair half a frame later (`monaka_framegen::pacing`), so the headset gets twice the pair rate,
@@ -87,7 +93,7 @@ mod request;
 mod tests;
 
 pub use publish::{close, pair_present, report};
-pub use ready::{enabled, frame_generation, frame_warping, frame_warping_pairs, on_same_frame};
+pub use ready::{REFRESH, dominant_eye, enabled, frame_generation, frame_warping, frame_warping_pairs, on_same_frame};
 pub use request::{lay_hud, to_clip, warp};
 use publish::*;
 use ready::*;
@@ -166,16 +172,18 @@ pub struct Afw12 {
 unsafe impl Send for Afw12 {}
 
 impl Afw12 {
-    /// The warp on `device`, keeping `slots` pairs' warped eyes in a ring (at least one): one when
-    /// each pair is published before the next present, more when something reads a pair later (frame
-    /// generation reads the previous pair's images at the next present).
-    pub fn new(device: &ID3D12Device, slots: usize) -> Result<Self, String> {
+    /// The warp on `device` by `rules`, keeping `slots` pairs' warped eyes in a ring (at least one):
+    /// one when each pair is published before the next present, more when something reads a pair
+    /// later (frame generation reads the previous pair's images at the next present).
+    pub fn new(device: &ID3D12Device, slots: usize, rules: Rules) -> Result<Self, String> {
+        let mut reprojector = Reprojector12::new(device).map_err(|e| e.to_string())?;
+        reprojector.fill_first = rules.fill_first;
         Ok(Self {
             device: device.clone(),
             recorder: Recorder::new(device, 4).map_err(|e| format!("command lists: {e}"))?,
-            reprojector: Reprojector12::new(device).map_err(|e| e.to_string())?,
+            reprojector,
             kept: Default::default(),
-            history: History::new(RULES),
+            history: History::new(rules),
             warped: vec![(None, None); slots.max(1)],
             slot: 0,
             last: None,

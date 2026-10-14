@@ -4,7 +4,8 @@
 //! weapon drawn the aim hand swings it; with bare hands either hand punches; a gun, a bow, a
 //! throwable or a tool is never swung ([`swing_rules`]). The game's attack plays and hits as it
 //! would from the trigger, aimed where the character looks; a producer can aim melee with the head
-//! (`crate::held::wielded`). What a hand holds is the held item's kind ([`Kind`]).
+//! (`crate::held::wielded`). What a hand holds is the held item's kind ([`Kind`]). A producer that
+//! opens the game's hit detection on the swing itself has swings press nothing ([`set_presses`]).
 
 use crate::held::Kind;
 use monaka_core::protocol::{HandPose, LEFT_HAND, RIGHT_HAND};
@@ -13,7 +14,7 @@ use monaka_core::swing::{Swing, SwingRules};
 use monaka_producer::log;
 use monaka_core::sync::Locked;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::*};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::*};
 use std::time::Instant;
 
 /// How long a swing holds the trigger by default: several game updates, so the game sees the press
@@ -101,6 +102,16 @@ pub fn set_blade(direction: [f32; 3]) {
     }
 }
 
+/// Swings press the game's attack ([`set_presses`]).
+static PRESSES: AtomicBool = AtomicBool::new(true);
+
+/// Whether a swing presses the game's attack (default yes). Off, a swing only counts
+/// ([`swung_at`], [`swinging`]): for a producer that opens the game's hit detection on the swing
+/// itself, where the attack would only play the game's canned attack animation.
+pub fn set_presses(on: bool) {
+    PRESSES.store(on, Relaxed);
+}
+
 /// How long a swing holds the trigger, in milliseconds (default 150). A game that starts an
 /// attack when the trigger is let go (Dying Light 1, The Beast) attacks sooner with a shorter
 /// press ([`Physical::press_ms`]).
@@ -169,9 +180,11 @@ fn reach_check() -> Option<fn() -> bool> {
     (at != 0).then(|| unsafe { std::mem::transmute::<usize, fn() -> bool>(at) })
 }
 
-/// Presses the attack for a swing, and notes it.
+/// Presses the attack for a swing (unless swings press nothing), and notes it.
 fn attack(held: Kind, side: usize, speed: f32, direction: [f32; 3]) {
-    actions::press(Action::Attack, PRESS.load(Relaxed));
+    if PRESSES.load(Relaxed) {
+        actions::press(Action::Attack, PRESS.load(Relaxed));
+    }
     LAST_SWING.store(monaka_channel::tick(), Relaxed);
     let n = SWINGS.fetch_add(1, Relaxed) + 1;
     if n <= 8
@@ -264,6 +277,12 @@ pub fn swing_rules(held: Kind, side: usize, settings: &Settings, blade: Option<[
     }
 }
 
+/// Whether hand `side` is swinging now: a swing started and its tip has not slowed below the
+/// settle speed since (a hit window that lasts as long as the swing's motion does).
+pub fn swinging(side: usize) -> bool {
+    HANDS.lock().is_ok_and(|hands| hands.swings[side.min(1)].swinging())
+}
+
 /// Whether a swing attacked within the last `ms` milliseconds.
 pub fn swung_within(ms: u64) -> bool {
     swung_at().is_some_and(|at| monaka_channel::tick().saturating_sub(at) < ms)
@@ -286,7 +305,8 @@ pub fn report() {
 
 /// The swings so far, for the stop's log.
 pub fn summary() -> String {
-    format!("melee: {} swings pressed the attack, {} reached nothing", SWINGS.load(Relaxed), AIR_SWINGS.load(Relaxed))
+    let pressed = if PRESSES.load(Relaxed) { "pressed the attack" } else { "pressed nothing" };
+    format!("melee: {} swings {pressed}, {} reached nothing", SWINGS.load(Relaxed), AIR_SWINGS.load(Relaxed))
 }
 
 #[cfg(test)]

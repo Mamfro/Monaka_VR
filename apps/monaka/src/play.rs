@@ -6,6 +6,7 @@
 //!
 //! ```text
 //! monaka_play dl1 aim=hand_rig render_size=headset
+//! monaka_play explorer --desktop game=Dishonored2.exe  the 2D window instead of the headset
 //! monaka_play list                                      the games and their options
 //! monaka_play harness dl2 --script tools\harness\x.txt [--eye WxH] [--delay S] [option=value ...]
 //! monaka_play capture dl1 [--seconds N] [--delay S] [--eye WxH] [--save N] [probe arguments] [option=value ...]
@@ -13,6 +14,8 @@
 //! monaka_play packs                                     the game packs added, and any left out
 //! monaka_play add FILE.zip [--yes]                      adds a game pack (or a lone FILE.dll)
 //! monaka_play remove PACK [--yes]                       removes one (its folder name or a game's id)
+//! monaka_play console [COMMAND ...]                     the running game's probe console (no command: one a line)
+//! monaka_play view [COMMAND ...]                        the 2D window's command line: capture, fake hands, overlays
 //! ```
 //!
 //! For the checks, an `option=value` the game's table does not know goes to the producer as an
@@ -68,11 +71,14 @@ fn list() {
     }
 }
 
-const USAGE: &str = "Usage: monaka_play GAME [option=value ...]\n       monaka_play harness GAME --script FILE [--eye WxH] [--delay S] [option=value ...]\n       monaka_play capture GAME [--seconds N] [--delay S] [--eye WxH] [--save N] [probe arguments] [option=value ...]\n       monaka_play probe GAME [--seconds N] [--delay S] [option=value ...]\n       monaka_play list   (the games and their options)
+const USAGE: &str = "Usage: monaka_play GAME [--desktop] [option=value ...]\n       monaka_play harness GAME --script FILE [--eye WxH] [--delay S] [option=value ...]\n       monaka_play capture GAME [--seconds N] [--delay S] [--eye WxH] [--save N] [probe arguments] [option=value ...]\n       monaka_play probe GAME [--seconds N] [--delay S] [option=value ...]\n       monaka_play list   (the games and their options)
        monaka_play pack FILE.dll   (what a game pack declares, read from the file)
        monaka_play packs   (the game packs added, and any left out)
        monaka_play add FILE.zip|FILE.dll [--yes]
-       monaka_play remove PACK|GAME [--yes]";
+       monaka_play remove PACK|GAME [--yes]
+       monaka_play stream FILE.bin   (a debug recording saved from the headset's debug menu)
+       monaka_play console [COMMAND ...]   (the running game's probe console; help lists its commands)
+       monaka_play view [COMMAND ...]   (the 2D window's command line: capture, fake hands, overlays; help lists them)";
 
 fn usage(why: &str) -> ExitCode {
     eprintln!("{why}\n{USAGE}");
@@ -103,6 +109,7 @@ fn report_line(event: Event, failed: &mut bool) {
         }
         Event::Detail(line) => println!("  {line}"),
         Event::RunFolder(folder) => println!("Run folder: {}", folder.display()),
+        Event::Setting(id, value) => println!("Set in the headset: {id}={value} (not saved; the window saves these)"),
         Event::State(_) => {}
     }
 }
@@ -282,6 +289,82 @@ fn remove_pack(args: &[String]) -> ExitCode {
     }
 }
 
+/// A debug recording's report ([`monaka_core::stream::report`]).
+fn show_stream(file: Option<&String>) -> ExitCode {
+    let Some(file) = file else { return usage("Which recording?") };
+    let frames = std::fs::read(file).map_err(|e| e.to_string()).and_then(|bytes| monaka_core::stream::read(&bytes));
+    match frames {
+        Ok(frames) => {
+            println!("{}", monaka_core::stream::report(&frames));
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{file}: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// How long an answer is waited for.
+const ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The probe console of the newest run (its channel named in its folder's `live-channel.txt`), or
+/// with `view` its 2D window's command line: `words` as one command, or with none, a command per
+/// line read until the input ends.
+fn console(words: &[String], view: bool) -> ExitCode {
+    let runs = Paths::locate().runs;
+    let newest = std::fs::read_dir(&runs)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let file = entry.path().join("live-channel.txt");
+            Some((file.metadata().ok()?.modified().ok()?, file))
+        })
+        .max_by_key(|(when, _)| *when);
+    let Some((_, file)) = newest else {
+        eprintln!("No run found in {}: start one first.", runs.display());
+        return ExitCode::from(1);
+    };
+    let Some(name) = std::fs::read_to_string(&file).ok().and_then(|text| monaka_core::protocol::ChannelName::new(text.trim())) else {
+        eprintln!("{}: no channel name in it", file.display());
+        return ExitCode::from(1);
+    };
+    let opened = if view { monaka_channel::console::ConsoleChannel::open_view(&name) } else { monaka_channel::console::ConsoleChannel::open(&name) };
+    let mut channel = match opened {
+        Ok(channel) => channel,
+        Err(e) => {
+            eprintln!("The console of {} did not open: {e}", file.display());
+            return ExitCode::from(1);
+        }
+    };
+    let mut ask = |command: &str| -> bool {
+        let Some(number) = channel.ask(command) else {
+            eprintln!("The console is busy; try again.");
+            return false;
+        };
+        let since = std::time::Instant::now();
+        while since.elapsed() < ANSWER_WAIT {
+            if let Some(answer) = channel.answer_to(number) {
+                println!("{}", answer.trim_end());
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        eprintln!("{}", if view { "No answer: is the run's 2D window open (Debug without VR)?" } else { "No answer: is the run still on, with the debug menu on?" });
+        false
+    };
+    if !words.is_empty() {
+        return if ask(&words.join(" ")) { ExitCode::SUCCESS } else { ExitCode::from(2) };
+    }
+    for line in std::io::stdin().lines().map_while(Result::ok) {
+        if !line.trim().is_empty() {
+            ask(line.trim());
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(first) = args.first() else { return usage("Which game?") };
@@ -295,6 +378,9 @@ fn main() -> ExitCode {
         "packs" => return show_packs(),
         "add" => return add_pack(&args[1..]),
         "remove" => return remove_pack(&args[1..]),
+        "stream" => return show_stream(args.get(1)),
+        "console" => return console(&args[1..], false),
+        "view" => return console(&args[1..], true),
         _ => {}
     }
     let Some(game) = games::game(first) else {
@@ -303,8 +389,11 @@ fn main() -> ExitCode {
     // Options on the line replace the game's saved ones; with none, the saved ones (the window's)
     // apply. Monaka's own saved settings apply either way.
     let settings = Settings::load();
-    let mut values = if args.len() > 1 { settings.monaka.clone() } else { settings.values(game.id) };
-    for arg in &args[1..] {
+    // `--desktop`: the 2D window instead of the headset, as the window's "Debug without VR".
+    let desktop = args[1..].iter().any(|a| a == "--desktop");
+    let options: Vec<&String> = args[1..].iter().filter(|a| *a != "--desktop").collect();
+    let mut values = if options.is_empty() { settings.values(game.id) } else { settings.monaka.clone() };
+    for arg in options {
         if let Err(why) = take_option(game, &mut values, arg, false) {
             return usage(&why);
         }
@@ -322,6 +411,7 @@ fn main() -> ExitCode {
     println!("{} ({}). Before playing: {}", game.name, game.status.label(), game.before);
     println!("Ctrl+C here stops VR; quitting the game ends it.");
     let mut failed = false;
-    session::run(game, &values, &Paths::locate(), Console::Shared, stop, &mut |event| report_line(event, &mut failed));
+    let shows = if desktop { session::Shows::Desktop } else { session::Shows::Headset };
+    session::run(game, &values, &Paths::locate(), Console::Shared, shows, stop, &mut |event| report_line(event, &mut failed));
     if failed { ExitCode::from(2) } else { ExitCode::SUCCESS }
 }

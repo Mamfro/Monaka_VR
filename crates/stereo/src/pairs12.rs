@@ -43,6 +43,8 @@ pub struct PairPublisher12 {
     size: (u32, u32),
     tally: Tally,
     last: Option<(u64, [HeadPose; 2])>,
+    /// The debug frame keys of the next pair's eyes, when its caller named them.
+    eye_keys: Option<[u64; 2]>,
     /// The channel refused the depth once: the pairs go on without it.
     depth_refused: bool,
     /// The first pair with depth was logged.
@@ -51,7 +53,7 @@ pub struct PairPublisher12 {
 
 impl PairPublisher12 {
     pub fn new(channel: ChannelName) -> Self {
-        Self { channel, producer: None, broken: false, size: (0, 0), tally: Tally::NEW, last: None, depth_refused: false, depth_logged: false }
+        Self { channel, producer: None, broken: false, size: (0, 0), tally: Tally::NEW, last: None, eye_keys: None, depth_refused: false, depth_logged: false }
     }
 
     pub fn pairs(&self) -> u64 {
@@ -127,6 +129,11 @@ impl PairPublisher12 {
         true
     }
 
+    /// Names the debug frame keys of the next pair's eyes (`monaka_producer::debug::eye_keys`).
+    pub fn name_eyes(&mut self, keys: [u64; 2]) {
+        self.eye_keys = Some(keys);
+    }
+
     /// Publishes `eyes` (left, right; each in its state) with their poses, the pose record first
     /// (to `head`); `report` adjusts each pose before it goes out. The copies go on the queue the
     /// channel was made with, after what was submitted there before.
@@ -152,6 +159,9 @@ impl PairPublisher12 {
         let depth = depth.filter(|_| !self.depth_refused);
         let sequence = producer.next_sequence();
         let poses = record_first(head, sequence, poses, report);
+        if let Some(keys) = self.eye_keys.take() {
+            monaka_producer::debug::eye_keys(sequence, keys);
+        }
         let tick = monaka_channel::tick();
         let channel_depth = depth.map(|d| Depth { eyes: [0, 1].map(|e| EyeDepth { texture: &d.eyes[e].texture, state: d.eyes[e].state, rect: d.eyes[e].rect }), params: d.params });
         let mut published = producer.publish_with_depth(eyes[0], eyes[1], channel_depth, tick);

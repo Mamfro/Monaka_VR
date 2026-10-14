@@ -111,7 +111,7 @@ impl AlternatePublisher {
             return Step::Unpaired;
         }
         let slots = self.schedule.pair_slots(n);
-        self.send(device, context, head, [self.ring[slots[0]], self.ring[slots[1]]], report)
+        self.send(device, context, head, [self.ring[slots[0]], self.ring[slots[1]]], Some(self.schedule.pair_keys(n)), report)
     }
 
     /// At present `n`: `image` as both eyes of a pair without head poses, which the viewer shows on
@@ -127,7 +127,17 @@ impl AlternatePublisher {
         if !(self.copy_eye(device, context, 0, image) && self.copy_eye(device, context, 1, image)) {
             return self.tally.failed();
         }
-        self.send(device, context, head, FLAT, |_| {})
+        self.send(device, context, head, FLAT, None, |_| {})
+    }
+
+    /// Both eyes from one image drawn from `pose` (a game shown in a single view that follows the
+    /// head): published at every present, the runtime reprojecting it to the head as it moves.
+    pub fn publish_mono(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, image: &ID3D11Texture2D, head: &HeadSource, pose: HeadPose) -> Step {
+        self.left_ready = false;
+        if !(self.copy_eye(device, context, 0, image) && self.copy_eye(device, context, 1, image)) {
+            return self.tally.failed();
+        }
+        self.send(device, context, head, [pose, pose], None, |_| {})
     }
 
     /// Copies `source` as eye `eye`, into a copy made at its size (both made again when the size
@@ -145,12 +155,17 @@ impl AlternatePublisher {
         copy_into(&mut self.eyes[eye], device, context, source, &d3d::private_copy_desc(&desc)).is_some()
     }
 
-    /// Publishes the two eye copies with `poses`, the poses they were rendered from (none: flat).
-    fn send(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, head: &HeadSource, poses: [HeadPose; 2], report: impl Fn(&mut HeadPose)) -> Step {
+    /// Publishes the two eye copies with `poses`, the poses they were rendered from (none: flat),
+    /// naming the frames they were drawn in (`keys`) for the debug drawing.
+    fn send(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, head: &HeadSource, poses: [HeadPose; 2], keys: Option<[u64; 2]>, report: impl Fn(&mut HeadPose)) -> Step {
         let (width, height) = self.size;
         let Some(writer) = self.writer.get(device, width, height).ready(|note| log!("{note}")) else { return self.tally.failed() };
         let (Some(left), Some(right)) = (&self.eyes[0], &self.eyes[1]) else { return self.tally.failed() };
-        record_first(head, writer.next_sequence(), poses, report);
+        let sequence = writer.next_sequence();
+        record_first(head, sequence, poses, report);
+        if let Some(keys) = keys {
+            monaka_producer::debug::eye_keys(sequence, keys);
+        }
         match self.tally.count(writer.publish(context, [left, right], monaka_channel::tick())) {
             Ok(step) => step,
             Err(e) => {

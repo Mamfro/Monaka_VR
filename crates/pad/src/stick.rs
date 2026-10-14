@@ -1,7 +1,8 @@
 //! The right stick and the left trigger as the game's last pad read had them: taken from the game
-//! for the producer ([`take_right_stick`], [`take_right_stick_y`]; read with [`right_stick`],
-//! [`left_trigger`], [`buttons`]), and a new left trigger press held back until the producer lets
-//! it through ([`gate_left_trigger`]).
+//! for the producer ([`take_right_stick`], [`take_right_stick_y`], the vertical axis lent back to a
+//! menu of the game's with [`lend_right_stick_y`]; read with [`right_stick`], [`left_trigger`],
+//! [`buttons`]), and a new left trigger press held back until the producer lets it through
+//! ([`gate_left_trigger`]).
 
 use monaka_core::pad::Gamepad;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::*};
@@ -91,6 +92,24 @@ pub fn take_right_stick_y(on: bool) {
     TAKE_RIGHT_Y.store(on, Release);
 }
 
+/// When the taken vertical axis was last lent back to the game ([`lend_right_stick_y`]; 0: never).
+static LENT_Y_TICK: AtomicU64 = AtomicU64::new(0);
+/// A lend older than this (ms) is over: whoever lent it no longer says the game needs it.
+const LEND_FRESH_MS: u64 = 100;
+
+/// Lends the taken vertical axis back to the game for a moment ([`LEND_FRESH_MS`]): a menu of the
+/// game's own steered by the stick (a weapon wheel) gets the whole stick while it is open. Said
+/// again at each frame the menu is open.
+pub fn lend_right_stick_y() {
+    LENT_Y_TICK.store(monaka_channel::tick().max(1), Release);
+}
+
+/// Whether the right stick's vertical axis is taken from the game now: taken and not lent back.
+pub(super) fn takes_y() -> bool {
+    let lent = LENT_Y_TICK.load(Acquire);
+    TAKE_RIGHT_Y.load(Acquire) && (lent == 0 || monaka_channel::tick().saturating_sub(lent) > LEND_FRESH_MS)
+}
+
 /// The right stick (VR and real pads merged, with a producer's [`press`]) at the game's last pad
 /// read, taken or not, x right and y up in -1..=1, if that read was at most `max_age_ms` ago.
 pub fn right_stick(max_age_ms: u64) -> Option<[f32; 2]> {
@@ -174,7 +193,7 @@ pub(super) fn take_right(pad: &mut Gamepad) {
     if TAKE_RIGHT.load(Acquire) {
         pad.thumb_rx = 0;
         pad.thumb_ry = 0;
-    } else if TAKE_RIGHT_Y.load(Acquire) {
+    } else if takes_y() {
         pad.thumb_ry = 0;
     }
 }

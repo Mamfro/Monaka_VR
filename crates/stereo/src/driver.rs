@@ -166,6 +166,9 @@ struct Cell(Option<State>);
 // the mutex: the game's present thread, or the stop after its hooks are off.
 unsafe impl Send for Cell {}
 
+/// The eye present `n`'s frame draws, as a feature chooses it ([`Driver::choose_eyes`]).
+pub type EyeSchedule = fn(u64) -> usize;
+
 pub struct Driver {
     capture: AtomicBool,
     /// Set once [`Driver::finish`] gave back what the run changed: a present still inside the
@@ -194,6 +197,9 @@ pub struct Driver {
     frames: Mutex<Frames>,
     /// Eye choices made, one per present (taken in turn by [`Driver::take_in_turn`]).
     choices: AtomicU64,
+    /// A feature's choice of the eye each present draws ([`Driver::choose_eyes`]); none: the eyes
+    /// take turns.
+    schedule: Mutex<Option<EyeSchedule>>,
     /// Why the frame about to present goes flat ([`Flat::code`]).
     flat: AtomicU8,
     tally: Tally,
@@ -218,6 +224,7 @@ impl Driver {
             head: HeadSource::new(),
             frames: Mutex::new(Frames::NEW),
             choices: AtomicU64::new(0),
+            schedule: Mutex::new(None),
             flat: AtomicU8::new(0),
             tally: Tally {
                 labelled: AtomicU64::new(0),
@@ -472,22 +479,43 @@ impl Driver {
     /// next eye chosen after it.
     pub fn around_present<R>(&self, chain: &IDXGISwapChain, call: impl FnOnce() -> R) -> R {
         let _flight = InFlight::enter();
+        // Monaka's own work here is timed while the Stats panel shows (the present left out).
+        let started = monaka_producer::debug::timing().then(std::time::Instant::now);
         if let Some(frame_end) = self.state.lock().ok().and_then(|cell| cell.0.as_ref().and_then(|s| s.frame_end)) {
             frame_end(chain);
         }
+        crate::debug_depth::at_present(chain);
+        // The probe console's frames end here (its timeline orders calls by them).
+        #[cfg(target_arch = "x86_64")]
+        monaka_hook::live::present();
+        monaka_producer::debug::note_present(|| {
+            // SAFETY: a description query on the swapchain being presented.
+            unsafe { chain.GetDesc() }.map_or([0, 0], |desc| [desc.BufferDesc.Width, desc.BufferDesc.Height])
+        });
         let count = self.presents.fetch_add(1, Relaxed) + 1;
         let capturing = self.capture.load(Acquire);
+        let before_started = started.map(|_| std::time::Instant::now());
         if capturing {
             if self.attached_at.load(Relaxed) == 0 {
                 self.attached_at.store(count, Relaxed);
             }
             self.before_present(chain, count - self.attached_at.load(Relaxed));
         }
+        let before = before_started.map(|at| at.elapsed());
+        let ahead = started.map(|at| at.elapsed());
         let result = call();
+        let after_started = started.map(|_| std::time::Instant::now());
         if capturing {
             self.after_present(count - self.attached_at.load(Relaxed));
         } else if self.eye.swap(-1, AcqRel) != -1 {
             self.finish();
+        }
+        if let (Some(before), Some(ahead), Some(after_started)) = (before, ahead, after_started) {
+            use monaka_core::debug_draw::Cost;
+            let after = after_started.elapsed();
+            monaka_producer::debug::cost(Cost::BeforePresent, before);
+            monaka_producer::debug::cost(Cost::AfterPresent, after);
+            monaka_producer::debug::cost(Cost::AtPresent, ahead + after);
         }
         result
     }
@@ -577,6 +605,24 @@ impl Driver {
         }
     }
 
+    /// A feature chooses the eye each present draws from now on (`schedule`: the eye for present
+    /// `n`), each frame drawn from a pose of its own; `None` gives the turns back (left on even
+    /// presents, right on odd, both eyes of a pair from one pose). For a feature that publishes a
+    /// pair at every present whatever its eye (frame warping), never for the loop's own pairs.
+    pub fn choose_eyes(&self, schedule: Option<EyeSchedule>) {
+        *self.schedule.locked() = schedule;
+    }
+
+    /// Whether a feature chooses the eyes ([`Driver::choose_eyes`]).
+    pub(crate) fn own_schedule(&self) -> bool {
+        self.schedule.locked().is_some()
+    }
+
+    /// The eye the frame drawn after present `n` is for.
+    fn eye_for(&self, n: u64) -> usize {
+        self.schedule.locked().map_or(Schedule::camera_eye(n), |schedule| schedule(n))
+    }
+
     fn after_present(&self, n: u64) {
         if self.finished.load(Acquire) {
             // The stop gave everything back while this present was in the game's own call.
@@ -586,9 +632,10 @@ impl Driver {
         let Some(state) = cell.0.as_mut() else { return };
         self.choices.fetch_add(1, AcqRel);
         // Both eyes of a pair are drawn from one head pose, sampled for its left-eye frame (by the
-        // camera update instead, with choices taken in turn).
+        // camera update instead, with choices taken in turn); each frame from its own when a
+        // feature chooses the eyes.
         if !state.in_turn {
-            if Schedule::starts_pair(n) {
+            if Schedule::starts_pair(n) || self.own_schedule() {
                 let tracked = state.shared.head_tracking || state.shared.synthetic.is_some();
                 let mut pose = if tracked { self.head.current().unwrap_or_default() } else { HeadPose::default() };
                 if let Some(adjust) = state.adjust_pose {
@@ -608,9 +655,11 @@ impl Driver {
         if let Some(after) = after {
             after(self, n, &pose);
         }
-        let eye = Schedule::camera_eye(n);
+        let eye = self.eye_for(n);
         *self.pending.locked() = Some(Pending { eye, pose });
         self.eye.store(eye as i32, Release);
+        // The frame drawn from here: its debug key, as the publishers name the pair's eyes.
+        monaka_producer::debug::set_drawing(n.wrapping_add(1));
     }
 
     /// The end of a run, on the present thread (or the stop's, when the game stopped presenting).

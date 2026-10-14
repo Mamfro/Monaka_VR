@@ -65,15 +65,25 @@ pub struct Afw11 {
     /// Frames captured per eye.
     captured: [u64; 2],
     tally: Tally,
+    /// With a debug view: the farthest a fill's camera stood from its warp's (`take_fill_apart`).
+    fill_apart: f32,
+    /// With a debug view: the fills logged as standing apart from their warp's camera.
+    gaps_logged: u32,
 }
 
 impl Afw11 {
     pub fn new(device: &ID3D11Device, channel: ChannelName) -> Result<Self, monaka_warp::Error> {
+        Self::with_rules(device, channel, RULES)
+    }
+
+    /// With `rules` of the game's own in place of [`RULES`] (an OpenGL game's frames go through
+    /// the same-frame loop: `crate::same_frame::gl`).
+    pub fn with_rules(device: &ID3D11Device, channel: ChannelName, rules: Rules) -> Result<Self, monaka_warp::Error> {
         Ok(Self {
             reprojector: Reprojector::new(device)?,
             frames: [None, None],
-            history: History::new(RULES),
-            presents: Presents::new(RULES),
+            history: History::new(rules),
+            presents: Presents::new(rules),
             latest: None,
             writer: LazyWriter::new(channel),
             shown: None,
@@ -84,6 +94,8 @@ impl Afw11 {
             counts: Counts::default(),
             captured: [0; 2],
             tally: Tally::NEW,
+            fill_apart: 0.0,
+            gaps_logged: 0,
         })
     }
 
@@ -92,6 +104,17 @@ impl Afw11 {
     pub fn enable_hud(&mut self, device: &ID3D11Device) -> Result<(), monaka_warp::Error> {
         self.hud = Some(HudLayer::new(device)?);
         Ok(())
+    }
+
+    /// Shows a debug view in the warped eye instead of its image (`monaka_warp::Reprojector::sources`).
+    pub fn show_sources(&mut self, view: u32) {
+        self.reprojector.sources = view;
+    }
+
+    /// With a debug view: the farthest a fill's camera stood from the camera it was warped to since
+    /// the last call (world units; 0 with a still head).
+    pub fn take_fill_apart(&mut self) -> Option<f32> {
+        (self.reprojector.sources != 0).then(|| std::mem::take(&mut self.fill_apart))
     }
 
     /// Counts one failure of `what`, logging the first.
@@ -127,6 +150,11 @@ impl Afw11 {
     /// The warps so far, and each eye's frames captured.
     pub fn counts(&self) -> (Counts, [u64; 2]) {
         (self.counts, self.captured)
+    }
+
+    /// The periodic report's line ([`crate::afw::report_line`]) for this backend's warps.
+    pub fn report_line(&self) -> String {
+        crate::afw::report_line(self.captured, self.counts, &ready::COUNTERS, 0, None)
     }
 
     /// Pairs published, and pairs the channel had no room for.
@@ -198,6 +226,18 @@ impl Afw11 {
         let warp = self.history.warp(shot);
         let Some(primary) = &self.frames[eye] else { return false };
         let fill = warp.fill.and(self.frames[other].as_ref());
+        if let Some(fill) = fill.filter(|_| self.reprojector.sources != 0) {
+            let (a, b) = (&fill.camera, &warp.target.camera);
+            let gap = [a[3] - b[3], a[7] - b[7], a[11] - b[11]];
+            let apart = gap.iter().map(|v| v * v).sum::<f32>().sqrt();
+            self.fill_apart = self.fill_apart.max(apart);
+            // The first gaps over half a millimetre, in the target camera's axes (right, up, back).
+            if apart > 0.0005 && self.gaps_logged < 60 {
+                self.gaps_logged += 1;
+                let along = |k: usize| (0..3).map(|i| gap[i] * b[i * 4 + k]).sum::<f32>() * 1000.0;
+                log!("frame warping: eye {other}'s fill {:.1} mm from its target: right {:+.1} up {:+.1} back {:+.1} mm", apart * 1000.0, along(0), along(1), along(2));
+            }
+        }
         let synthesized = match self.reprojector.run(context, &warp.target.view(desc.Width, desc.Height), primary, fill) {
             Ok(image) => image.clone(),
             Err(e) => {

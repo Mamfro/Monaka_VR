@@ -112,6 +112,11 @@ impl Swing {
         Self { samples: Vec::new(), above: 0, swinging: false, last_start: None, peak: 0.0, uncut: false }
     }
 
+    /// Whether a swing is under way: started, its tip not yet slowed below the settle speed.
+    pub fn swinging(&self) -> bool {
+        self.swinging
+    }
+
     /// Forgets the motion so far (the controller went away, or nothing is held that swings).
     pub fn reset(&mut self) {
         self.samples.clear();
@@ -207,6 +212,20 @@ mod tests {
         // It started within a few frames.
         let at = steps.iter().position(|s| s.started.is_some()).unwrap();
         assert!(at <= 5, "started at frame {at}");
+    }
+
+    #[test]
+    fn a_swing_lasts_until_the_tip_slows() {
+        let rules = SwingRules::WEAPON;
+        let mut swing = Swing::new();
+        sweep(&mut swing, 10.0, 0.3, 5.0, &rules);
+        assert!(swing.swinging(), "still moving fast");
+        // Held still where the sweep ended.
+        let end = 5.0 * (10.0 + 26.0 / 90.0) as f32;
+        for i in 0..10 {
+            swing.feed(10.3 + i as f64 / 90.0, [end, 1.2, -0.4], IDENTITY, &rules);
+        }
+        assert!(!swing.swinging(), "slowed below the settle speed");
     }
 
     #[test]

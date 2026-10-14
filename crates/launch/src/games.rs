@@ -14,6 +14,7 @@
 pub use monaka_core::manifest::{HowTo, Kind, Launch, MONAKA, Manifest, Opt, PLAY_WITH, Shown, Status, SteamFiles, TABS, Values, describe, number_text};
 use crate::Paths;
 use crate::packs::{self, Pack};
+use monaka_core::manifest::LIVE;
 use monaka_core::manifest::aims;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -40,6 +41,9 @@ pub struct Plan {
     pub licences: Vec<&'static str>,
     /// Shown to the player when the run starts.
     pub hints: Vec<String>,
+    /// The options the headset's Monaka menu offers, `id=value` ([`LIVE`]): those of the game and of
+    /// Monaka that the viewer can change while VR runs.
+    pub live: Vec<String>,
 }
 
 /// One game: its manifest, and the pack its producer comes from. Everything the launcher does for
@@ -330,6 +334,8 @@ pub fn plan_with(values: &Values, game: &Manifest, eye: Option<(u32, u32)>, find
     plan.viewer_args = reticles(game, &values);
     for owner in [game, &MONAKA] {
         plan.viewer_args.extend(viewer_args(owner, &values));
+        let live = owner.options.iter().filter(|o| LIVE.iter().any(|l| l.id == o.id) && values.applies(owner, o));
+        plan.live.extend(live.map(|o| format!("{}={}", o.id, values.text(owner, o.id))));
     }
     for opt in game.options {
         if let (Some(note), Some((w, h))) = (opt.eye_size_note, eye) {
@@ -477,6 +483,9 @@ mod tests {
         smoother.set_checked(&MONAKA, "controller_smoothing", "6").unwrap();
         assert_eq!(plan(&smoother, &GAME, None).viewer_args, ["--controller-smoothing", "6"]);
         assert!(!plan(&smoother, &GAME, None).files[0].1.contains("smoothing"), "not the producer's");
+        // And to the headset's Monaka menu, at any value.
+        assert_eq!(plan(&smoother, &GAME, None).live, ["controller_smoothing=6"]);
+        assert_eq!(plan(&parsed(&["aim=head"]), &GAME, None).live, ["controller_smoothing=3"]);
     }
 
     #[test]
@@ -500,7 +509,7 @@ mod tests {
     /// else is unreadable.
     fn fake(dll: &Path) -> Result<Pack, String> {
         match std::fs::read_to_string(dll).map_err(|e| e.to_string())?.as_str() {
-            "pack" => Ok(Pack { dll: dll.to_owned(), contract: CONTRACT, about: About { author: String::new(), source: "https://x".into() }, manifests: vec![GAME] }),
+            "pack" => Ok(Pack { dll: dll.to_owned(), contract: CONTRACT, about: About { author: String::new(), source: "https://x".into(), ..About::default() }, manifests: vec![GAME] }),
             _ => Err(format!("{} is not a game pack", dll.display())),
         }
     }

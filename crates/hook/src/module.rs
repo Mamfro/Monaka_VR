@@ -208,6 +208,21 @@ impl Module {
         Code::new(self.base as u64, sections, exceptions).ok()
     }
 
+    /// This module's code ([`Module::code`]), read once and kept for the process's life: for a
+    /// module that stays loaded (the game's executable, the system's DLLs), as research tools ask
+    /// of it again and again.
+    pub fn kept_code(&self) -> Option<&'static Code<'static>> {
+        static KEPT: std::sync::Mutex<Vec<(usize, &'static Code<'static>)>> = std::sync::Mutex::new(Vec::new());
+        let mut kept = KEPT.lock().ok()?;
+        if let Some((_, code)) = kept.iter().find(|(base, _)| *base == self.base) {
+            return Some(code);
+        }
+        // SAFETY: kept only for modules the caller knows stay loaded (see above).
+        let code: &'static Code<'static> = Box::leak(Box::new(unsafe { self.code() }?));
+        kept.push((self.base, code));
+        Some(code)
+    }
+
     /// Whether the code at `rva` is exactly `expected`.
     pub fn bytes_match(&self, rva: usize, expected: &[u8]) -> bool {
         let mut actual = vec![0u8; expected.len()];

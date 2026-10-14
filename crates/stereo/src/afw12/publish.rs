@@ -188,6 +188,7 @@ pub(super) fn forget(state: &mut State) {
 /// Stops the pacing thread and frees everything once the GPU is done with it.
 pub fn close() {
     ON.store(false, Release);
+    DRIVER.choose_eyes(None);
     crate::driver::leave_present(present_step);
     crate::providers::leave_hud(warp, lay_hud);
     PACING.stop();

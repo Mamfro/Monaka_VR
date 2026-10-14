@@ -1,0 +1,135 @@
+//! Monaka's own button chord: Start and Back held together for [`HOLD`] asks for a capture of what
+//! the headset shows ([`crate::capture`]). Neither reaches the game while they may be the chord: a
+//! lone press is held back for [`GRACE`] in case the other follows (Start alone would open the
+//! game's pause menu), then goes to the game as usual; one let go within it still reaches the game,
+//! as a tap of [`TAP`].
+
+use monaka_core::pad::{Gamepad, button};
+use std::time::{Duration, Instant};
+
+/// How long both are held before the chord counts.
+pub const HOLD: Duration = Duration::from_millis(500);
+/// How long a lone press waits for the other before it goes to the game.
+pub const GRACE: Duration = Duration::from_millis(120);
+/// How long a press let go within [`GRACE`] is shown to the game.
+pub const TAP: Duration = Duration::from_millis(80);
+
+const KEYS: u16 = button::START | button::BACK;
+
+#[derive(Default)]
+pub struct Chord {
+    /// A lone press held back: its button and since when.
+    waiting: Option<(u16, Instant)>,
+    /// Both held since then; the buttons stay with us until both are let go.
+    both: Option<Instant>,
+    fired: bool,
+    /// A press let go within the grace, shown to the game until then.
+    tap: Option<(u16, Instant)>,
+}
+
+impl Chord {
+    /// Takes Start and Back out of `pad` while they may be the chord. True once per hold, when
+    /// both have been held for [`HOLD`].
+    pub fn step(&mut self, pad: &mut Gamepad, now: Instant) -> bool {
+        let keys = pad.buttons & KEYS;
+        if keys == KEYS {
+            self.waiting = None;
+            self.tap = None;
+            let since = *self.both.get_or_insert(now);
+            pad.buttons &= !KEYS;
+            if !self.fired && now.duration_since(since) >= HOLD {
+                self.fired = true;
+                return true;
+            }
+            return false;
+        }
+        if self.both.is_some() {
+            // The chord being let go: what is still held stays with us until both are up.
+            pad.buttons &= !KEYS;
+            if keys == 0 {
+                (self.both, self.fired) = (None, false);
+            }
+            return false;
+        }
+        match self.waiting {
+            Some((key, since)) if keys == 0 => {
+                // Let go before it went to the game: a tap.
+                self.waiting = None;
+                if now.duration_since(since) < GRACE {
+                    self.tap = Some((key, now));
+                }
+            }
+            Some((key, since)) if keys == key => {
+                if now.duration_since(since) < GRACE {
+                    pad.buttons &= !KEYS;
+                }
+            }
+            _ if keys != 0 => {
+                self.waiting = Some((keys, now));
+                self.tap = None;
+                pad.buttons &= !KEYS;
+            }
+            _ => {}
+        }
+        if let Some((key, since)) = self.tap {
+            if now.duration_since(since) < TAP {
+                pad.buttons |= key;
+            } else {
+                self.tap = None;
+            }
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(chord: &mut Chord, buttons: u16, at: Instant) -> (u16, bool) {
+        let mut pad = Gamepad { buttons: buttons | button::A, ..Default::default() };
+        let fired = chord.step(&mut pad, at);
+        (pad.buttons & !button::A, fired)
+    }
+
+    #[test]
+    fn both_held_fire_once_and_never_reach_the_game() {
+        let t = Instant::now();
+        let ms = |n: u64| t + Duration::from_millis(n);
+        let mut chord = Chord::default();
+        // Start a little before Back: held back, then both are ours.
+        assert_eq!(run(&mut chord, button::START, ms(0)), (0, false));
+        assert_eq!(run(&mut chord, KEYS, ms(40)), (0, false));
+        assert_eq!(run(&mut chord, KEYS, ms(539)), (0, false));
+        assert_eq!(run(&mut chord, KEYS, ms(540)), (0, true));
+        assert_eq!(run(&mut chord, KEYS, ms(900)), (0, false), "once per hold");
+        // Let go one at a time: the one still held stays ours.
+        assert_eq!(run(&mut chord, button::BACK, ms(950)), (0, false));
+        assert_eq!(run(&mut chord, 0, ms(1000)), (0, false));
+        // A second hold fires again.
+        run(&mut chord, KEYS, ms(1100));
+        assert_eq!(run(&mut chord, KEYS, ms(1600)), (0, true));
+    }
+
+    #[test]
+    fn a_lone_press_reaches_the_game_after_the_grace_and_a_quick_one_as_a_tap() {
+        let t = Instant::now();
+        let ms = |n: u64| t + Duration::from_millis(n);
+        let mut chord = Chord::default();
+        // Held: nothing for the grace, then Start as long as it is held.
+        assert_eq!(run(&mut chord, button::START, ms(0)), (0, false));
+        assert_eq!(run(&mut chord, button::START, ms(100)), (0, false));
+        assert_eq!(run(&mut chord, button::START, ms(120)), (button::START, false));
+        assert_eq!(run(&mut chord, button::START, ms(400)), (button::START, false));
+        assert_eq!(run(&mut chord, 0, ms(410)), (0, false));
+        // Tapped: Back shows for the tap's length once let go.
+        assert_eq!(run(&mut chord, button::BACK, ms(500)), (0, false));
+        assert_eq!(run(&mut chord, 0, ms(550)), (button::BACK, false));
+        assert_eq!(run(&mut chord, 0, ms(600)), (button::BACK, false));
+        assert_eq!(run(&mut chord, 0, ms(640)), (0, false));
+        // Other buttons are never touched (`run` checks A passes by masking it).
+        let mut pad = Gamepad { buttons: button::A | button::X, ..Default::default() };
+        chord.step(&mut pad, ms(700));
+        assert_eq!(pad.buttons, button::A | button::X);
+    }
+}

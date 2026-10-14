@@ -1,6 +1,9 @@
 //! Named kernel objects: handles, mutexes, and shared-memory records guarded by a mutex.
 
 use crate::{Error, Result};
+use monaka_core::console::ConsoleBlock;
+use monaka_core::debug_draw::DebugBlock;
+use monaka_core::page::PageBlock;
 use monaka_core::protocol::{FenceHeader, FingerBlock, HandBlock, KeyedHeader, PoseBlock, ReticleBlock};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
@@ -29,6 +32,9 @@ unsafe impl SharedRecord for PoseBlock {}
 unsafe impl SharedRecord for HandBlock {}
 unsafe impl SharedRecord for FingerBlock {}
 unsafe impl SharedRecord for ReticleBlock {}
+unsafe impl SharedRecord for DebugBlock {}
+unsafe impl SharedRecord for PageBlock {}
+unsafe impl SharedRecord for ConsoleBlock {}
 unsafe impl SharedRecord for KeyedHeader {}
 unsafe impl SharedRecord for FenceHeader {}
 

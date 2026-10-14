@@ -10,6 +10,10 @@
 //!   typed pointer a detour calls through.
 //! - [`probe`]: class names from RTTI, fields holding a known value, and a detour's call site.
 //! - [`watch`]: hardware write watches that record which code writes an address.
+//! - [`coverage`]: which of a module's functions run (a breakpoint on each, taken out when hit):
+//!   what runs only while the player does something, and the functions handed a value (64-bit only).
+//! - [`live`]: probes added while the game runs, at any address (64-bit only): each call's
+//!   thread, frame, arguments and caller, and the fields an action changes.
 //! - [`InFlight`]: counts detours in progress so a producer can stop only when none is running.
 //!
 //! It builds for 64-bit games and for 32-bit ones (`i686-pc-windows-msvc`): what differs between
@@ -19,8 +23,12 @@
 #[cfg_attr(target_arch = "x86_64", path = "arch/x64.rs")]
 #[cfg_attr(target_arch = "x86", path = "arch/x86.rs")]
 mod arch;
+#[cfg(target_arch = "x86_64")]
+pub mod coverage;
 pub mod crash;
 pub mod decode;
+#[cfg(target_arch = "x86_64")]
+pub mod live;
 pub mod mem;
 pub mod module;
 pub mod patch;

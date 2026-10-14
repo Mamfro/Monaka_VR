@@ -446,6 +446,11 @@ fn known(skeleton: &dyn Skeleton, frames: &Frames, source: &ChainSource, side: u
     hand
 }
 
+/// Hand `side`'s wrist and finger bones (elements, the wrist first), where its fingers are found.
+pub fn hand_elements(skeleton: &dyn Skeleton, frames: &Frames, source: &ChainSource, side: usize) -> Option<Vec<usize>> {
+    known(skeleton, frames, source, side).map(|hand| hand.elements.clone())
+}
+
 /// Puts hand `side`'s fingers on `tracked` in `frames` (the rig's frames of `skeleton`, the hand
 /// where the rig put it): each knuckle and what hangs from it moves, the hand does not. False (and
 /// `frames` untouched) when the hand has no fingers found or the pose is not usable.

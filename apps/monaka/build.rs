@@ -1,5 +1,5 @@
-//! Embeds `monaka.manifest` into the window's executable (not `monaka_play`): without it Windows draws
-//! the controls in the old style and blurs the window on high-DPI screens.
+//! Embeds `monaka.manifest` into the window's executable (not `monaka_play`): without it the pack
+//! file picker is drawn in the old style and the window blurs on high-DPI screens.
 
 fn main() {
     let manifest = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("monaka.manifest");

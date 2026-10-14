@@ -25,6 +25,8 @@ use monaka_producer::game::{Component, Game, Lack, On, Start};
 use monaka_producer::log;
 use std::sync::Mutex;
 
+mod debug;
+
 /// A game's hand rig: facts of its skeleton and how the arms go on.
 #[derive(Clone, Copy, Debug)]
 pub struct Rig {
@@ -51,7 +53,11 @@ pub enum Method {
     /// shoulder stays at `shoulders`. A free left hand takes `left_grip` (the wrist in its attach
     /// joint's frame) on its target; a left hand holding the other gun of two reaches across to
     /// it when the game moves it there.
-    HandRooted { shoulders: [Vec3; 2], poles: [Vec3; 2], left_grip: Mat34 },
+    /// `right_melee_grip`: the right wrist in the right attach joint's frame as the game holds its
+    /// melee weapon the way that sits right on a controller (measured once): the game turns the
+    /// weapon in the hand between grips (a knife forward, then reversed), and the hand keeps this
+    /// one, the weapon hanging in it as the game holds it. None: the hand follows the game's hold.
+    HandRooted { shoulders: [Vec3; 2], poles: [Vec3; 2], left_grip: Mat34, right_melee_grip: Option<Mat34> },
 }
 
 /// Whether the game holds anything with both hands.
@@ -161,8 +167,24 @@ pub enum Hands {
     Palms(Palms),
     /// [`Method::HandRooted`]: the right hand's attach joint (the left one is its sibling) and
     /// where each goes (the skeleton's space; the left one only while it follows its own
-    /// controller, else it rides the right hand's weapon as the game holds it).
-    Attached { right: usize, targets: [Option<Mat34>; 2] },
+    /// controller, else it rides the right hand's weapon as the game holds it). `space`: where the
+    /// skeleton's space sits in tracking space (skeleton-to-tracking, scale included) as the game
+    /// placed the targets this moment, so the debug views draw the bones where the eyes see them.
+    Attached { right: usize, targets: [Option<Mat34>; 2], space: Mat34 },
+}
+
+/// Whether any hand of a moment is tracked (a palm, or an attached hand's target).
+fn tracked(hands: &Hands) -> bool {
+    match hands {
+        Hands::Palms(palms) => palms.palms.iter().any(Option::is_some),
+        Hands::Attached { targets, .. } => targets.iter().any(Option::is_some),
+    }
+}
+
+/// Whether any of the rig's debug views is on: a game makes its moment then even with no
+/// controller tracked, so the views show its arms as it animated them.
+pub fn views_on() -> bool {
+    debug::views_on()
 }
 
 /// One moment of the hand rig.
@@ -233,11 +255,26 @@ fn note_posed(skeleton: &dyn Skeleton, frames: &Frames, written: &[usize], holde
 /// skeleton as the game animated it. The arms by the rig's method, the game's adjustment, the
 /// free hands' fingers, then the bones placed or changed written to `skeleton`, and each hand's
 /// holder read back ([`posed`]). Err (with why, nothing written) when the arms cannot go on.
+/// Timed for the Stats panel while it shows.
 pub fn pose<G: HandRig>(skeleton: &dyn Skeleton, animated: &Snapshot, inputs: &Inputs) -> Result<Placed, &'static str> {
+    let started = monaka_producer::debug::timing().then(std::time::Instant::now);
+    let posed = posing::<G>(skeleton, animated, inputs);
+    if let Some(at) = started {
+        monaka_producer::debug::cost(monaka_core::debug_draw::Cost::HandRig, at.elapsed());
+    }
+    posed
+}
+
+fn posing<G: HandRig>(skeleton: &dyn Skeleton, animated: &Snapshot, inputs: &Inputs) -> Result<Placed, &'static str> {
     if animated.skeleton != skeleton.id() || animated.worlds.len() != skeleton.count().max(0) as usize {
         return Err("skeleton changed");
     }
     let mut frames = Frames::new(animated);
+    if !tracked(&inputs.hands) {
+        // No hand to put the arms on: nothing is moved, and the views show the game's own arms.
+        debug::draw::<G>(skeleton, &frames, &[], inputs, &Placed { palm: [f32::NAN; 12] }, true);
+        return Err("no controller tracked");
+    }
     let (placed, carried) = match (G::RIG.method, inputs.hands) {
         (Method::Carried { bones, melee_holder, .. }, Hands::Palms(p)) => {
             let pose = Pose {
@@ -259,8 +296,8 @@ pub fn pose<G: HandRig>(skeleton: &dyn Skeleton, animated: &Snapshot, inputs: &I
             }
             (placed, Some(p.aim_side))
         }
-        (Method::HandRooted { shoulders, poles, left_grip }, Hands::Attached { right, targets }) => {
-            let rooted = HandRooted { shoulders, poles, left_grip, held: inputs.held };
+        (Method::HandRooted { shoulders, poles, left_grip, right_melee_grip }, Hands::Attached { right, targets, .. }) => {
+            let rooted = HandRooted { shoulders, poles, left_grip, right_melee_grip, held: inputs.held };
             (rooted.place(skeleton, &mut frames, right, targets)?, None)
         }
         _ => return Err("the moment does not fit the hand rig's method"),
@@ -275,7 +312,13 @@ pub fn pose<G: HandRig>(skeleton: &dyn Skeleton, animated: &Snapshot, inputs: &I
             }
         }
     }
-    let written = frames.flush(skeleton);
+    // The debug view of the game's own arms: everything worked out, nothing written.
+    let left_to_game = monaka_producer::debug::on(monaka_core::debug_draw::Category::SkipHandRig);
+    let written = if left_to_game { frames.changed(skeleton) } else { frames.flush(skeleton) };
+    debug::draw::<G>(skeleton, &frames, &written, inputs, &placed, left_to_game);
+    if left_to_game {
+        return Ok(placed);
+    }
     note_posed(skeleton, &frames, &written, inputs.holders);
     if carried.is_some() {
         crate::remember(animated.skeleton, &frames, &written, placed.palm);
@@ -302,6 +345,7 @@ pub fn install<G: HandRig>(start: &mut Start<'_, G>) -> Result<(), Lack> {
         crate::traverse::declare_no_climbing();
     }
     crate::controllers::open(start.channel()?);
+    debug::offer();
     Ok(())
 }
 
@@ -331,11 +375,19 @@ struct HandRooted {
     shoulders: [Vec3; 2],
     poles: [Vec3; 2],
     left_grip: Mat34,
+    right_melee_grip: Option<Mat34>,
     held: [Kind; 2],
 }
 
 /// The arms found under attach joints: by skeleton and attach joint.
 static ARMS: Mutex<Vec<(usize, usize, Option<Arm>)>> = Mutex::new(Vec::new());
+
+/// The game's melee grip of the right hand last logged (the wrist in the attach joint's frame), and
+/// how many changes of it were logged: each change is the game turning the weapon in the hand.
+static MELEE_GRIP_LOGGED: Mutex<(Option<Mat34>, u32)> = Mutex::new((None, 0));
+const MELEE_GRIP_LOGS: u32 = 12;
+/// Whether the game's right-hand gun grip was logged (once a run: a game's grips are measured from it).
+static GUN_GRIP_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn side_name(side: usize) -> &'static str {
     if side == RIGHT_HAND { "right" } else { "left" }
@@ -397,6 +449,14 @@ impl HandRooted {
         let right_arm = arms[RIGHT_HAND].as_ref().ok_or("no right arm")?;
         frames.wrists = arms.each_ref().map(|a| a.as_ref().and_then(|a| Some((a.wrist, *a.forearm.first()?))));
         let game = frames.animated;
+        let game_grip = compose(&rigid_inverse(&game[right_arm.root]), &game[right_arm.wrist]);
+        match self.held[RIGHT_HAND] {
+            Kind::Melee | Kind::Blade => note_melee_grip(&game_grip),
+            Kind::Gun if !GUN_GRIP_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) => {
+                log!("hand rig: the game's gun grip of the right hand: {:?}", game_grip.map(|v| (v * 1000.0).round() / 1000.0));
+            }
+            _ => {}
+        }
         let joints = &mut frames.now;
         let d = move_between(&joints[right_arm.root], &right_target);
         match (targets[LEFT_HAND], &arms[LEFT_HAND]) {
@@ -418,12 +478,42 @@ impl HandRooted {
             // One weapon: both hands as the game holds it (the front hand keeps its grip).
             _ => move_rigid(joints, &subtree(&parents, hands_root), &d),
         }
+        // A melee weapon's grip changes with its animation (a knife held forward, then reversed),
+        // its attach joint turning in the hand: on the attach joint the hand would turn with it.
+        // The hand keeps the game's gun grip on its controller instead, the weapon hanging in it
+        // as the game holds it now.
+        if matches!(self.held[RIGHT_HAND], Kind::Melee | Kind::Blade)
+            && let Some(grip) = self.right_melee_grip
+        {
+            let d_hand = move_between(&joints[right_arm.wrist], &compose(&right_target, &grip));
+            move_rigid(joints, &right_arm.subtree, &d_hand);
+        }
         for side in [LEFT_HAND, RIGHT_HAND] {
             if let Some(arm) = &arms[side] {
                 bend_arm(joints, arm, self.shoulders[side], self.poles[side]).ok_or("an arm could not reach its hand")?;
             }
         }
         Ok(Placed { palm: right_target })
+    }
+}
+
+/// The angle (radians) between the rotations of rigid `a` and `b`.
+fn turned_by(a: &Mat34, b: &Mat34) -> f32 {
+    let r = compose(&rigid_inverse(a), b);
+    ((r[0] + r[5] + r[10] - 1.0) * 0.5).clamp(-1.0, 1.0).acos()
+}
+
+/// Logs the game's melee grip of the right hand (`grip`: the wrist in the attach joint's frame) when
+/// it first shows and each time the game turns the weapon in the hand (by a sixth of a turn or
+/// more): the values a game's `right_melee_grip` is measured from.
+fn note_melee_grip(grip: &Mat34) {
+    let mut logged = MELEE_GRIP_LOGGED.locked();
+    let turned = logged.0.is_none_or(|last| turned_by(&last, grip) > 60f32.to_radians());
+    if turned && logged.1 < MELEE_GRIP_LOGS {
+        logged.1 += 1;
+        let at = logged.0.map_or(String::new(), |last| format!(" (turned {:.0} degrees in the hand)", turned_by(&last, grip).to_degrees()));
+        log!("hand rig: the game's melee grip of the right hand{at}: {:?}", grip.map(|v| (v * 1000.0).round() / 1000.0));
+        logged.0 = Some(*grip);
     }
 }
 
@@ -626,7 +716,7 @@ mod tests {
     }
     impl HandRig for Wolfish {
         const RIG: Rig = Rig {
-            method: Method::HandRooted { shoulders: [[-10.9, 10.0, -10.8], [-10.9, -10.0, -10.8]], poles: [[0.0, 0.6, -1.0], [0.0, -0.6, -1.0]], left_grip: IDENTITY_MATRIX },
+            method: Method::HandRooted { shoulders: [[-10.9, 10.0, -10.8], [-10.9, -10.0, -10.8]], poles: [[0.0, 0.6, -1.0], [0.0, -0.6, -1.0]], left_grip: IDENTITY_MATRIX, right_melee_grip: None },
             holds: Holds::TwoHanded,
             climbing: Climbing::None,
             fingers: None,
@@ -641,6 +731,37 @@ mod tests {
     }
 
     #[test]
+    fn a_melee_hand_keeps_its_grip_whichever_way_the_game_holds_the_weapon() {
+        let _serial = POSING.locked();
+        let target = [1.0, 0.0, 0.0, 15.0, 0.0, 1.0, 0.0, -5.0, 0.0, 0.0, 1.0, -10.0];
+        // The grip measured where it sits right: the wrist in the attach joint's frame.
+        let forward = Snapshot::take(&hand_rooted()).unwrap();
+        let grip = compose(&rigid_inverse(&forward.worlds[1]), &forward.worlds[2]);
+        let rooted = HandRooted { shoulders: [[-10.9, 10.0, -10.8], [-10.9, -10.0, -10.8]], poles: [[0.0, 0.6, -1.0], [0.0, -0.6, -1.0]], left_grip: IDENTITY_MATRIX, right_melee_grip: Some(grip), held: [Kind::Nothing, Kind::Melee] };
+        // The knife the other way round: its attach joint turned half a turn in the hand.
+        let flipped = hand_rooted();
+        let at = flipped.worlds.borrow()[1];
+        flipped.worlds.borrow_mut()[1] = [1.0, 0.0, 0.0, at[3], 0.0, -1.0, 0.0, at[7], 0.0, 0.0, -1.0, at[11]];
+        let knife = Snapshot::take(&flipped).unwrap();
+        let mut frames = Frames::new(&knife);
+        rooted.place(&flipped, &mut frames, 1, [None, Some(target)]).unwrap();
+        let wanted = compose(&target, &grip);
+        assert!(camera::distance(&frames.now[2], &wanted) < 1e-4, "the hand keeps its grip: {:?} {wanted:?}", frames.now[2]);
+        // The knife's joint hangs in the hand as the game holds it: turned against the target.
+        assert!(camera::distance(&frames.now[1], &target) > 0.5, "the knife turns with the game's grip");
+    }
+
+    #[test]
+    fn with_no_controller_tracked_the_arms_stay_as_animated() {
+        let _serial = POSING.locked();
+        let arms = hand_rooted();
+        let animated = Snapshot::take(&arms).unwrap();
+        let moment = Moment { hands: Hands::Attached { right: 1, targets: [None, None], space: IDENTITY_MATRIX }, fingers: false };
+        assert_eq!(frame::<Wolfish>(&arms, &animated, moment).err(), Some("no controller tracked"));
+        assert_eq!(*arms.worlds.borrow(), animated.worlds, "nothing written");
+    }
+
+    #[test]
     fn a_hand_rooted_arm_reaches_its_target_and_the_shoulder_stays() {
         let _serial = POSING.locked();
         let arms = hand_rooted();
@@ -650,7 +771,7 @@ mod tests {
         // The hand 4 units further in, 4 out and 4 up, turned 30 degrees about up.
         let (s, c) = 30f32.to_radians().sin_cos();
         let target = [c, -s, 0.0, 12.0, s, c, 0.0, -10.0, 0.0, 0.0, 1.0, -8.0];
-        let moment = Moment { hands: Hands::Attached { right: 1, targets: [None, Some(target)] }, fingers: false };
+        let moment = Moment { hands: Hands::Attached { right: 1, targets: [None, Some(target)], space: IDENTITY_MATRIX }, fingers: false };
         frame::<Wolfish>(&arms, &animated, moment).unwrap();
         let after = arms.worlds.borrow().clone();
         assert!(camera::distance(&after[1], &target) < 1e-5, "the attach joint is the target");
@@ -745,13 +866,68 @@ mod tests {
     /// the rig before (the bow's holder at the arms callback): a written joint as written, a helper
     /// where the engine moved it with its bone.
     #[test]
+    fn the_debug_views_draw_the_bones_for_the_frame_being_drawn() {
+        use monaka_channel::debug::{DebugChannel, Source, Wanted};
+        use monaka_core::debug_draw::{Categories, Category, ORANGE};
+        let _serial = POSING.locked();
+        crate::declare_mirror(MIRROR);
+        let name = monaka_channel::ChannelName::new(format!(r"Local\monaka-test-rig-debug-{}", std::process::id())).unwrap();
+        let mut viewer = DebugChannel::open(&name).unwrap();
+        viewer.want(Wanted { categories: Categories::NONE.with(Category::Skeleton, true), ..Wanted::default() });
+        monaka_producer::debug::open(&name);
+        monaka_producer::debug::set_drawing(5);
+        let game = translation([0.0, 1.6, 0.0]);
+        let head = HeadPose { orientation: [0.0, 0.0, 0.0, 1.0], position: [0.0, 1.6, 0.0], valid: 1, ..HeadPose::default() };
+        let palm = |x: f32| HandPose { orientation: [0.0, 0.0, 0.0, 1.0], position: [0.25 * x, 1.25, -0.35], valid: 1, received_tick: 0 };
+        let palms = Palms { game, origin: IDENTITY_MATRIX, head, palms: [Some(palm(-1.0)), Some(palm(1.0))], aim_side: RIGHT_HAND, hold: [0.0; 3], bones: None };
+        let arms = named_arms(31);
+        frame::<Chromish>(&arms, &Snapshot::take(&arms).unwrap(), Moment { hands: Hands::Palms(palms), fingers: false }).unwrap();
+        monaka_producer::debug::eye_keys(1, [5, 5]);
+        monaka_producer::debug::close();
+        let mut eyes = [Vec::new(), Vec::new()];
+        assert_eq!(viewer.read_pair(1, &mut eyes), [Source::Synced(5); 2]);
+        assert!(eyes[0].iter().all(|p| p.category == Category::Skeleton as u16));
+        assert!(eyes[0].iter().any(|p| p.colour == ORANGE), "the bones the rig moved: {:?}", eyes[0].len());
+    }
+
+    /// A skeleton hung from the hands is drawn through its moment's space: model units and axes
+    /// into tracking space, scale included.
+    #[test]
+    fn a_hand_rooted_skeleton_is_drawn_through_its_moments_space() {
+        use monaka_channel::debug::{DebugChannel, Source, Wanted};
+        use monaka_core::debug_draw::{Categories, Category};
+        let _serial = POSING.locked();
+        let name = monaka_channel::ChannelName::new(format!(r"Local\monaka-test-rooted-debug-{}", std::process::id())).unwrap();
+        let mut viewer = DebugChannel::open(&name).unwrap();
+        viewer.want(Wanted { categories: Categories::NONE.with(Category::Skeleton, true), ..Wanted::default() });
+        monaka_producer::debug::open(&name);
+        monaka_producer::debug::set_drawing(7);
+        let arms = hand_rooted();
+        let animated = Snapshot::take(&arms).unwrap();
+        let target = [1.0, 0.0, 0.0, 12.0, 0.0, 1.0, 0.0, -10.0, 0.0, 0.0, 1.0, -8.0];
+        // Model x forward, y left, z up in game units of 2.5 cm, to tracking (x right, y up, z back):
+        // the model's origin at (0.1, 1.5, -0.2).
+        let u = 0.025;
+        let space = [0.0, -u, 0.0, 0.1, 0.0, 0.0, u, 1.5, -u, 0.0, 0.0, -0.2];
+        frame::<Wolfish>(&arms, &animated, Moment { hands: Hands::Attached { right: 1, targets: [None, Some(target)], space }, fingers: false }).unwrap();
+        monaka_producer::debug::eye_keys(1, [7, 7]);
+        monaka_producer::debug::close();
+        let mut eyes = [Vec::new(), Vec::new()];
+        assert_eq!(viewer.read_pair(1, &mut eyes), [Source::Synced(7); 2]);
+        // The right attach joint, at the target, ends a bone: 12 forward, 10 right, 8 down.
+        let expected = [0.1 + 10.0 * u, 1.5 - 8.0 * u, -0.2 - 12.0 * u];
+        let near = |p: [f32; 3]| distance(p, expected) < 1e-4;
+        assert!(eyes[0].iter().any(|p| near(p.a) || near(p.b)), "the attach joint in tracking space: {:?}", eyes[0].iter().map(|p| p.b).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn each_holder_is_read_back_as_the_rig_left_it() {
         let _serial = POSING.locked();
         // Hand-rooted: each attach joint is written.
         let arms = hand_rooted();
         let animated = Snapshot::take(&arms).unwrap();
         let target = [1.0, 0.0, 0.0, 12.0, 0.0, 1.0, 0.0, -10.0, 0.0, 0.0, 1.0, -8.0];
-        frame::<Wolfish>(&arms, &animated, Moment { hands: Hands::Attached { right: 1, targets: [None, Some(target)] }, fingers: false }).unwrap();
+        frame::<Wolfish>(&arms, &animated, Moment { hands: Hands::Attached { right: 1, targets: [None, Some(target)], space: IDENTITY_MATRIX }, fingers: false }).unwrap();
         let rooted = posed().unwrap();
         assert_eq!(rooted.holders, [arms.world(10), arms.world(1)]);
         assert!(camera::distance(&rooted.holders[RIGHT_HAND].unwrap(), &target) < 1e-5);
@@ -772,7 +948,7 @@ mod tests {
         assert_eq!(carried.holders, [arms.world(5), arms.world(10)]);
         assert!(camera::distance(&carried.holders[RIGHT_HAND].unwrap(), &before) > 1e-3, "it moved with the hand");
         // A pose the rig cannot make leaves the last one.
-        let refused = Moment { hands: Hands::Attached { right: 1, targets: [None, None] }, fingers: false };
+        let refused = Moment { hands: Hands::Attached { right: 1, targets: [None, None], space: IDENTITY_MATRIX }, fingers: false };
         assert!(frame::<Chromish>(&arms, &Snapshot::take(&arms).unwrap(), refused).is_err());
         assert_eq!(posed(), Some(carried));
     }

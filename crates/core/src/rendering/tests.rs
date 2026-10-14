@@ -78,3 +78,12 @@ fn the_rendering_tab_keeps_its_order() {
     assert_eq!(ids, ["stereo", "framegen", "headset_depth", "render_size"]);
     assert_eq!(place(&crate::manifest::WORLD_HUD), 0, "another tab keeps the game's order");
 }
+
+#[test]
+fn the_summary_lists_the_rendering_choices_by_label_in_the_tabs_order() {
+    let sharpness = Opt { when: Some(("stereo", "afw")), ..opt("fsr_sharpness", "FSR sharpness", "", Kind::Number { min: 0.0, max: 1.0, step: 0.1, default: 0.2 }).on(Shown::Rendering) };
+    let elsewhere = opt("hud_size", "HUD size", "", Kind::Number { min: 0.0, max: 1.0, step: 0.1, default: 0.5 });
+    let opts = [sharpness, BOTH, AER_AFW, elsewhere];
+    assert_eq!(summary(&opts, &Options::parse("stereo=afw\nframegen=fsr")), "Stereo method: AFW (Frame-warp)\nFrame generation: FSR frame generation\nFSR sharpness: 0.2");
+    assert_eq!(summary(&opts, &Options::parse("")), "Stereo method: AER (Alt-eye)\nFrame generation: Off", "defaults; the sharpness means nothing without AFW");
+}

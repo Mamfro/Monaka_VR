@@ -14,7 +14,8 @@
 //! The text is one field per line, `key value`, the value escaped (`\\`, `\n`, `\t`, `\r`); pairs
 //! inside a value are tab-separated; numbers that are options' bounds are an f64's bits in hex, so
 //! they come back exactly. Before the games, `author` and `source` say who made the pack and where
-//! it comes from (its crate's `authors` and `repository`; contract 1.1). A `game` line starts each
+//! it comes from (its crate's `authors` and `repository`; contract 1.1), `version` and `monaka` its
+//! crate's version and the Monaka it was built with (contract 2.1). A `game` line starts each
 //! manifest and an `option` line each option; after the options, a `control` line starts each
 //! how-to, its `way` lines (the text, then `id`, `value` pairs) and one `tunes` line (option ids).
 
@@ -43,7 +44,12 @@ pub struct Contract {
 /// - 1.3: the Controls tab: the `controls` tab word, a game's how-tos (`control`, `way`, `tunes`
 ///   lines; [`crate::manifest::HowTo`]), and conditions on any value but one (`!value`).
 /// - 2.0: the `engine` tab word is gone: a 1.x pack that puts an option there cannot be read.
-pub const CONTRACT: Contract = Contract { major: 2, minor: 0 };
+/// - 2.1: the text's `version` and `monaka` ([`About`]).
+/// - 2.2: `launch at_start` ([`crate::manifest::Launch::AtStart`]).
+pub const CONTRACT: Contract = Contract { major: 2, minor: 2 };
+
+/// This Monaka's version, written into every pack built with it ([`About::monaka`]).
+pub const MONAKA_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Who made a pack and where it comes from, as the pack itself says (nothing checks it): its
 /// crate's `authors` and `repository`. Empty where the crate names none, or the pack predates 1.1.
@@ -51,6 +57,10 @@ pub const CONTRACT: Contract = Contract { major: 2, minor: 0 };
 pub struct About {
     pub author: String,
     pub source: String,
+    /// Its crate's version; empty before 2.1.
+    pub version: String,
+    /// The Monaka it was built with ([`MONAKA_VERSION`]); empty before 2.1.
+    pub monaka: String,
 }
 
 /// A pack's text read back ([`parse`]).
@@ -322,6 +332,7 @@ const fn write_game(out: &mut Out, m: &Manifest) {
             out.byte(b'\n');
         }
         Launch::Manual => out.raw(b"launch manual\n"),
+        Launch::AtStart => out.raw(b"launch at_start\n"),
     }
     i = 0;
     while i < m.refused_arguments.len() {
@@ -383,7 +394,7 @@ const fn write_how(out: &mut Out, how: &HowTo) {
     out.byte(b'\n');
 }
 
-const fn write(out: &mut Out, manifests: &[Manifest], author: &str, source: &str) {
+const fn write(out: &mut Out, manifests: &[Manifest], author: &str, source: &str, version: &str) {
     out.raw(MAGIC);
     out.byte(b' ');
     out.decimal(CONTRACT.major as u64);
@@ -392,6 +403,8 @@ const fn write(out: &mut Out, manifests: &[Manifest], author: &str, source: &str
     out.byte(b'\n');
     out.field(b"author", author);
     out.field(b"source", source);
+    out.field(b"version", version);
+    out.field(b"monaka", MONAKA_VERSION);
     let mut i = 0;
     while i < manifests.len() {
         write_game(out, &manifests[i]);
@@ -400,27 +413,27 @@ const fn write(out: &mut Out, manifests: &[Manifest], author: &str, source: &str
 }
 
 /// The length of `manifests`' text with its NUL (the size of `MONAKA_MANIFEST`), for a pack by
-/// `author` from `source`.
-pub const fn text_len(manifests: &[Manifest], author: &str, source: &str) -> usize {
+/// `author` from `source` at `version`.
+pub const fn text_len(manifests: &[Manifest], author: &str, source: &str, version: &str) -> usize {
     let mut nothing = [0u8; 0];
     let mut out = Out { buf: &mut nothing, at: 0 };
-    write(&mut out, manifests, author, source);
+    write(&mut out, manifests, author, source, version);
     out.at + 1
 }
 
 /// `manifests`' text, NUL-terminated (`N` is [`text_len`]).
-pub const fn text_bytes<const N: usize>(manifests: &[Manifest], author: &str, source: &str) -> [u8; N] {
+pub const fn text_bytes<const N: usize>(manifests: &[Manifest], author: &str, source: &str, version: &str) -> [u8; N] {
     let mut bytes = [0u8; N];
     let mut out = Out { buf: &mut bytes, at: 0 };
-    write(&mut out, manifests, author, source);
+    write(&mut out, manifests, author, source, version);
     bytes
 }
 
 /// `manifests`' text.
-pub fn text(manifests: &[Manifest], author: &str, source: &str) -> String {
-    let mut bytes = vec![0u8; text_len(manifests, author, source)];
+pub fn text(manifests: &[Manifest], author: &str, source: &str, version: &str) -> String {
+    let mut bytes = vec![0u8; text_len(manifests, author, source, version)];
     let mut out = Out { buf: &mut bytes, at: 0 };
-    write(&mut out, manifests, author, source);
+    write(&mut out, manifests, author, source, version);
     bytes.pop();
     String::from_utf8(bytes).expect("written from UTF-8 strings")
 }
@@ -607,6 +620,8 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
             match key {
                 "author" => about.author = unescape(value),
                 "source" => about.source = unescape(value),
+                "version" => about.version = unescape(value),
+                "monaka" => about.monaka = unescape(value),
                 _ => return Err(at(format!("{key} outside a game"))),
             }
             continue;
@@ -687,6 +702,7 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
             "launch" => {
                 g.launch = Some(match value.split_once(' ') {
                     None if value == "manual" => Launch::Manual,
+                    None if value == "at_start" => Launch::AtStart,
                     Some(("auto", seconds)) => Launch::Auto { settle_seconds: seconds.parse().map_err(|_| at(format!("not seconds: {seconds}")))? },
                     _ => return Err(at(format!("unknown launch {value}"))),
                 })
@@ -789,18 +805,20 @@ mod tests {
     };
 
     const MANUAL: Manifest = Manifest { id: "m", launch: Launch::Manual, options: &[], controls: &[], ..GAME };
+    const AT_START: Manifest = Manifest { id: "s", launch: Launch::AtStart, ..MANUAL };
 
     #[test]
     fn the_text_reads_back_exactly() {
-        let text = text(&[GAME, MANUAL], "Someone <a@b.c>", "https://example.org/x\ty");
+        let text = text(&[GAME, MANUAL, AT_START], "Someone <a@b.c>", "https://example.org/x\ty", "1.2.3");
         let parsed = parse(&text).unwrap();
         assert_eq!(parsed.contract, CONTRACT);
-        assert_eq!(parsed.about, About { author: "Someone <a@b.c>".into(), source: "https://example.org/x\ty".into() });
+        let about = About { author: "Someone <a@b.c>".into(), source: "https://example.org/x\ty".into(), version: "1.2.3".into(), monaka: MONAKA_VERSION.into() };
+        assert_eq!(parsed.about, about);
         let games = parsed.manifests;
-        assert_eq!(games.len(), 2);
-        assert!(games[0] == GAME && games[1] == MANUAL, "{text}");
+        assert_eq!(games.len(), 3);
+        assert!(games[0] == GAME && games[1] == MANUAL && games[2] == AT_START, "{text}");
         // The compile-time bytes are the same text, NUL-terminated.
-        const BYTES: [u8; text_len(&[GAME, MANUAL], "Someone <a@b.c>", "https://example.org/x\ty")] = text_bytes(&[GAME, MANUAL], "Someone <a@b.c>", "https://example.org/x\ty");
+        const BYTES: [u8; text_len(&[GAME, MANUAL, AT_START], "Someone <a@b.c>", "https://example.org/x\ty", "1.2.3")] = text_bytes(&[GAME, MANUAL, AT_START], "Someone <a@b.c>", "https://example.org/x\ty", "1.2.3");
         assert_eq!(&BYTES[..BYTES.len() - 1], text.as_bytes());
         assert_eq!(BYTES[BYTES.len() - 1], 0);
     }
@@ -811,26 +829,28 @@ mod tests {
         // round trip: what it lists still is Monaka's, unchanged.
         const READS: &[Opt] = &[crate::manifest::DISABLE_VIEW_BOBBING];
         const READER: Manifest = Manifest { options: READS, launch: Launch::Manual, controls: &[], ..GAME };
-        let parsed = parse(&text(&[READER], "", "")).unwrap();
+        let parsed = parse(&text(&[READER], "", "", "1.2.3")).unwrap();
         assert!(parsed.manifests[0] == READER);
         assert!(parsed.manifests[0].check().is_ok(), "{:?}", parsed.manifests[0].check());
     }
 
     #[test]
     fn known_bugs_from_an_older_pack_are_read_past() {
-        let old = text(&[MANUAL], "", "").replace("status in_progress\n", "status in_progress\nbug One.\nbug Two.\n");
+        let old = text(&[MANUAL], "", "", "1.2.3").replace("status in_progress\n", "status in_progress\nbug One.\nbug Two.\n");
         assert!(parse(&old).unwrap().manifests[0] == MANUAL);
     }
 
     #[test]
     fn a_pack_from_before_1_1_names_nobody() {
-        // 1.0 wrote no author or source.
-        let old = text(&[MANUAL], "", "").replace("author \nsource \n", "").replace(&format!("monaka-manifest {CONTRACT}"), "monaka-manifest 1.0");
+        // 1.0 wrote no author or source (nor 2.1's version and monaka).
+        let new = text(&[MANUAL], "", "", "1.2.3").replace(&format!("monaka-manifest {CONTRACT}"), "monaka-manifest 1.0");
+        let about = ["author ", "source ", "version ", "monaka "];
+        let old: String = new.lines().filter(|l| !about.iter().any(|k| l.starts_with(k))).map(|l| format!("{l}\n")).collect();
         let parsed = parse(&old).unwrap();
         assert_eq!(parsed.contract, Contract { major: 1, minor: 0 });
         assert_eq!(parsed.about, About::default());
         assert!(parsed.manifests[0] == MANUAL);
-        assert!(parse(&text(&[MANUAL], "", "").replace("source \n", "source \nbogus 1\n")).unwrap_err().contains("bogus outside a game"));
+        assert!(parse(&text(&[MANUAL], "", "", "1.2.3").replace("source \n", "source \nbogus 1\n")).unwrap_err().contains("bogus outside a game"));
     }
 
     #[test]
@@ -850,9 +870,9 @@ mod tests {
     #[test]
     fn broken_text_says_where() {
         assert!(parse("hello").unwrap_err().contains("not a Monaka manifest"));
-        let sideways = text(&[GAME], "", "").replace("status in_progress", "status sideways");
+        let sideways = text(&[GAME], "", "", "1.2.3").replace("status in_progress", "status sideways");
         assert!(parse(&sideways).unwrap_err().contains("unknown status"));
-        let unended = text(&[MANUAL], "", "").replace("end\n", "");
+        let unended = text(&[MANUAL], "", "", "1.2.3").replace("end\n", "");
         assert!(parse(&unended).unwrap_err().contains("no end"));
     }
 }

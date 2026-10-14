@@ -212,5 +212,33 @@ pub fn place(opt: &Opt) -> usize {
     }
 }
 
+/// The run's Rendering-tab choices among `options` (a game's) as `options` say them, one
+/// `Label: value` a line in the tab's order: the Stats panel's settings. An option that means
+/// nothing with the others' values (its `when` does not hold) is left out.
+pub fn summary(opts: &[Opt], options: &Options) -> String {
+    let value = |opt: &Opt| options.text(opt.id).map(|v| v.trim().to_owned()).unwrap_or_else(|| opt.default_text());
+    let applies = |opt: &Opt| opt.when.is_none_or(|(id, wanted)| opts.iter().find(|o| o.id == id).is_some_and(|o| crate::manifest::matches(&value(o), wanted)));
+    let mut shown: Vec<&Opt> = opts.iter().filter(|o| o.shown == Shown::Rendering && o.producer && applies(o)).collect();
+    shown.sort_by_key(|o| place(o));
+    let lines: Vec<String> = shown
+        .into_iter()
+        .filter_map(|opt| {
+            let raw = value(opt);
+            let text = match opt.kind {
+                Kind::Choice { choices, default, .. } => {
+                    let chosen = choices.iter().find(|(id, _)| id.eq_ignore_ascii_case(&raw)).or_else(|| choices.iter().find(|(id, _)| *id == default));
+                    chosen.map(|(_, label)| (*label).to_owned())?
+                }
+                Kind::Switch { default } => (if crate::manifest::parse_switch(&raw).unwrap_or(default) { "On" } else { "Off" }).to_owned(),
+                Kind::Number { .. } => raw,
+                Kind::Text | Kind::Size if raw.is_empty() => return None,
+                Kind::Text | Kind::Size => raw,
+            };
+            Some(format!("{}: {text}", opt.label))
+        })
+        .collect();
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests;

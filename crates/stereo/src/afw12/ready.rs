@@ -4,7 +4,9 @@
 //! their counts.
 
 use super::*;
-
+use monaka_core::manifest::{DOMINANT_EYE, Manifest};
+use monaka_core::options::Options;
+use std::sync::atomic::AtomicU8;
 
 /// The present loop frame warping runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +72,18 @@ pub(super) fn same_frame_queue<G: PresentsPairs>(_: &IDXGISwapChain3) -> Option<
 }
 
 pub(super) static GAME: Mutex<Option<GameFns>> = Mutex::new(None);
+/// The rules this run warps by (the base ones with the install's choices).
+pub(super) static RULES_CHOSEN: Mutex<Rules> = Mutex::new(RULES);
+/// The dominant eye (0 left, 1 right): rendered every present.
+static DOMINANT: AtomicU8 = AtomicU8::new(1);
+/// Every this many presents the other eye renders instead, for its gap fill.
+pub const REFRESH: u64 = 8;
+
+/// The eye present `n`'s frame draws: the dominant eye, the other every [`REFRESH`]th present.
+pub fn dominant_eye(n: u64) -> usize {
+    let dominant = DOMINANT.load(Relaxed) as usize;
+    if n % REFRESH == REFRESH - 1 { 1 - dominant } else { dominant }
+}
 /// Frame warping runs this run, and with frame generation's in-between frames.
 pub(super) static ON: AtomicBool = AtomicBool::new(false);
 pub(super) static FRAMEGEN: AtomicBool = AtomicBool::new(false);
@@ -84,7 +98,12 @@ pub(super) const EVERY: [Every; 1] = [Every::millis(afw::REPORT_MS, log_report)]
 /// on ([`afw::on`]) and what it works on top of (`needs`: its eyes) by struct update; its pairs go
 /// out at the present loop's step ([`before_present`], joined at its install).
 pub const fn frame_warping<G: Presents + FrameInputs + HudLayer>() -> Component<G> {
-    afw::component(install::<G>, close, &EVERY, report, true)
+    Component { options: &[DOMINANT_EYE], settings, ..afw::component(install::<G>, close, &EVERY, report, true) }
+}
+
+/// The component's settings: the dominant eye (0 left, 1 right), Monaka's own.
+fn settings(options: &Options, _: &Manifest) {
+    DOMINANT.store(options.choice("dominant_eye", &[("left", 0u8), ("right", 1u8)], 1), Relaxed);
 }
 
 /// Frame warping for game `G` on the same-frame loop (`crate::same_frame`) fed one eye per frame:
@@ -112,7 +131,18 @@ pub(super) fn install<G: Presents + FrameInputs + HudLayer>(start: &mut Start<'_
         queue: G::LOOP.queue.unwrap_or(crate::queue12::game_queue),
         units_per_metre: G::UNITS_PER_METRE,
     };
+    let options = start.options;
+    settings(options, start.manifest);
+    let alternate = options.switch("afw_alternate", false);
+    let fill_first = options.switch("afw_fill_first", true);
+    *RULES_CHOSEN.locked() = if alternate { RULES.fill_first(fill_first) } else { RULES.every(REFRESH).fill_first(fill_first) };
     start_warping(game);
+    DRIVER.choose_eyes((!alternate).then_some(dominant_eye as crate::driver::EyeSchedule));
+    log!(
+        "frame warping: {}{}",
+        if alternate { "the eyes take turns".to_owned() } else { format!("the {} eye renders every present, the other every {REFRESH}th", ["left", "right"][DOMINANT.load(Relaxed) as usize]) },
+        if fill_first { "; the eye's own last frame first where it shows the same surface" } else { "" }
+    );
     crate::driver::join_present(present_step);
     Ok(())
 }

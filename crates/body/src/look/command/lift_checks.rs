@@ -125,7 +125,7 @@ impl monaka_producer::game::Game for Commanded {
     }
 }
 impl Looks for Commanded {
-    const DELIVERY: Delivery<Self> = Delivery::Command { head: || *HEAD.locked(), levels: || PAD.load(Relaxed) };
+    const DELIVERY: Delivery<Self> = Delivery::Command { head: || *HEAD.locked(), levels: || PAD.load(Relaxed), holds: || false };
     fn stand_down(_: usize) -> StandDown {
         StandDown { now: TAKEN.load(Relaxed), changed: false }
     }
@@ -135,7 +135,7 @@ impl Looks for Commanded {
 fn a_run_of_commands_writes_the_angles_and_bakes_the_shares_it_did() {
     let _serial = serial();
     let head = |yaw: f32, pitch: f32| Some(HeadPose::synthetic(yaw, pitch, HeadPose::SYNTHETIC_FOV, 0.064));
-    *GAME.locked() = Some(GameFns { camera_taken: camera_taken::<Commanded>, head: || *HEAD.locked() });
+    *GAME.locked() = Some(GameFns { camera_taken: camera_taken::<Commanded>, head: || *HEAD.locked(), holds: || false });
     PAUSE_HOLD.store(true, Relaxed);
     LEVELLING.store(true, Relaxed);
     AIMING.store(true, Relaxed);

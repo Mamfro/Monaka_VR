@@ -16,26 +16,20 @@ name = "monaka_play"
 path = "src/play.rs"
 
 [dependencies]
+monaka_channel.workspace = true
 monaka_core.workspace = true
 monaka_launch.workspace = true
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "accesskit"] }
 
 [dependencies.windows]
 workspace = true
 features = [
     "Win32_Foundation",
-    "Win32_Graphics_Dwm",
-    "Win32_Graphics_Gdi",
-    "Win32_Storage_Xps",
+    "Win32_Security",
     "Win32_System_Console",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Registry",
-    "Win32_UI_Accessibility",
-    "Win32_UI_Controls",
+    "Win32_System_Threading",
     "Win32_UI_Controls_Dialogs",
-    "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_Shell",
-    "Win32_UI_WindowsAndMessaging",
 ]
 
 [lints]

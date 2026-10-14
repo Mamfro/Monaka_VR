@@ -115,13 +115,23 @@ fn other_eye_from_this_frame_and_gaps_from_its_own_last_frame() {
     run(&mut reprojector, &primary, Some(&fill), &targets);
     assert_eq!(pixel(&queue, &out, 20, 3), [36 * 4, 0, 0, 255]);
     // The right edge was out of the left camera's view: its own last frame fills it.
-    assert_eq!(pixel(&queue, &out, 55, 3), [0, 255, 0, 255]);
+    assert_eq!(pixel(&queue, &out, 55, 3), [0, 255, 0, 170]);
     // The right eye's depth: the wall, at the render size.
     assert!((depth_at(&queue, &out_depth, 10, 2) - wall).abs() < 1e-6);
     assert!((depth_at(&queue, &out_depth, 28, 2) - wall).abs() < 1e-6, "filled from the last frame's depth");
     // Without a fill frame, the gap continues its neighbour instead.
     run(&mut reprojector, &primary, None, &targets);
-    assert_eq!(pixel(&queue, &out, 55, 3), [63 * 4, 0, 0, 255]);
+    assert_eq!(pixel(&queue, &out, 55, 3), [63 * 4, 0, 0, 85]);
+    // The fill first: the right eye's own last frame shows the same wall everywhere, so it goes out
+    // in place of the warped left eye; a fill of a nearer surface would not.
+    reprojector.fill_first = true;
+    run(&mut reprojector, &primary, Some(&fill), &targets);
+    assert_eq!(pixel(&queue, &out, 20, 3), [0, 255, 0, 170], "the eye's own frame where the surface agrees");
+    let nearer: Vec<u8> = (0..(w / 2) * (h / 2)).flat_map(|_| (near / 1.5).to_le_bytes()).collect();
+    let nearer = upload(&device, &queue, (w / 2, h / 2), DXGI_FORMAT_R32_TYPELESS, &nearer);
+    run(&mut reprojector, &primary, Some(&Source { depth: &nearer, ..fill }), &targets);
+    assert_eq!(pixel(&queue, &out, 20, 3), [36 * 4, 0, 0, 255], "the warp where the fill shows something else");
+    reprojector.fill_first = false;
 
     // A depth texture twice the render area, the wall in its top-left part and a far surface (depth
     // 0, infinity) elsewhere: read in the part that lines up with the image, the same picture, and
@@ -135,18 +145,52 @@ fn other_eye_from_this_frame_and_gaps_from_its_own_last_frame() {
     let targets_large = Targets { color: &out, depth: Some(&large_out), depth_rect: rect };
     run(&mut reprojector, &primary_large, Some(&fill_large), &targets_large);
     assert_eq!(pixel(&queue, &out, 20, 3), [36 * 4, 0, 0, 255]);
-    assert_eq!(pixel(&queue, &out, 55, 3), [0, 255, 0, 255]);
+    assert_eq!(pixel(&queue, &out, 55, 3), [0, 255, 0, 170]);
     assert!((depth_at(&queue, &large_out, 10, 2) - wall).abs() < 1e-6, "written in the render area");
-    // The depth read moved by its jitter: a far column (depth 0, infinity) at depth pixel 30 is read
-    // by colour pixels 60 and 61 as rendered, by 58 and 59 with a jitter of one depth pixel. A far
-    // pixel lands on itself (no disparity), where no wall pixel lands (they all move 16 left).
-    let notch: Vec<u8> = (0..h / 2).flat_map(|_| (0..w / 2).flat_map(|x| if x == 30 { 0f32.to_le_bytes() } else { wall.to_le_bytes() })).collect();
-    let notched = upload(&device, &queue, (w / 2, h / 2), DXGI_FORMAT_R32_TYPELESS, &notch);
-    let primary_notched = Source { depth: &notched, jitter: [0.0, 0.0], ..primary };
-    run(&mut reprojector, &primary_notched, None, &targets);
-    assert_eq!(pixel(&queue, &out, 60, 3), [60 * 4, 0, 0, 255], "far as rendered");
-    let primary_jittered = Source { jitter: [1.0, 0.0], ..primary_notched };
+    // A colour pixel takes the nearest of the depth texels around it: a far notch (depth 0,
+    // infinity) one depth pixel wide at depth pixel 30 goes with the wall beside it (every colour
+    // pixel's four texels include wall), so nothing lands far; wall pixels land 16 left and the
+    // right edge is a gap, continued from the last wall column.
+    let notch = |far: std::ops::Range<u32>| -> Vec<u8> { (0..h / 2).flat_map(|_| (0..w / 2).flat_map(|x| if far.contains(&x) { 0f32.to_le_bytes() } else { wall.to_le_bytes() })).collect() };
+    let one = upload(&device, &queue, (w / 2, h / 2), DXGI_FORMAT_R32_TYPELESS, &notch(30..31));
+    let primary_one = Source { depth: &one, jitter: [0.0, 0.0], ..primary };
+    run(&mut reprojector, &primary_one, None, &targets);
+    assert_eq!(pixel(&queue, &out, 61, 3), [63 * 4, 0, 0, 85], "the edge pixel went with the wall");
+    // Two texels wide (30 and 31): colour pixels 61 to 63 read far texels only (62 and 63 past the
+    // edge, clamped) and land on themselves (no disparity); 60 reads texels 29 and 30, wall. With a
+    // jitter of one depth pixel the read moves: 59 to 63 far, 58 wall.
+    let two = upload(&device, &queue, (w / 2, h / 2), DXGI_FORMAT_R32_TYPELESS, &notch(30..32));
+    let primary_two = Source { depth: &two, jitter: [0.0, 0.0], ..primary };
+    run(&mut reprojector, &primary_two, None, &targets);
+    assert_eq!(pixel(&queue, &out, 61, 3), [61 * 4, 0, 0, 255], "far as rendered");
+    assert_eq!(pixel(&queue, &out, 60, 3), [61 * 4, 0, 0, 85], "a gap, continued from its far neighbour");
+    let primary_jittered = Source { jitter: [1.0, 0.0], ..primary_two };
     run(&mut reprojector, &primary_jittered, None, &targets);
-    assert_eq!(pixel(&queue, &out, 58, 3), [58 * 4, 0, 0, 255], "far with the jitter");
-    assert_eq!(pixel(&queue, &out, 60, 3), [59 * 4, 0, 0, 255], "a gap now, continued from its neighbour");
+    assert_eq!(pixel(&queue, &out, 59, 3), [59 * 4, 0, 0, 255], "far with the jitter");
+    assert_eq!(pixel(&queue, &out, 58, 3), [59 * 4, 0, 0, 85], "a gap now, continued from its neighbour");
+    // The target's depth of a far pixel: the far plane (infinity, depth 0).
+    assert!(depth_at(&queue, &out_depth, 30, 2).abs() < 1e-6, "{}", depth_at(&queue, &out_depth, 30, 2));
+
+    // Pixels at one depth landing on one target pixel: the one nearest its centre wins, the same
+    // every time. The target sees a third as wide as the source (its projection a third as strong),
+    // from the same place: three colour pixels land on each target pixel, the middle one centred.
+    let mut wide_projection = projection;
+    wide_projection[0] = 1.0 / 3.0;
+    let wide = View { projection: wide_projection, camera: camera(299.5), ..view };
+    let mut first: Option<Vec<u8>> = None;
+    for _ in 0..4 {
+        let mut recorder = Recorder::new(&device, 1).unwrap();
+        let list = recorder.begin().unwrap().unwrap();
+        reprojector.record(&list, &wide, &primary, None, &targets).unwrap();
+        recorder.submit(&queue).unwrap();
+        assert!(recorder.idle(2000));
+        let (_, _, _, bytes) = read_texture(&queue, &out, D3D12_RESOURCE_STATE_COMMON).unwrap();
+        match &first {
+            Some(seen) => assert_eq!(seen, &bytes, "the same picture every run"),
+            None => first = Some(bytes),
+        }
+    }
+    // The source lands in the middle third; target pixel 32 takes source pixel 33 (of 32, 33 and
+    // 34), the one landing on its centre.
+    assert_eq!(pixel(&queue, &out, 32, 3), [33 * 4, 0, 0, 255]);
 }

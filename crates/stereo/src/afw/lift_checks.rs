@@ -402,7 +402,7 @@ impl Before12 {
         let mut prepared = Prepared12 { present: p.present, eye, pose: label.pose, shown: false, generated: None };
         let generation = p.framegen.then(|| {
             let previous = self.previous.take();
-            let continuous = previous.is_some_and(|(_, e, at)| e != eye && at + 1 == prepared.present) && !reset;
+            let continuous = previous.is_some_and(|(_, _, at)| at + 1 == prepared.present) && !reset;
             if p.generate_busy {
                 return (continuous, None);
             }

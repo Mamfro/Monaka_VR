@@ -536,6 +536,51 @@ impl ChannelName {
     pub fn reticles_lock(&self) -> String {
         format!("{}-reticles-lock", self.0)
     }
+
+    /// The debug block ([`crate::debug_draw::DebugBlock`]).
+    pub fn debug(&self) -> String {
+        format!("{}-debug", self.0)
+    }
+
+    pub fn debug_lock(&self) -> String {
+        format!("{}-debug-lock", self.0)
+    }
+
+    /// The game's depth shared for the debug views ([`crate::debug_draw::DebugDepth`]).
+    pub fn debug_depth(&self) -> String {
+        format!("{}-debug-depth", self.0)
+    }
+
+    /// One of the game's render targets shared for the debug views.
+    pub fn debug_target(&self) -> String {
+        format!("{}-debug-target", self.0)
+    }
+
+    /// The game page ([`crate::page::PageBlock`]).
+    pub fn page(&self) -> String {
+        format!("{}-page", self.0)
+    }
+
+    pub fn page_lock(&self) -> String {
+        format!("{}-page-lock", self.0)
+    }
+
+    pub fn console(&self) -> String {
+        format!("{}-console", self.0)
+    }
+
+    pub fn console_lock(&self) -> String {
+        format!("{}-console-lock", self.0)
+    }
+
+    /// The viewer's own console (the 2D window's command line), beside the producer's.
+    pub fn view_console(&self) -> String {
+        format!("{}-view-console", self.0)
+    }
+
+    pub fn view_console_lock(&self) -> String {
+        format!("{}-view-console-lock", self.0)
+    }
 }
 
 #[cfg(test)]
@@ -678,6 +723,8 @@ mod tests {
         assert_eq!(name.pose_lock(), r"Local\monaka-1-pose-lock");
         assert_eq!(name.hands(), r"Local\monaka-1-hands");
         assert_eq!(name.hands_lock(), r"Local\monaka-1-hands-lock");
+        assert_eq!(name.debug(), r"Local\monaka-1-debug");
+        assert_eq!(name.debug_lock(), r"Local\monaka-1-debug-lock");
         assert!(ChannelName::new("").is_none());
         assert!(ChannelName::new("x".repeat(201)).is_none());
     }

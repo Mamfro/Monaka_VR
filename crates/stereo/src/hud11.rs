@@ -331,6 +331,7 @@ fn followed(installed: &Installed, context: &ID3D11DeviceContext) -> bool {
 /// `OMSetRenderTargets` on any context: records whether it now draws to the back buffer, and puts
 /// back a viewport we moved when it leaves it.
 fn before_targets(context: *mut c_void, count: u32, views: *const *mut c_void, depth: *mut c_void) {
+    crate::debug_depth::bound(context, count, views, depth);
     if !ACTIVE.load(Relaxed) {
         return;
     }
@@ -398,6 +399,7 @@ fn same(a: &D3D11_VIEWPORT, b: &D3D11_VIEWPORT) -> bool {
 /// Before each draw on any context: places the HUD's draws. Returns the layer's targets when the
 /// game routes this draw into one instead ([`Route::Layer`]).
 fn before_draw(context: *mut c_void, draw: &Draw) -> Option<[ID3D11RenderTargetView; 2]> {
+    crate::debug_depth::drew(context);
     let installed = SETUP.get()?;
     let setup = &installed.setup;
     if let Some(handle) = setup.handlers.draw {

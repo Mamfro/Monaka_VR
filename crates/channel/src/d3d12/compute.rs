@@ -18,11 +18,17 @@ pub fn blob_bytes(blob: &ID3DBlob) -> &[u8] {
 /// Compute shader `entry` of `source` (cs_5_0, optimised); the error names `name` and the entry
 /// and carries the compiler's text.
 pub fn compile(source: &str, name: &str, entry: PCSTR) -> Result<ID3DBlob, String> {
+    compile_for(source, name, entry, s!("cs_5_0"))
+}
+
+/// Shader `entry` of `source` for `target` (`vs_5_0`, `ps_5_0`, `cs_5_0`; optimised), as
+/// [`compile`].
+pub fn compile_for(source: &str, name: &str, entry: PCSTR, target: PCSTR) -> Result<ID3DBlob, String> {
     let mut code: Option<ID3DBlob> = None;
     let mut messages: Option<ID3DBlob> = None;
     // SAFETY: compiles our own source text into local out-pointers.
     let result = unsafe {
-        D3DCompile(source.as_ptr() as *const c_void, source.len(), PCSTR::null(), None, None, entry, s!("cs_5_0"), D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &mut code, Some(&mut messages))
+        D3DCompile(source.as_ptr() as *const c_void, source.len(), PCSTR::null(), None, None, entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &mut code, Some(&mut messages))
     };
     match (result, code) {
         (Ok(()), Some(code)) => Ok(code),

@@ -420,6 +420,173 @@ impl<'a> Code<'a> {
     }
 }
 
+/// A text in the image's data that holds what was looked for: where it starts, the whole text, and
+/// whether it is UTF-16.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Text {
+    pub rva: u32,
+    /// Where what was looked for starts in it (code may refer to a text from there: what reads as
+    /// the text's start can be a stray byte before it).
+    pub matched: u32,
+    pub text: String,
+    pub wide: bool,
+}
+
+/// A C++ class the image's RTTI names: its name (demangled where plain), its type descriptor, and
+/// each of its method tables (one per base it has a table for): the table's offset in the object,
+/// the table, and its methods.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Class {
+    pub name: String,
+    pub descriptor: u32,
+    pub tables: Vec<Table>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Table {
+    pub offset: u32,
+    pub rva: u32,
+    pub methods: Vec<u32>,
+}
+
+/// The longest text kept, the methods listed per table at most.
+const TEXT_MOST: usize = 256;
+const METHODS_MOST: usize = 128;
+
+impl Code<'_> {
+    /// Texts in the data sections that hold `text` (any case), byte strings and UTF-16 ones, at
+    /// most `most`, each once.
+    pub fn texts_containing(&self, text: &str, most: usize) -> Vec<Text> {
+        let mut found: Vec<Text> = Vec::new();
+        let narrow = text.as_bytes();
+        let wide: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        for section in self.sections.iter().filter(|s| !s.executable) {
+            let bytes = section.bytes;
+            for (needle, unit) in [(narrow, 1usize), (&wide[..], 2)] {
+                if needle.is_empty() {
+                    continue;
+                }
+                let mut at = 0;
+                while at + needle.len() <= bytes.len() && found.len() < most {
+                    if !bytes[at..at + needle.len()].eq_ignore_ascii_case(needle) || at % unit != 0 {
+                        at += 1;
+                        continue;
+                    }
+                    let (start, whole) = whole_text(bytes, at, unit);
+                    let rva = section.rva + start as u32;
+                    if !found.iter().any(|t| t.rva == rva) {
+                        found.push(Text { rva, matched: section.rva + at as u32, text: whole, wide: unit == 2 });
+                    }
+                    at += needle.len();
+                }
+            }
+        }
+        found
+    }
+
+    /// The functions that use each of `texts` (each function once per text): (the text's start,
+    /// the function, the instruction), referred to at its start or where the match began.
+    pub fn users(&self, texts: &[Text]) -> Vec<(u32, u32, u32)> {
+        let targets: Vec<u32> = texts.iter().flat_map(|t| [t.rva, t.matched]).collect();
+        let start_of = |target: u32| texts.iter().find(|t| t.rva == target || t.matched == target).map_or(target, |t| t.rva);
+        let mut out: Vec<(u32, u32, u32)> = self.references(&targets).into_iter().filter_map(|(target, site)| Some((start_of(target), self.function(site)?, site))).collect();
+        out.sort_unstable();
+        out.dedup_by_key(|(target, function, _)| (*target, *function));
+        out
+    }
+
+    /// The classes whose RTTI name holds `text` (any case), at most `most`: their method tables
+    /// found through their complete object locators.
+    pub fn classes(&self, text: &str, most: usize) -> Vec<Class> {
+        let names: Vec<Text> = self.texts_containing(text, most * 8).into_iter().filter(|t| !t.wide && (t.text.starts_with(".?AV") || t.text.starts_with(".?AU"))).take(most).collect();
+        names
+            .into_iter()
+            .map(|name| {
+                // A type descriptor: its table pointer, a spare pointer, then the name.
+                let descriptor = name.rva.saturating_sub(16);
+                let tables = self.locators(descriptor).into_iter().filter_map(|(locator, offset)| self.table_of(locator).map(|rva| Table { offset, rva, methods: self.methods(rva) })).collect();
+                Class { name: demangle(&name.text), descriptor, tables }
+            })
+            .collect()
+    }
+
+    /// Complete object locators of type descriptor `descriptor`: (locator, the table's offset in
+    /// the object). A 64-bit locator: signature 1, offset, constructor displacement offset, the
+    /// descriptor, the hierarchy, itself (each an RVA).
+    fn locators(&self, descriptor: u32) -> Vec<(u32, u32)> {
+        let mut found = Vec::new();
+        for section in self.sections.iter().filter(|s| !s.executable) {
+            let bytes = section.bytes;
+            let mut at = 0;
+            while at + 24 <= bytes.len() {
+                let word = |k: usize| u32::from_le_bytes([bytes[at + k], bytes[at + k + 1], bytes[at + k + 2], bytes[at + k + 3]]);
+                let rva = section.rva + at as u32;
+                if word(12) == descriptor && word(0) == 1 && word(20) == rva {
+                    found.push((rva, word(4)));
+                }
+                at += 4;
+            }
+        }
+        found
+    }
+
+    /// The method table that locator `locator` heads: the table follows the pointer to it.
+    fn table_of(&self, locator: u32) -> Option<u32> {
+        let wanted = self.base + locator as u64;
+        for section in self.sections.iter().filter(|s| !s.executable) {
+            let bytes = section.bytes;
+            let mut at = 0;
+            while at + 16 <= bytes.len() {
+                let value = u64::from_le_bytes(bytes[at..at + 8].try_into().ok()?);
+                if value == wanted {
+                    return Some(section.rva + at as u32 + 8);
+                }
+                at += 8;
+            }
+        }
+        None
+    }
+
+    /// The methods of the table at `table`: its pointers into code, up to the first that is not.
+    pub fn methods(&self, table: u32) -> Vec<u32> {
+        (0..METHODS_MOST as u32).map_while(|k| self.pointer_at(table + 8 * k).filter(|m| self.is_executable(*m))).collect()
+    }
+}
+
+/// The whole NUL-ended text around `at` in `bytes` (units of `unit` bytes): its start and text.
+fn whole_text(bytes: &[u8], at: usize, unit: usize) -> (usize, String) {
+    let printable = |k: usize| -> bool {
+        let Some(chunk) = bytes.get(k..k + unit) else { return false };
+        let value = if unit == 2 { u16::from_le_bytes([chunk[0], chunk[1]]) as u32 } else { chunk[0] as u32 };
+        // Wide texts are taken to be Latin: bytes before one read in pairs make other characters.
+        (0x20..0x7f).contains(&value) || value == 0x09 || (unit == 2 && (0xa0..0x100).contains(&value))
+    };
+    let mut start = at;
+    while start >= unit && at - start < TEXT_MOST * unit && printable(start - unit) {
+        start -= unit;
+    }
+    let mut end = at;
+    while end < bytes.len() && end - start < TEXT_MOST * unit && printable(end) {
+        end += unit;
+    }
+    let text = if unit == 2 {
+        String::from_utf16_lossy(&bytes[start..end].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect::<Vec<_>>())
+    } else {
+        String::from_utf8_lossy(&bytes[start..end]).into_owned()
+    };
+    (start, text)
+}
+
+/// An RTTI name made readable where it is plain: `.?AVname@space@@` is `space::name`; a template
+/// or other mangled name stays as it is.
+pub fn demangle(name: &str) -> String {
+    let Some(inner) = name.strip_prefix(".?AV").or_else(|| name.strip_prefix(".?AU")).and_then(|n| n.strip_suffix("@@")) else { return name.to_owned() };
+    if inner.contains(['?', '$']) {
+        return name.to_owned();
+    }
+    inner.split('@').rev().collect::<Vec<_>>().join("::")
+}
+
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     let first = *needle.first()?;
     let mut from = 0;
@@ -451,6 +618,36 @@ mod tests {
             assert!(strings.contains(&target));
             assert!(code.function(site).is_some(), "every confirmed reference is inside a function");
         }
+    }
+
+    #[test]
+    fn texts_holding_a_word_and_their_users_are_found() {
+        let folder = if cfg!(target_arch = "x86") { "Sysnative" } else { "System32" };
+        let bytes = std::fs::read(format!(r"C:\Windows\{folder}\kernelbase.dll")).expect("kernelbase.dll is readable");
+        let code = Code::from_file(&bytes).unwrap();
+        let texts = code.texts_containing("KERNEL32", 50);
+        assert!(texts.iter().any(|t| t.wide && t.text.to_ascii_lowercase().ends_with("kernel32.dll") && t.text.len() < 16), "{texts:?}");
+        let users = code.users(&texts);
+        assert!(!users.is_empty());
+        assert!(users.iter().all(|(target, function, _)| texts.iter().any(|t| t.rva == *target) && code.bytes(*function, 1).is_some()));
+    }
+
+    #[test]
+    fn classes_are_found_by_name_with_their_methods() {
+        let folder = if cfg!(target_arch = "x86") { "Sysnative" } else { "System32" };
+        let bytes = std::fs::read(format!(r"C:\Windows\{folder}\msvcp140.dll")).expect("msvcp140.dll is readable");
+        let code = Code::from_file(&bytes).unwrap();
+        let classes = code.classes("exception", 20);
+        let base = classes.iter().find(|c| c.name == "std::exception").expect("std::exception is named");
+        assert!(!base.tables.is_empty(), "its method table is found");
+        assert!(base.tables.iter().all(|t| !t.methods.is_empty() && t.methods.iter().all(|m| code.is_executable(*m))));
+    }
+
+    #[test]
+    fn plain_rtti_names_read_as_scoped_names() {
+        assert_eq!(demangle(".?AVarkSkinnedRenderModel@@"), "arkSkinnedRenderModel");
+        assert_eq!(demangle(".?AVexception@std@@"), "std::exception");
+        assert_eq!(demangle(".?AV?$basic_ios@DU?$char_traits@D@std@@@std@@"), ".?AV?$basic_ios@DU?$char_traits@D@std@@@std@@");
     }
 
     /// How much of a game executable decodes cleanly, function by function. Run with

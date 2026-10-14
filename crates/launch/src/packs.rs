@@ -396,7 +396,7 @@ mod tests {
         let Some(version) = text.strip_prefix("pack ") else { return Ok(None) };
         let (major, minor) = version.trim().split_once('.').unwrap();
         let contract = Contract { major: major.parse().unwrap(), minor: minor.parse().unwrap() };
-        Ok(Some(Pack { dll: dll.to_owned(), contract, about: About { author: "A:B".into(), source: "https://x".into() }, manifests: vec![GAME] }))
+        Ok(Some(Pack { dll: dll.to_owned(), contract, about: About { author: "A:B".into(), source: "https://x".into(), ..About::default() }, manifests: vec![GAME] }))
     }
 
     fn temp(name: &str) -> PathBuf {

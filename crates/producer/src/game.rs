@@ -637,6 +637,10 @@ pub fn start<G: Game>(session: &'static Session) -> Result<(), Rejection> {
     }
     let wanted: Vec<(usize, &'static Component<G>)> = serving.iter().zip(&decided).filter(|(_, (_, on))| *on).map(|(c, _)| *c).collect();
     let channel = if wanted.iter().any(|(_, c)| c.needs_channel) { Some(session.require_channel()?) } else { session.channel() };
+    if let Some(channel) = &channel {
+        crate::debug::open(channel);
+        crate::debug::game_settings(&monaka_core::rendering::summary(manifest.options, &options));
+    }
     crate::install_crash_log();
 
     let mut hooks = Hooks::default();
@@ -665,6 +669,7 @@ pub fn start<G: Game>(session: &'static Session) -> Result<(), Rejection> {
             Err(Lack::Fatal(rejection)) => {
                 ledger.restore();
                 undo(&mut installed);
+                crate::debug::close();
                 crate::remove_crash_log();
                 return Err(rejection);
             }
@@ -673,6 +678,7 @@ pub fn start<G: Game>(session: &'static Session) -> Result<(), Rejection> {
     let slot = Mutex::new(None);
     if let Err(rejection) = enable_hooks(&slot, hooks) {
         undo(&mut installed);
+        crate::debug::close();
         crate::remove_crash_log();
         return Err(rejection);
     }
@@ -685,6 +691,12 @@ pub fn start<G: Game>(session: &'static Session) -> Result<(), Rejection> {
         log!("features: {line}");
     }
     let timer = Timer::start::<G>(armed);
+    // The probe console, with the debug menu's other tools.
+    if let Some(channel) = &channel
+        && session.has(monaka_core::manifest::DEBUG_MENU_MARKER)
+    {
+        crate::console::open(channel);
+    }
     let ledgers = installed.into_iter().map(|(place, _, ledger)| (place, ledger)).collect();
     *RUN.locked() = Some(Running { hooks: slot, ledgers, available, armed, timer });
     Ok(())
@@ -703,10 +715,11 @@ fn undo<G: Game>(installed: &mut [(usize, &'static Component<G>, Ledger)]) {
 pub fn stop<G: Game>() -> Result<(), Rejection> {
     let Some(mut run) = RUN.locked().take() else { return Ok(()) };
     let on = armed::<G>(run.armed);
-    // Timed work ends before anything stops.
+    // Timed work ends before anything stops, and the console's probes come out.
     if let Some(timer) = run.timer.take() {
         timer.stop();
     }
+    crate::console::close();
     // Each component off in turn, newest first: from here its detours stop acting and its frame
     // work stops; then whatever else it does to stop new work.
     for (place, component) in on.iter().rev() {
@@ -753,6 +766,7 @@ pub fn stop<G: Game>() -> Result<(), Rejection> {
     for (_, component) in on.iter().rev() {
         step(component.name, "release", component.release);
     }
+    crate::debug::close();
     crate::remove_crash_log();
     Ok(())
 }

@@ -104,6 +104,8 @@ pub fn run(game: &Game, values: &Values, paths: &Paths, check: &Check, delay_sec
     let plan = games::plan(values, game, eye);
     let write = |name: &str, contents: &str| std::fs::write(folder.join(name), contents).map_err(|e| format!("cannot write {name}: {e}"));
     write("live-channel.txt", &channel)?;
+    // A check is research: the probe console is in.
+    write(monaka_core::manifest::DEBUG_MENU_MARKER, "")?;
     for (name, contents) in &plan.files {
         write(name, contents)?;
         report(Event::Detail(format!("{name}: {}", contents.replace('\n', " "))));

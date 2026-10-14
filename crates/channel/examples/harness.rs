@@ -17,7 +17,8 @@
 //! - `stick <left x> <left y> <right x> <right y>`: the gamepad's sticks (-1..=1).
 //! - `fingers <left|right> <bend>`: that hand's fingers tracked, every knuckle bent this far
 //!   toward the palm (degrees; 0 an open hand, 90 a fist); `fingers <left|right> off` stops.
-//! - `save <name>`: the next pair goes to `<name>-left.png` and `<name>-right.png` (half size),
+//! - `save <name> [full]`: the next pair goes to `<name>-left.png` and `<name>-right.png` (half
+//!   size by point sampling, or `full` at the pair's own size, for sub-pixel questions),
 //!   and each HUD panel the producer publishes (`<channel>-panel-<piece>`) to
 //!   `<name>-panel-<piece>.png` (over grey: the panels are premultiplied RGBA).
 //! - `reticle <left|right> [palm|head]` (or `reticle off`): the saved frames show the viewer's
@@ -61,7 +62,7 @@ enum Step {
     Pad { buttons: u16, triggers: [u8; 2] },
     Stick([f32; 4]),
     Fingers { side: usize, bend: Option<f32> },
-    Save(String),
+    Save(String, bool),
     Reticle(Option<(usize, bool)>),
     Focus(String),
     Key(u16),
@@ -94,7 +95,7 @@ fn scan_code(name: &str) -> Option<u16> {
 /// Presses and lets go of a key by scan code (what DirectInput games read).
 /// A saved pair: its name, the eyes, its pose record, the ring's point (tracking space) and its
 /// sequence.
-type SavedPair = (String, [ID3D11Texture2D; 2], Option<RenderedPair>, Option<[f32; 3]>, u64);
+type SavedPair = (String, bool, [ID3D11Texture2D; 2], Option<RenderedPair>, Option<[f32; 3]>, u64);
 
 fn press_key(scan: u16) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, SendInput};
@@ -238,7 +239,7 @@ fn parse_script(text: &str) -> Result<Vec<(u64, Step)>, String> {
                 triggers: [number(3)?.clamp(0.0, 255.0) as u8, number(4)?.clamp(0.0, 255.0) as u8],
             },
             Some("stick") => Step::Stick([number(2)?, number(3)?, number(4)?, number(5)?].map(|v| v.clamp(-1.0, 1.0))),
-            Some("save") => Step::Save(words.get(2).ok_or_else(|| bad("save takes a name"))?.to_string()),
+            Some("save") => Step::Save(words.get(2).ok_or_else(|| bad("save takes a name"))?.to_string(), words.get(3) == Some(&"full")),
             Some("reticle") => Step::Reticle(match words.get(2).copied() {
                 Some("off") => None,
                 Some("left") => Some((0, words.get(3) != Some(&"head"))),
@@ -289,16 +290,18 @@ fn unpack_10_bit(texture: &ID3D11Texture2D, texels: &mut [u8]) {
     }
 }
 
-/// Half-size PNG from tightly packed RGBA rows, with the ring at `ring` (centre and radius in
-/// full-size pixels) drawn over it.
-fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8], ring: Option<([f32; 2], f32)>) -> std::io::Result<()> {
-    let (w, h) = (width / 2, height / 2);
+/// PNG from tightly packed RGBA rows, half size by point sampling (or `full`), with the ring at
+/// `ring` (centre and radius in full-size pixels) drawn over it.
+fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8], ring: Option<([f32; 2], f32)>, full: bool) -> std::io::Result<()> {
+    let step = if full { 1 } else { 2 };
+    let (w, h) = (width / step, height / step);
     let mut pixels: Vec<u8> = (0..h)
-        .flat_map(|y| (0..w).map(move |x| ((y * 2 * width + x * 2) * 4) as usize))
+        .flat_map(|y| (0..w).map(move |x| ((y * step * width + x * step) * 4) as usize))
         .flat_map(|p| [rgba[p], rgba[p + 1], rgba[p + 2], 255])
         .collect();
     if let Some(([cx, cy], radius)) = ring {
-        draw_ring(&mut pixels, w, h, [cx * 0.5, cy * 0.5], radius * 0.5);
+        let scale = 1.0 / step as f32;
+        draw_ring(&mut pixels, w, h, [cx * scale, cy * scale], radius * scale);
     }
     std::fs::write(path, png::rgba(w, h, &pixels))
 }
@@ -376,7 +379,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut hand_poses: [Option<([f32; 3], f32, f32)>; 2] = [None, None];
     let mut finger_bends: [Option<f32>; 2] = [None, None];
     let mut gamepad = Gamepad::default();
-    let mut wanted: Vec<String> = Vec::new();
+    let mut wanted: Vec<(String, bool)> = Vec::new();
     let mut reticle: Option<(usize, bool)> = None;
     let mut menu_wanted: Option<bool> = None;
     let mut start_until: Option<Instant> = None;
@@ -407,7 +410,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let axis = |v: f32| (v * i16::MAX as f32) as i16;
                     (gamepad.thumb_lx, gamepad.thumb_ly, gamepad.thumb_rx, gamepad.thumb_ry) = (axis(s[0]), axis(s[1]), axis(s[2]), axis(s[3]));
                 }
-                Step::Save(name) => wanted.push(name.clone()),
+                Step::Save(name, full) => wanted.push((name.clone(), *full)),
                 Step::Reticle(r) => reticle = *r,
                 Step::Focus(exe) => {
                     if let Err(why) = focus(exe) {
@@ -476,11 +479,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     monaka_core::math::along(head.position, aim.orientation, RETICLE_DISTANCE)
                 })
             });
-            for save in wanted.drain(..) {
+            for (save, full) in wanted.drain(..) {
                 let copies = [texture()?, texture()?];
                 copy_texture(&context, &copies[0], targets[0]);
                 copy_texture(&context, &copies[1], targets[1]);
-                saved.push((save.clone(), copies, poses.read_pair(pair.sequence), ring, pair.sequence));
+                saved.push((save.clone(), full, copies, poses.read_pair(pair.sequence), ring, pair.sequence));
                 if with_depth && let Some(depths) = reader.depth_textures() {
                     let desc = monaka_channel::d3d::texture_desc(depths[0]);
                     let copies = [create_texture(&device, &desc)?, create_texture(&device, &desc)?];
@@ -516,7 +519,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::thread::sleep(Duration::from_millis(1));
     }
     println!("pairs read {pairs}");
-    for (name, eyes, record, ring, sequence) in &saved {
+    for (name, full, eyes, record, ring, sequence) in &saved {
         for (index, (eye, side)) in eyes.iter().zip(["left", "right"]).enumerate() {
             let (w, h, mut rgba) = read_image(&device, &context, eye)?;
             unpack_10_bit(eye, &mut rgba);
@@ -524,7 +527,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (Some(record), Some(point)) => project(record, index, *point, w, h).map(|(at, per_metre)| (at, per_metre * RETICLE_SIZE * 0.5)),
                 _ => None,
             };
-            write_png(&folder.join(format!("{name}-{side}.png")), w, h, &rgba, drawn)?;
+            write_png(&folder.join(format!("{name}-{side}.png")), w, h, &rgba, drawn, *full)?;
         }
         println!("saved {name} (pair {sequence}){}", if ring.is_some() && record.is_none() { " (no pose record: ring not drawn)" } else { "" });
     }
@@ -548,7 +551,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     [g, g, g, 255]
                 })
                 .collect();
-            write_png(&folder.join(format!("{name}-depth-{side}.png")), w, h, &rgba, None)?;
+            write_png(&folder.join(format!("{name}-depth-{side}.png")), w, h, &rgba, None, false)?;
         }
     }
     for (name, panel) in &saved_panels {
@@ -560,7 +563,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 *c = (u32::from(*c) + 128 * (255 - a) / 255).min(255) as u8;
             }
         }
-        write_png(&folder.join(format!("{name}.png")), w, h, &rgba, None)?;
+        write_png(&folder.join(format!("{name}.png")), w, h, &rgba, None, false)?;
         println!("saved {name}");
     }
     Ok(())

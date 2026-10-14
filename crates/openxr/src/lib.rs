@@ -597,6 +597,12 @@ impl Session<'_> {
         self.swapchain(format, width, height, sys::SWAPCHAIN_USAGE_TRANSFER_DST_BIT | sys::SWAPCHAIN_USAGE_SAMPLED_BIT)
     }
 
+    /// A swapchain filled by copies and by drawing into it (a render target), sampled by the
+    /// compositor: the eyes, which the viewer draws its debug views over.
+    pub fn create_drawn_swapchain(&self, format: i64, width: u32, height: u32) -> Result<Swapchain<'_>> {
+        self.swapchain(format, width, height, sys::SWAPCHAIN_USAGE_TRANSFER_DST_BIT | sys::SWAPCHAIN_USAGE_SAMPLED_BIT | sys::SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT)
+    }
+
     /// A depth swapchain (a depth format such as `DXGI_FORMAT_D32_FLOAT`) filled by copies, for
     /// [`DepthView`]s.
     pub fn create_depth_swapchain(&self, format: i64, width: u32, height: u32) -> Result<Swapchain<'_>> {

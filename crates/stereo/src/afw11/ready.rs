@@ -63,6 +63,14 @@ fn install<G: Presents + FrameInputs11>(start: &mut Start<'_, G>) -> Result<(), 
     if hud {
         afw.enable_hud(&device).map_err(|e| format!("HUD layer: {e}")).missing()?;
     }
+    // A debug view in the warped eye: `afw_sources=tint` (where each pixel came from), `depth`,
+    // `fill` (the eye's own last frame alone) or `primary` (the real eye's frame alone).
+    let sources = start.options.choice("afw_sources", &[("tint", 1), ("depth", 2), ("fill", 3), ("primary", 4)], 0);
+    if sources > 0 {
+        afw.show_sources(sources);
+        let shown = ["", "where each pixel came from", "its depth", "its own last frame alone", "the real eye's frame alone"];
+        log!("frame warping: the warped eye shows {}", shown[sources as usize]);
+    }
     let mut state = STATE.locked();
     state.0.afw = Some(afw);
     state.0.game = Some(GameFns { scene_depth: G::scene_depth, eye_rects: crate::hud11::eye_rects::<G>, presenting: G::presenting });
@@ -184,6 +192,9 @@ pub fn before_present(driver: &Driver, chain: &IDXGISwapChain, n: u64) -> bool {
 
 fn log_report(_: f64) {
     log!("{}", report());
+    if let Some(apart) = STATE.lock().ok().and_then(|mut s| s.0.afw.as_mut().and_then(Afw11::take_fill_apart)) {
+        log!("frame warping: the fill's camera up to {:.1} mm from the camera it was warped to", apart * 1000.0);
+    }
 }
 
 /// The periodic report's line (the core's, [`afw::report_line`]): no depth goes with the pairs and

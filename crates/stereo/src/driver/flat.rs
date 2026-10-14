@@ -22,27 +22,35 @@ pub enum Flat {
     WorldHidden,
     /// A camera other than the player's shows the view.
     CameraTaken,
+    /// Nothing in the game's frames is known yet (a game being explored): each is shown as the
+    /// game drew it.
+    Screen,
 }
 
 impl Flat {
-    pub const ALL: [Flat; 4] = [Flat::Menu, Flat::Video, Flat::WorldHidden, Flat::CameraTaken];
+    pub const ALL: [Flat; 5] = [Flat::Menu, Flat::Video, Flat::WorldHidden, Flat::CameraTaken, Flat::Screen];
 
-    /// The run's situation of the same meaning.
-    pub const fn situation(self) -> Situation {
+    /// The run's situation of the same meaning (none for [`Flat::Screen`], which is no situation
+    /// in the game).
+    pub const fn situation(self) -> Option<Situation> {
         match self {
-            Flat::Menu => Situation::Menu,
-            Flat::Video => Situation::Video,
-            Flat::WorldHidden => Situation::WorldHidden,
-            Flat::CameraTaken => Situation::CameraTaken,
+            Flat::Menu => Some(Situation::Menu),
+            Flat::Video => Some(Situation::Video),
+            Flat::WorldHidden => Some(Situation::WorldHidden),
+            Flat::CameraTaken => Some(Situation::CameraTaken),
+            Flat::Screen => None,
         }
     }
 
     pub fn from_situation(situation: Situation) -> Option<Flat> {
-        Flat::ALL.into_iter().find(|f| f.situation() == situation)
+        Flat::ALL.into_iter().find(|f| f.situation() == Some(situation))
     }
 
     pub const fn label(self) -> &'static str {
-        self.situation().label()
+        match self.situation() {
+            Some(situation) => situation.label(),
+            None => "the game on a screen",
+        }
     }
 
     /// The reason the frame about to present goes flat: the game's detector first, then its menu,

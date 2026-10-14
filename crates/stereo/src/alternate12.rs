@@ -107,6 +107,9 @@ impl AlternatePublisher12 {
     ) -> Step {
         let Some(eye) = self.schedule.shown_eye(n) else { return Step::Waiting };
         let slots = self.schedule.pair_slots(n);
+        if eye == 1 {
+            self.pairs.name_eyes(self.schedule.pair_keys(n));
+        }
         self.show(swap, queue, eye, [self.ring[slots[0]], self.ring[slots[1]]], depth(eye), head, report)
     }
 

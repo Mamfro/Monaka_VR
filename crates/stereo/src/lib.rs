@@ -56,6 +56,8 @@ pub mod afw11;
 pub mod afw12;
 pub mod alternate;
 pub mod alternate12;
+pub mod debug_depth;
+pub mod debug_targets;
 pub mod depth_layer;
 pub mod driver;
 pub mod eye_site;

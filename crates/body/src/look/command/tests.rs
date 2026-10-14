@@ -45,3 +45,25 @@ fn head_share_reads_yaw_and_pitch() {
     let share = head_share([cy * sp, sy * cp, -sy * sp, cy * cp]);
     assert!((share.yaw - y).abs() < 1e-4 && (share.pitch - p).abs() < 1e-4, "{share:?}");
 }
+
+#[test]
+fn a_camera_that_turns_by_the_angles_keeps_the_share_as_it_was() {
+    let _serial = crate::look::tests::serial();
+    let held = Share { yaw: 60f32.to_radians(), pitch: 10f32.to_radians() };
+    let run = |holds: fn() -> bool| {
+        *GAME.locked() = Some(GameFns { camera_taken: || true, head: || Some(HeadPose::synthetic(5.0, 0.0, HeadPose::SYNTHETIC_FOV, 0.064)), holds });
+        PAUSE_HOLD.store(false, Relaxed);
+        AIMING.store(true, Relaxed);
+        *STATE.locked() = State { held, commands: 0, aimed: 0, last_command: None, holding_after_pause: 0, pauses: 0 };
+        let angles = built(240.0, 215.0);
+        // Left as the other tests expect it: nothing aiming or held.
+        AIMING.store(false, Relaxed);
+        HOLDING.store(false, Release);
+        *GAME.locked() = None;
+        (angles, std::mem::take(&mut STATE.locked().held))
+    };
+    // A mounted gun: the angles stay, so the gun sees no turn from the head.
+    assert_eq!(run(|| true), (Some((240.0, 215.0)), held));
+    // A cutscene's camera: the share goes out.
+    assert_eq!(run(|| false), (Some(reshare(240.0, 215.0, held, Share::default())), Share::default()));
+}

@@ -3,7 +3,7 @@ use monaka_core::depth::DepthMapping;
 use monaka_core::math::Vec3;
 use monaka_core::protocol::DepthParams;
 use monaka_framegen::ffx::Float2;
-use monaka_framegen::inputs::{Place, PreviousFrame};
+use monaka_framegen::inputs::Place;
 use monaka_framegen::upscale::{GameDispatch, GameResource, create};
 use monaka_streamline::{Constants, constants as at};
 
@@ -56,7 +56,7 @@ fn the_motion_passes_rebase_onto_each_eyes_previous_image_from_what_the_game_mea
     };
     let disparity = 0.064 * 1.036 / 2.0;
     // The game had the left eye's frame before: its vectors reach it, over one frame.
-    let other = motion_constants(&views, &previous, 1, PreviousFrame::OtherEye, &views, scale, [1440, 1600]).unwrap();
+    let other = motion_constants(&views, previous[0].unwrap(), 1.0, 1, &views, scale, [1440, 1600]).unwrap();
     let (real, warped) = (other[1], other[0]);
     assert!((through(&real.game_to_prev, seen_by_right) - disparity).abs() < 2e-3, "the game's previous frame is the left eye's");
     assert!(through(&real.same_to_prev, seen_by_right).abs() < 1e-5, "the right eye's previous image is its own view, the head still");
@@ -67,12 +67,17 @@ fn the_motion_passes_rebase_onto_each_eyes_previous_image_from_what_the_game_mea
     assert_eq!(warped.size, [1440, 1600]);
     // The game rendered the right eye against its own frame before, two frames back: its vectors
     // reach that frame, and carry two frames of object motion.
-    let own = motion_constants(&views, &previous, 1, PreviousFrame::OwnEye { frames_back: 2 }, &views, scale, [1440, 1600]).unwrap();
+    let own = motion_constants(&views, previous[1].unwrap(), 0.5, 1, &views, scale, [1440, 1600]).unwrap();
     assert!(through(&own[1].game_to_prev, seen_by_right).abs() < 1e-5, "the game's previous frame is the right eye's own");
     assert_eq!(own[1].object_scale, 0.5);
-    // Without the frame the game's vectors reach, nothing.
-    assert!(motion_constants(&views, &[Some(left), None], 1, PreviousFrame::OwnEye { frames_back: 2 }, &views, scale, [1440, 1600]).is_none());
-    assert!(motion_constants(&views, &[None, Some(right)], 1, PreviousFrame::OtherEye, &views, scale, [1440, 1600]).is_none());
+}
+
+#[test]
+fn the_dominant_eye_renders_every_present_but_one_in_each_run() {
+    let right: Vec<usize> = (0..REFRESH * 2).map(dominant_eye).collect();
+    assert_eq!(right.iter().filter(|&&eye| eye == 1).count() as u64, 2 * (REFRESH - 1), "{right:?}");
+    assert_eq!((right[REFRESH as usize - 1], right[2 * REFRESH as usize - 1]), (0, 0), "the left eye at the end of each run");
+    assert_eq!(right[0], 1);
 }
 
 #[test]
@@ -298,7 +303,8 @@ fn each_present_makes_a_pair_whose_gaps_come_from_the_warped_eyes_own_last_frame
     let device = device();
     // SAFETY: creates a direct queue on a live device.
     let queue: ID3D12CommandQueue = unsafe { device.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC { Type: D3D12_COMMAND_LIST_TYPE_DIRECT, ..Default::default() }) }.unwrap();
-    let mut afw = Afw12::new(&device, 1).unwrap();
+    // The warp used wherever it has pixels (the fill first would show the eye's own frame on the wall).
+    let mut afw = Afw12::new(&device, 1, RULES.fill_first(false)).unwrap();
     // Eyes 1 m apart, square pixels and a 90 degree view, a wall 2 m away: the eyes see it 16
     // pixels apart on a 64 pixel wide image.
     let size = (64, 8);
@@ -318,11 +324,13 @@ fn each_present_makes_a_pair_whose_gaps_come_from_the_warped_eyes_own_last_frame
         pair
     };
 
-    // The left eye first: the right eye is all warped, its right edge continued.
+    // The left eye first: the right eye is all warped, its right edge continued. A warped pixel's
+    // alpha says where it came from (`reproject.hlsl`): 255 the real eye, 170 the eye's own last
+    // frame, 85 a neighbour.
     let pair = present(&mut afw, 0, red);
     assert_eq!((pair.real_eye, pair.filled), (0, false));
     assert_eq!(pixel(&queue, &pair.images[0], 30, 4), [255, 0, 0, 255], "the real eye on the left");
-    assert_eq!(pixel(&queue, &pair.images[1], 60, 4), [255, 0, 0, 255]);
+    assert_eq!(pixel(&queue, &pair.images[1], 60, 4), [255, 0, 0, 85], "continued from a neighbour");
     // Then the right eye: the left eye's left edge, which the right eye could not see, comes
     // from the left eye's own last real frame.
     let pair = present(&mut afw, 1, green);
@@ -330,7 +338,7 @@ fn each_present_makes_a_pair_whose_gaps_come_from_the_warped_eyes_own_last_frame
     assert_eq!(pair.previous, [Some(left), None], "the left eye's frame before; the right eye had none");
     assert_eq!(pixel(&queue, &pair.images[1], 30, 4), [0, 255, 0, 255], "the real eye on the right");
     assert_eq!(pixel(&queue, &pair.images[0], 40, 4), [0, 255, 0, 255], "warped from the right eye");
-    assert_eq!(pixel(&queue, &pair.images[0], 5, 4), [255, 0, 0, 255], "the gap from its own last frame");
+    assert_eq!(pixel(&queue, &pair.images[0], 5, 4), [255, 0, 0, 170], "the gap from its own last frame");
     // Both eyes' depth: the wall, each in its own view.
     let (_, _, pitch, bytes) = read_texture(&queue, &afw.depth(0).unwrap().0.clone(), common).unwrap();
     let wall = f32::from_le_bytes(bytes[2 * pitch + 20 * 4..][..4].try_into().unwrap());

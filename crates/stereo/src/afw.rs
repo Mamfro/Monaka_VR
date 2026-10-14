@@ -172,15 +172,36 @@ pub struct Rules {
     /// A labelled frame that was not warped goes out beside the other eye's newest frame, when that
     /// is the frame just before (plain alternate eyes). Without, it publishes nothing.
     pub plain_pairs: bool,
+    /// Where the warped eye's own last real frame shows the same surface as the warp (its depth
+    /// agrees), that frame's pixels go out instead of the warped ones: what stands still is seen as
+    /// the eye last rendered it, not as the other eye saw it, so a real frame and a warped one
+    /// alternate without a blink. Without, the warp is used wherever it has pixels.
+    pub fill_first: bool,
 }
 
 impl Rules {
     /// Every rule: an old frame (from before a pause or a cut) fills nothing, menus go flat, a
-    /// frame not warped still goes out.
-    pub const WHOLE: Self = Self { fill_age: Some(4), flat_frames: true, plain_pairs: true };
+    /// frame not warped still goes out, the eye's own frame first.
+    pub const WHOLE: Self = Self { fill_age: Some(4), flat_frames: true, plain_pairs: true, fill_first: true };
     /// Warped pairs only: the other eye's newest frame fills whatever its age, and a frame not
     /// warped (a menu, a loading screen, no depth) publishes nothing.
-    pub const WARPED_ONLY: Self = Self { fill_age: None, flat_frames: false, plain_pairs: false };
+    pub const WARPED_ONLY: Self = Self { fill_age: None, flat_frames: false, plain_pairs: false, fill_first: false };
+
+    /// These rules on a schedule that renders one eye `refresh` presents in a row: that eye's frames
+    /// fill the other eye's gaps for that long.
+    pub const fn every(self, refresh: u64) -> Self {
+        let fill_age = match self.fill_age {
+            Some(age) if age > refresh + 1 => Some(age),
+            Some(_) => Some(refresh + 1),
+            None => None,
+        };
+        Self { fill_age, ..self }
+    }
+
+    /// These rules with the eye's own frame first, or not.
+    pub const fn fill_first(self, on: bool) -> Self {
+        Self { fill_first: on, ..self }
+    }
 }
 
 /// Each eye's newest real frame: how it was rendered and the warp it came at. The backend keeps its
@@ -338,12 +359,14 @@ impl Presents {
 
     /// Frame generation starts on eye `eye`'s pair at `present`: the last pair (taken: it is this
     /// pair's once both streams were given it, [`Presents::generated`]), and whether the history
-    /// runs on: the last pair was the other eye's frame of the present before and the game kept its
-    /// own history (no `reset`). A warped eye whose gaps got no fill from its own last frame keeps
-    /// its history: a stretched gap interpolates worse than a pair lost to a reset shows.
+    /// runs on: the last pair was the present before's, whichever eye it rendered, and the game
+    /// kept its own history (no `reset`). A warped eye whose gaps got no fill from its own last
+    /// frame keeps its history: a stretched gap interpolates worse than a pair lost to a reset
+    /// shows.
     pub fn generation(&mut self, eye: usize, present: u64, reset: bool) -> (Option<Previous>, bool) {
+        let _ = eye;
         let previous = self.previous.take();
-        let continuous = previous.is_some_and(|p| p.eye != eye && p.present + 1 == present) && !reset;
+        let continuous = previous.is_some_and(|p| p.present + 1 == present) && !reset;
         (previous, continuous)
     }
 

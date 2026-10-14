@@ -11,13 +11,17 @@
 //! - [`reader`]: the reading end of either transport, for the viewer and the probe.
 //! - [`d3d`], [`d3d12`]: small Direct3D helpers the transports and the producers share.
 
+pub mod console;
 pub mod d3d;
+pub mod debug;
+pub mod debug_image;
 pub mod d3d12;
 pub mod fence;
 pub mod fence11;
 pub mod fingers;
 pub mod hands;
 pub mod keyed;
+pub mod page;
 pub mod pose;
 pub mod reader;
 pub mod reticles;

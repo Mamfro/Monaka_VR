@@ -18,5 +18,7 @@ RWTexture2D<unorm float4> Out : register(u0);
         int3 p = int3(s, 0);
         c.rgb = saturate(OverPremultiplied(c.rgb, FromMatte(Black.Load(p).rgb, White.Load(p).rgb)));
     }
-    Out[id.xy] = float4(c.rgb, 1);
+    // The alpha as it was: the headset ignores it, and a warped eye carries where each pixel came
+    // from there (reproject.hlsl), for captures.
+    Out[id.xy] = c;
 }

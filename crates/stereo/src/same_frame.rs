@@ -16,7 +16,11 @@
 //!   laid over each); pairs over the fence channel. Its pair sink ([`d3d12::sink`]) takes whole
 //!   pairs from the features that make their own (per-eye frame generation, a game's own method).
 //! - [`gl`]: both eyes drawn side by side in one OpenGL frame, read back at `SwapBuffers` onto a
-//!   D3D11 device of the loop's own and split; pairs over the keyed-mutex channel.
+//!   D3D11 device of the loop's own and split; pairs over the keyed-mutex channel. Or one eye per
+//!   frame with its depth, the other eye warped from it ([`gl::GlWarp`], `crate::afw11`).
+//! - [`side_by_side`]: both eyes drawn side by side in one D3D12 or D3D11 back buffer (an engine's
+//!   own stereo), its halves copied out at the present on the swapchain's device; pairs over the
+//!   fence channel.
 //!
 //! Which eye a presented frame is comes from the game's frame labels ([`PairLoop::presenting`]), or,
 //! for a frame with both eyes in it, from the loop's own tickets: the eye site issues one when it
@@ -34,6 +38,7 @@ pub mod d3d12;
 pub mod gl;
 #[cfg(test)]
 mod lift_checks;
+pub mod side_by_side;
 #[cfg(test)]
 mod tests;
 pub mod timing;
@@ -67,6 +72,9 @@ pub enum Output {
     /// One OpenGL frame per pair ([`gl`]): both eyes side by side, or (`side_by_side` false) the
     /// whole frame to both eyes.
     OpenGl { side_by_side: bool },
+    /// One D3D12 or D3D11 present per pair, both eyes side by side in its back buffer
+    /// ([`side_by_side`]).
+    SideBySide,
 }
 
 /// An eye's HUD at its present: the game's HUD layer (in COMMON, the frame's size) and how it goes
@@ -129,6 +137,8 @@ pub struct PairLoop<G: Game> {
     pub paused: Option<fn()>,
     /// PC checks: stereo kept off, every frame mono (stereo never resumes, [`Pairs::resume`]).
     pub mono: fn() -> bool,
+    /// OpenGL: frame warping for this run (the game draws one eye per frame), or none.
+    pub warp: fn(&Start<'_, G>) -> Option<gl::GlWarp>,
 }
 
 impl<G: Game> PairLoop<G> {
@@ -152,6 +162,7 @@ impl<G: Game> PairLoop<G> {
             rate: None,
             paused: None,
             mono: || false,
+            warp: |_| None,
         }
     }
 }
@@ -253,7 +264,8 @@ fn install<G: PresentsPairs + EyeSite>(start: &mut Start<'_, G>) -> Result<(), L
         // SAFETY: called at start, before the hooks are enabled.
         Output::D3D11 => unsafe { d3d11::install(start.hooks, channel)? },
         Output::D3D12 => d3d12::install(channel),
-        Output::OpenGl { side_by_side } => gl::install(channel, side_by_side),
+        Output::OpenGl { side_by_side } => gl::install(channel, side_by_side, (game.warp)(start)),
+        Output::SideBySide => side_by_side::install(channel),
     }
     (game.entry)(start)?;
     G::install(start)
@@ -277,6 +289,7 @@ fn give_back() {
 fn release() {
     d3d11::close();
     d3d12::close();
+    side_by_side::close();
     gl::release();
     PAIRS.head.close();
     let mut tickets = PAIRS.tickets.locked();
@@ -563,6 +576,7 @@ impl Pairs {
             Some(Output::D3D11) => d3d11::report(),
             Some(Output::D3D12) => d3d12::report(),
             Some(Output::OpenGl { .. }) => gl::report(),
+            Some(Output::SideBySide) => side_by_side::report(),
             None => String::new(),
         };
         if !output.is_empty() {

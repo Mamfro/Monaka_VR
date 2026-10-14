@@ -15,6 +15,7 @@ monaka_body = { path = "crates/body" }
 monaka_core = { path = "crates/core" }
 monaka_channel = { path = "crates/channel" }
 monaka_openxr = { path = "crates/openxr" }
+monaka_overlay = { path = "crates/overlay" }
 monaka_framegen = { path = "crates/framegen" }
 monaka_fsr11 = { path = "crates/fsr11" }
 monaka_gl = { path = "crates/gl" }
@@ -25,6 +26,7 @@ monaka_producer = { path = "crates/producer" }
 monaka_stereo = { path = "crates/stereo" }
 monaka_streamline = { path = "crates/streamline" }
 monaka_warp = { path = "crates/warp" }
+monaka_vulkan = { path = "crates/vulkan" }
 windows = "0.62"
 
 [workspace.lints.rust]
@@ -36,3 +38,5 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+# Small edits rebuild in seconds (each crate recompiles only what changed).
+incremental = true

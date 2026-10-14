@@ -68,6 +68,8 @@ const PASSES: u32 = 3;
 const SETS: u32 = 8;
 
 pub struct Reprojector12 {
+    /// The fill first where its depth agrees with the primary's (`reproject.hlsl`).
+    pub fill_first: bool,
     device: ID3D12Device,
     root: ID3D12RootSignature,
     clear: ID3D12PipelineState,
@@ -111,6 +113,7 @@ impl Reprojector12 {
         let root = compute::root_signature(device, CONSTANTS, &[Table { srvs: 6, uavs: 4 }]).map_err(Error::Shader)?;
         let pipeline = |entry| compute::shader_pipeline(device, &root, REPROJECT12_SOURCE, "reproject12.hlsl", entry).map_err(Error::Shader);
         Ok(Self {
+            fill_first: false,
             clear: pipeline(s!("Clear"))?,
             splat: pipeline(s!("Splat"))?,
             paint: pipeline(s!("Paint"))?,
@@ -159,7 +162,7 @@ impl Reprojector12 {
         self.next = self.next.wrapping_add(1);
         let layers = self.layers.as_ref().expect("made above");
         let out_area = out_depth.map(|depth| depth_area(out.depth_rect.or(primary.depth_rect), (depth.Width as u32, depth.Height)));
-        let constants = Constants::redraw(view, out_area.map(|(_, size)| size), out_area.map_or([0, 0], |(origin, _)| origin));
+        let constants = Constants::redraw(view, out_area.map(|(_, size)| size), out_area.map_or([0, 0], |(origin, _)| origin), self.fill_first);
         // The two splats, each with its source's views and its layer's.
         let sources = [Some(primary), fill];
         let mut splats: [Option<Constants>; 2] = [None, None];
@@ -184,11 +187,17 @@ impl Reprojector12 {
             }
             splats[k] = source.map(|(_, c)| c);
         }
-        // The resolves: both layers read, the outputs written.
+        // The resolves: both layers read, the outputs written, the primary's depth read (asking its
+        // eye about the fill).
         let set = base + VIEWS * 2;
+        let resolve = constants.resolve(splats[0].as_ref());
         // SAFETY: views of live textures (or null views) into our own heap.
         unsafe {
             self.null_sources(set, format);
+            if splats[0].is_some() {
+                let depth_format = depth_read_format(primary.depth.GetDesc().Format).ok_or(Error::Unsupported("depth format"))?;
+                self.device.CreateShaderResourceView(primary.depth, Some(&srv_desc(depth_format)), self.heap.cpu(set + 1));
+            }
             self.device.CreateShaderResourceView(&layers[0].image, Some(&srv_desc(format)), self.heap.cpu(set + 2));
             self.device.CreateShaderResourceView(&layers[1].image, Some(&srv_desc(format)), self.heap.cpu(set + 3));
             self.device.CreateShaderResourceView(&layers[0].keys, Some(&srv_desc(DXGI_FORMAT_R32_UINT)), self.heap.cpu(set + 4));
@@ -245,7 +254,7 @@ impl Reprojector12 {
                 barrier(list, &layer.image, UAV, SRV);
             }
             list.SetComputeRootDescriptorTable(1, self.heap.gpu(base + VIEWS * 2));
-            set_constants(&constants);
+            set_constants(&resolve);
             barrier(list, out.color, COMMON, UAV);
             list.SetPipelineState(&self.resolve);
             let (gx, gy) = groups(view.width, view.height);

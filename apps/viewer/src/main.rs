@@ -6,8 +6,9 @@
 //! monaka_viewer --gpu-map <channel> --loader <openxr_loader.dll> [--runtime <manifest.json>]
 //!             [--seconds N] [--pixel-aspect A] [--screen-width M] [--reticle left|right]... [--reticle-from head|palm]
 //!             [--dpad-hold left,right] [--menu-reach same|other|off] [--menu-pick buttons|stick] [--menu-reach-depth CM] [--act-like touch|index]
-//!             [--controller-smoothing 0-10] [--stop-event <name>]
+//!             [--controller-smoothing 0-10] [--stop-event <name>] [--captures <folder>]
 //! monaka_viewer --info --loader <openxr_loader.dll> [--runtime <manifest.json>]
+//! monaka_viewer --gpu-map <channel> --desktop [--seconds N] [--captures <folder>] [--stop-event <name>]
 //! ```
 //!
 //! Pairs that come with the head poses they were rendered from go out as a projection layer, so
@@ -17,16 +18,29 @@
 //! block, for hand aim and for putting the game's hand on the controller, steadied first
 //! ([`smooth`]). Where the eyes look goes with each head pose when the headset tracks them
 //! ([`gaze`]), and each eye's depth goes with the projection layer when the producer sends it and
-//! the runtime takes it ([`depth`]).
+//! the runtime takes it ([`depth`]). Start and Back held together save what the headset shows
+//! ([`chord`], [`capture`]).
 #![deny(unsafe_code)]
 
+mod capture;
+mod chord;
+mod clipboard;
 mod console;
+mod console_feed;
+mod debug_menu;
+mod debug_panels;
+mod debug_views;
 mod depth;
+mod desktop;
 mod gaze;
+mod meter;
+mod monaka_menu;
 mod pad;
 mod panel;
 mod reach;
+mod recorder;
 mod smooth;
+mod view_commands;
 
 use monaka_channel::d3d::{self, create_texture, find_adapter, simple_texture_desc};
 use monaka_channel::fingers::FingerChannel;
@@ -49,10 +63,30 @@ const SCREEN_DISTANCE: f32 = 2.0;
 /// A producer that publishes nothing for this long has stopped; the viewer ends.
 const PRODUCER_SILENCE_MS: u64 = 15_000;
 
+/// The producer's channel once it is made (with its first frame), waiting up to `seconds`; a stop
+/// asked for meanwhile (the game gone, the player) ends the wait.
+pub(crate) fn wait_for_producer(name: &ChannelName, seconds: u64) -> Result<reader::Description, String> {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    loop {
+        if let Some(description) = reader::wait_for(name, Duration::from_millis(100)) {
+            return Ok(description);
+        }
+        if console::stop_requested() {
+            return Err("stopped before the game drew a frame".into());
+        }
+        if Instant::now() >= deadline {
+            return Err("no GPU stereo producer became ready".into());
+        }
+    }
+}
+
 struct Args {
     channel: Option<ChannelName>,
     info: bool,
     seconds: u64,
+    /// How long to wait for the producer's first frame (`--producer-wait`): longer for a game
+    /// joined as it starts, which reaches its first frame later.
+    producer_wait: u64,
     pixel_aspect: f32,
     screen_width: f32,
     loader: PathBuf,
@@ -77,6 +111,14 @@ struct Args {
     proxy: pad::Proxy,
     /// How hard the controllers' poses are steadied ([`smooth`]; 0 off, 10 strongest).
     controller_smoothing: f32,
+    /// Where captures of what the headset shows go ([`capture`]; the run's folder).
+    captures: Option<PathBuf>,
+    /// Back held opens the debug menu (`--debug-menu`); without it Back is a plain button.
+    debug_menu: bool,
+    /// The options the Monaka menu (Start held) offers, `id=value,id=value` (`--live`).
+    live: String,
+    /// The 2D window instead of the headset (`--desktop`, [`desktop`]).
+    desktop: bool,
 }
 
 /// The launcher passes `--controller-smoothing` only away from Monaka's default, so that is ours too.
@@ -89,11 +131,19 @@ fn smoothing_default() -> f32 {
 
 fn parse_args() -> Result<Args, String> {
     let mut args =
-        Args { channel: None, info: false, seconds: 30, pixel_aspect: 1.0, screen_width: 2.4, loader: PathBuf::new(), runtime: None, reticles: [false; 2], reticle_palm: false, panel_nearest: 0.0, dpad_hold: 0, menu_reach: Some(reach::Pick::Same), menu_pick: reach::PickWith::Buttons, menu_reach_depth: reach::DEPTH, proxy: pad::Proxy::None, controller_smoothing: smoothing_default() };
+        Args { channel: None, info: false, seconds: 30, producer_wait: 30, pixel_aspect: 1.0, screen_width: 2.4, loader: PathBuf::new(), runtime: None, reticles: [false; 2], reticle_palm: false, panel_nearest: 0.0, dpad_hold: 0, menu_reach: Some(reach::Pick::Same), menu_pick: reach::PickWith::Buttons, menu_reach_depth: reach::DEPTH, proxy: pad::Proxy::None, controller_smoothing: smoothing_default(), captures: None, debug_menu: false, live: String::new(), desktop: false };
     let mut words = std::env::args().skip(1);
     while let Some(flag) = words.next() {
         if flag == "--info" {
             args.info = true;
+            continue;
+        }
+        if flag == monaka_core::manifest::DESKTOP_ARG {
+            args.desktop = true;
+            continue;
+        }
+        if flag == monaka_core::manifest::DEBUG_MENU_ARG {
+            args.debug_menu = true;
             continue;
         }
         let value = words.next().ok_or_else(|| format!("{flag} needs a value"))?;
@@ -101,6 +151,7 @@ fn parse_args() -> Result<Args, String> {
         match flag.as_str() {
             "--gpu-map" => args.channel = Some(ChannelName::new(value.clone()).ok_or("bad channel name")?),
             "--seconds" => args.seconds = number("--seconds")? as u64,
+            "--producer-wait" => args.producer_wait = number("--producer-wait")? as u64,
             "--pixel-aspect" => args.pixel_aspect = number("--pixel-aspect")? as f32,
             "--screen-width" => args.screen_width = number("--screen-width")? as f32,
             // The hand panels sit no nearer the head than this (metres; 0: on the hand as it is).
@@ -127,6 +178,8 @@ fn parse_args() -> Result<Args, String> {
             }
             // A layout test: the controllers act like Quest's or Index's.
             "--act-like" => args.proxy = pad::Proxy::parse(&value)?,
+            // The options the Monaka menu offers, with their values.
+            monaka_core::manifest::LIVE_ARG => args.live = value,
             "--loader" => args.loader = PathBuf::from(&value),
             "--runtime" => args.runtime = Some(PathBuf::from(&value)),
             "--reticle" => {
@@ -146,6 +199,7 @@ fn parse_args() -> Result<Args, String> {
             }
             // A launcher without a console stops the viewer by setting this event.
             "--stop-event" => console::watch_stop_event(&value)?,
+            "--captures" => args.captures = Some(PathBuf::from(&value)),
             // Accepted and ignored for launch scripts that pass it: the gaze goes to the game with
             // every head pose when the headset tracks the eyes.
             "--gaze-log" => {}
@@ -158,7 +212,7 @@ fn parse_args() -> Result<Args, String> {
     if !(0.25..=4.0).contains(&args.pixel_aspect) {
         return Err("--pixel-aspect must be 0.25..4".into());
     }
-    if !args.loader.is_absolute() {
+    if !args.desktop && !args.loader.is_absolute() {
         return Err("provide an absolute --loader path".into());
     }
     if let Some(runtime) = &args.runtime
@@ -275,9 +329,13 @@ fn reticle_image(size: u32) -> Vec<u8> {
 }
 
 fn run(args: Args) -> Result<i32, Box<dyn Error>> {
+    if args.desktop {
+        let name = args.channel.as_ref().ok_or("the 2D window needs --gpu-map")?;
+        return desktop::run(name, args.seconds, args.producer_wait, args.captures.clone());
+    }
     let producer = match &args.channel {
         // A producer may first switch the game to the headset's resolution.
-        Some(name) => Some(reader::wait_for(name, Duration::from_secs(30)).ok_or("no GPU stereo producer became ready")?),
+        Some(name) => Some(wait_for_producer(name, args.producer_wait)?),
         None => None,
     };
     if let Some(p) = &producer {
@@ -349,11 +407,22 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
     }
     let pad_actions = actions.as_ref().and_then(|set| pad::PadActions::create(set, args.dpad_hold, args.proxy).map_err(|e| println!("No controller buttons: {e}")).ok());
     // The held menus by reaching over a shoulder, and the buzz that says one opened or picked.
-    let mut reach = args.menu_reach.map(|pick| reach::Reach::new(pick, args.dpad_hold, args.menu_reach_depth).picking_with(args.menu_pick)).filter(|r| r.active() && pad_actions.is_some());
+    // Made again when the Monaka menu changes how it picks or how deep the reach is.
+    let make_reach = |pick: Option<reach::Pick>, depth: f32| {
+        pick.map(|pick| reach::Reach::new(pick, args.dpad_hold, depth).picking_with(args.menu_pick)).filter(|r| r.active() && pad_actions.is_some())
+    };
+    let (mut reach_pick, mut reach_depth) = (args.menu_reach, args.menu_reach_depth);
+    let mut reach = make_reach(reach_pick, reach_depth);
     if let (Some(pick), true) = (args.menu_reach, reach.is_some()) {
         println!("Menus by reach: rest a hand over its shoulder to open its menu; flick {} stick to pick", if pick == reach::Pick::Same { "that hand's" } else { "the other hand's" });
     }
     let haptic = actions.as_ref().and_then(|set| set.vibration_action("haptic", "Vibration", &hand_paths).map_err(|e| println!("No controller vibration: {e}")).ok());
+    // Start and Back held together: a capture of what the headset shows.
+    let mut chord = chord::Chord::default();
+    let mut capture = args.captures.clone().map(capture::Capture::new);
+    if capture.is_some() && pad_actions.is_some() {
+        println!("Capture: hold Start and Back together to save what the headset shows");
+    }
     if let (Some(aim), Some(grip)) = (&aim, &grip) {
         // One suggestion per profile carries all of its bindings (a second call replaces the first).
         let poses = [(aim, LEFT_AIM), (aim, RIGHT_AIM), (grip, LEFT_GRIP), (grip, RIGHT_GRIP)];
@@ -454,8 +523,8 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
     let offered_formats = session.swapchain_formats()?;
     let format = swapchain_format(&offered_formats, &producer).ok_or("runtime has no image format matching the game's")?;
     let swapchains = [
-        session.create_swapchain(format as i64, producer.width, producer.height)?,
-        session.create_swapchain(format as i64, producer.width, producer.height)?,
+        debug_views::eye_swapchain(&session, format as i64, producer.width, producer.height)?,
+        debug_views::eye_swapchain(&session, format as i64, producer.width, producer.height)?,
     ];
     // The hand-aim reticles, one swapchain per hand: filled once; a layer keeps showing the last
     // image released.
@@ -485,6 +554,12 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
     source_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32;
     let sources = [create_texture(&device, &source_desc)?, create_texture(&device, &source_desc)?];
     let eyes = [&sources[0], &sources[1]];
+    let mut debug_views = debug_views::DebugViews::new(name, DXGI_FORMAT(format as i32), args.captures.clone());
+    let mut console_feed = console_feed::ConsoleFeed::new(name);
+    let mut monaka_menu = monaka_menu::MonakaMenu::new(DXGI_FORMAT(format as i32), &args.live);
+    if !args.live.is_empty() && pad_actions.is_some() {
+        println!("Monaka menu: hold Start");
+    }
 
     let open_by = Instant::now() + Duration::from_secs(5);
     let mut input = loop {
@@ -507,6 +582,7 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
 
     console::catch_ctrl_c();
     let mut stats = Stats { pairs: 1, ..Stats::default() };
+    let mut meter = meter::Meter::new("Headset", [producer.width, producer.height], Instant::now());
     let (mut running, mut exit, mut exit_requested) = (false, false, false);
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
     let mut exit_deadline = deadline + Duration::from_secs(5);
@@ -571,9 +647,11 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
             {
                 head.gaze = gaze;
                 stats.gazes += 1;
+                meter.gaze();
             }
             if poses.as_mut().is_some_and(|p| p.write_head(&head)) {
                 stats.poses_written += 1;
+                meter.head(true);
             }
             last_head = Some(head);
         }
@@ -597,6 +675,7 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
                 (hands[hand], grips[hand]) = smoother.smooth(hand, frame.display_time, hands[hand], grips[hand]);
             }
             grip_poses = grips;
+            debug_views.controllers(last_head.as_ref(), &hands, &grips);
             for (hand, seen) in hands_seen.iter_mut().enumerate() {
                 let tracked = hands[hand].valid != 0;
                 if tracked != *seen {
@@ -606,6 +685,7 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
             }
             if hands_out.as_mut().is_some_and(|h| h.write(&hands, &grips)) {
                 stats.hands_written += 1;
+                meter.hands([hands[0].valid != 0, hands[1].valid != 0]);
             }
             if let (Some(trackers), Some(out)) = (&finger_trackers, fingers_out.as_mut()) {
                 let mut fingers = [FingerPose::default(); 2];
@@ -621,6 +701,7 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
                 }
                 if out.write(&fingers) {
                     stats.fingers_written += 1;
+                    meter.fingers([fingers[0].valid != 0, fingers[1].valid != 0]);
                 }
             }
             if let (Some(out), Some(pad)) = (hands_out.as_mut(), &pad_actions) {
@@ -632,6 +713,56 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
                         if let Some(haptic) = &haptic {
                             let _ = session.vibrate(haptic, hand_paths[hand], amplitude, seconds);
                         }
+                    }
+                }
+                let head = last_head.as_ref().map(|h| (h.orientation, h.position));
+                // Start held: the Monaka menu, unless the debug menu has the pad; what it changes
+                // applies at once (the launcher saves it from the line it prints).
+                let asked = monaka_menu.pad(&mut gamepad, head, Instant::now(), debug_views.menu_open());
+                for (hand, amplitude, seconds) in asked.buzzes {
+                    if let Some(haptic) = &haptic {
+                        let _ = session.vibrate(haptic, hand_paths[hand], amplitude, seconds);
+                    }
+                }
+                match asked.changed {
+                    Some(("controller_smoothing", value)) => smoother = smooth::Smoother::new(value.parse().unwrap_or(args.controller_smoothing)),
+                    Some(("menu_reach", value)) => {
+                        reach_pick = reach::parse(&value).unwrap_or(reach_pick);
+                        reach = make_reach(reach_pick, reach_depth);
+                    }
+                    Some(("menu_reach_depth", value)) => {
+                        reach_depth = value.parse::<f32>().map_or(reach_depth, |cm| cm / 100.0);
+                        reach = make_reach(reach_pick, reach_depth);
+                    }
+                    Some(("controller_proxy", value)) => pad.set_proxy(pad::Proxy::parse(&value).unwrap_or_default()),
+                    _ => {}
+                }
+                // Select held: the debug menu (its Save capture: one with the debug drawing on it).
+                // Only with the debug menu on (`--debug-menu`): otherwise Select reaches the game.
+                let (buzzes, capture_drawn) = if args.debug_menu { debug_views.pad(&mut gamepad, head, Instant::now()) } else { (Vec::new(), false) };
+                for (hand, amplitude, seconds) in buzzes {
+                    if let Some(haptic) = &haptic {
+                        let _ = session.vibrate(haptic, hand_paths[hand], amplitude, seconds);
+                    }
+                }
+                if capture_drawn {
+                    match capture.as_mut().map(capture::Capture::start) {
+                        Some(true) => {}
+                        Some(false) => println!("Capture: the last one is still being saved"),
+                        None => println!("Capture: no folder to save to (--captures)"),
+                    }
+                }
+                if chord.step(&mut gamepad, Instant::now()) {
+                    match capture.as_mut().map(capture::Capture::start) {
+                        Some(true) => {
+                            if let Some(haptic) = &haptic {
+                                for path in hand_paths {
+                                    let _ = session.vibrate(haptic, path, 0.6, 0.15);
+                                }
+                            }
+                        }
+                        Some(false) => println!("Capture: the last one is still being saved"),
+                        None => println!("Capture: no folder to save to (--captures)"),
                     }
                 }
                 out.write_pad(&PadState { gamepad, valid: 1, received_tick: tick() });
@@ -649,14 +780,31 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
         }
         let mut layers = Vec::new();
         if frame.should_render {
-            let read = if depth_layer { input.read_with_depth(&context, eyes, seen)? } else { input.read(&context, eyes, seen)?.map(|pair| (pair, None)) };
+            // A frozen frame stays: no pairs are read, and the silence check is told they need not be.
+            let read = if debug_views.frozen() {
+                last_pair_at = tick();
+                None
+            } else if depth_layer || debug_views.wants_depth() {
+                input.read_with_depth(&context, eyes, seen)?
+            } else {
+                input.read(&context, eyes, seen)?.map(|pair| (pair, None))
+            };
+            let arrived = read.is_some();
+            let now = Instant::now();
+            meter.frame(now, read.as_ref().map(|(pair, _)| (pair.sequence, pair.tick)), tick());
+            if let Some(keys) = read.as_ref().and_then(|(pair, _)| debug_views.eye_keys(pair.sequence)) {
+                meter.eyes(keys);
+            }
             if let Some((pair, depth)) = read {
                 seen = pair.sequence;
                 stats.pairs += 1;
                 last_pair_at = tick();
                 rendered = poses.as_mut().and_then(|p| p.read_pair(seen)).filter(|p| p.eyes.iter().all(|e| e.valid != 0));
+                if let Some(capture) = capture.as_mut().filter(|_| !debug_views.captures_drawn()) {
+                    capture.arrived(&device, &context, eyes, seen, rendered.as_ref());
+                }
                 pair_depth = depth;
-                if let Some(depth) = &pair_depth
+                if let Some(depth) = pair_depth.as_ref().filter(|_| depth_layer)
                     && !depth_chains.as_ref().is_some_and(|chains| chains.fits(depth))
                 {
                     depth_chains = Some(depth::DepthChains::new(&session, &offered_formats, depth));
@@ -665,11 +813,20 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
             for hand_panel in &mut hand_panels {
                 hand_panel.update(&session, &device, &context);
             }
-            for (swapchain, source) in swapchains.iter().zip(&sources) {
+            let game = debug_views.game();
+            let content = monaka_overlay::panels::Content { stats: meter.view(now, game), console: console_feed.view(now), fake_vr: &monaka_overlay::fake_vr::FakeVr::HEADSET };
+            debug_views.show_in_headset(&session, &device, &context, &content, now);
+            monaka_menu.show(&session, &device, &context);
+            for (eye, (swapchain, source)) in swapchains.iter().zip(&sources).enumerate() {
                 swapchain.fill(|image| {
                     d3d::copy_texture(&context, image, source);
+                    debug_views.draw_eye(&device, &context, image, eye, rendered.as_ref(), seen, eyes, pair_depth.as_ref().zip(input.depth_textures()));
                     d3d::flush(&context);
                 })?;
+            }
+            // Captures that include the debug drawings take the eyes as drawn.
+            if arrived && let (Some(capture), Some(drawn)) = (capture.as_mut(), debug_views.drawn_eyes()) {
+                capture.arrived(&device, &context, drawn, seen, rendered.as_ref());
             }
             if let Some(pair) = &rendered {
                 screen = None;
@@ -739,8 +896,14 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
             }
             stats.visible += 1;
         }
+        layers.extend(debug_views.layers(&local));
+        layers.extend(monaka_menu.layer(&local));
         session.end_frame(frame.display_time, &layers)?;
         stats.frames += 1;
+        // A capture's images read back after the frame is out, one per frame.
+        if let Some(capture) = capture.as_mut() {
+            capture.step(&device, &context);
+        }
     }
 
     println!(

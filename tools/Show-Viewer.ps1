@@ -20,5 +20,5 @@ if ($Latest) {
     Write-Output "Channel from $file"
 }
 if (-not $GpuChannel) { throw 'Give -GpuChannel, -Latest or -Info.' }
-& $viewer --gpu-map $GpuChannel --seconds $Seconds --pixel-aspect $PixelAspect.ToString([Globalization.CultureInfo]::InvariantCulture) --loader $openXr.Loader --runtime $openXr.Runtime
+& $viewer --gpu-map $GpuChannel --seconds $Seconds --pixel-aspect $PixelAspect.ToString([Globalization.CultureInfo]::InvariantCulture) --loader $openXr.Loader --runtime $openXr.Runtime --debug-menu
 exit $LASTEXITCODE

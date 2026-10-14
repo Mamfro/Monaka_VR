@@ -77,6 +77,12 @@ pub fn texture_desc(texture: &ID3D11Texture2D) -> D3D11_TEXTURE2D_DESC {
     desc
 }
 
+/// The texture a render target view draws into.
+pub fn view_texture(view: &windows::Win32::Graphics::Direct3D11::ID3D11RenderTargetView) -> Result<ID3D11Texture2D> {
+    // SAFETY: plain queries on a live view.
+    Ok(unsafe { view.GetResource() }?.cast::<ID3D11Texture2D>()?)
+}
+
 pub fn texture_device(texture: &ID3D11Texture2D) -> Result<ID3D11Device> {
     // SAFETY: COM call on a live interface.
     Ok(unsafe { texture.GetDevice() }?)

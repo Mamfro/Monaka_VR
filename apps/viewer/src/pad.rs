@@ -200,7 +200,8 @@ pub struct PadActions<'s> {
     /// The d-pad directions that stay held once pushed through the layer (`--dpad-hold`).
     hold: u16,
     latch: Cell<Latch>,
-    proxy: Proxy,
+    /// The controller test ([`PadActions::set_proxy`] changes it while VR runs).
+    proxy: Cell<Proxy>,
 }
 
 impl<'s> PadActions<'s> {
@@ -216,7 +217,12 @@ impl<'s> PadActions<'s> {
             };
             actions.push((name, control, action));
         }
-        Ok(Self { actions, layer_used: Cell::new(false), hold, latch: Cell::new(Latch::default()), proxy })
+        Ok(Self { actions, layer_used: Cell::new(false), hold, latch: Cell::new(Latch::default()), proxy: Cell::new(proxy) })
+    }
+
+    /// The controllers act like `proxy` from the next read (the headset's Monaka menu).
+    pub fn set_proxy(&self, proxy: Proxy) {
+        self.proxy.set(proxy);
     }
 
     /// The action for a binding key.
@@ -252,7 +258,7 @@ impl<'s> PadActions<'s> {
                 }
             }
         }
-        let (proxy_layer, proxy_shift) = proxied(&mut pad, self.proxy, rest_held);
+        let (proxy_layer, proxy_shift) = proxied(&mut pad, self.proxy.get(), rest_held);
         let (layer_held, shift_held) = (layer_held || proxy_layer, shift_held || proxy_shift);
         let mut used = self.layer_used.get();
         let pushed = layer(&mut pad, layer_held || shift_held, layer_held, &mut used);

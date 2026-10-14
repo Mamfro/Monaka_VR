@@ -3,7 +3,7 @@
 //! ([`announce`]), and the pad for a reader other than XInput's ([`virtual_pad`]).
 
 use crate::presses::{FLICK, HELD_BUTTONS, HELD_UNTIL_LET_GO, PRESSED, flick, pressed};
-use crate::stick::{TAKE_RIGHT, TAKE_RIGHT_Y};
+use crate::stick::{TAKE_RIGHT, takes_y};
 use crate::xinput::PAD_MAX_AGE_MS;
 use monaka_channel::ChannelName;
 use monaka_channel::hands::HandChannel;
@@ -155,6 +155,6 @@ pub(crate) fn virtual_pad() -> Option<Gamepad> {
 /// The right stick's takes ([`take_right_stick`], [`take_right_stick_y`]) and the producer's flick,
 /// for a reader other than XInput's.
 pub(crate) fn right_stick_rules() -> (bool, bool, Option<[i16; 2]>) {
-    (TAKE_RIGHT.load(Acquire), TAKE_RIGHT_Y.load(Acquire), flick())
+    (TAKE_RIGHT.load(Acquire), takes_y(), flick())
 }
 
