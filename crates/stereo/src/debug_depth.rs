@@ -9,7 +9,7 @@
 //! turned into 32-bit floats and shared ([`monaka_channel::debug_image`]).
 //!
 //! A game may never clear its scene's depth (its first pass writing every texel instead). Where
-//! the HUD layer follows the game's draws ([`crate::hud11`]), it tells this which depth each
+//! the HUD layer follows the game's draws ([`crate::hud_layer::d3d11`]), it tells this which depth each
 //! context draws with ([`bound`], [`drew`]), as does this component's own hook of
 //! `OMSetRenderTargetsAndUnorderedAccessViews` (which the HUD layer does not follow): the scene's
 //! depth is then the one most draws use in a frame (weighed by its size), whatever is cleared. The
@@ -195,39 +195,43 @@ fn summary() -> String {
 }
 
 unsafe extern "system" fn clear_depth(context: *mut c_void, view: *mut c_void, flags: u32, depth: f32, stencil: u8) {
+    let flight = monaka_hook::InFlight::enter();
     if flags & D3D11_CLEAR_DEPTH.0 != 0 && debug::on(Category::Depth) {
         // SAFETY: the game's own live context and view, borrowed for the call.
         unsafe { note(context, view, depth, false) };
     }
     // SAFETY: forwards the game's own call.
-    unsafe { ORIGINAL.get()(context, view, flags, depth, stencil) }
+    unsafe { ORIGINAL.get(&flight)(context, view, flags, depth, stencil) }
 }
 
 unsafe extern "system" fn clear_depth_deferred(context: *mut c_void, view: *mut c_void, flags: u32, depth: f32, stencil: u8) {
+    let flight = monaka_hook::InFlight::enter();
     if flags & D3D11_CLEAR_DEPTH.0 != 0 && debug::on(Category::Depth) {
         // SAFETY: the game's own live context and view, borrowed for the call.
         unsafe { note(context, view, depth, true) };
     }
     // SAFETY: forwards the game's own call.
-    unsafe { ORIGINAL_DEFERRED.get()(context, view, flags, depth, stencil) }
+    unsafe { ORIGINAL_DEFERRED.get(&flight)(context, view, flags, depth, stencil) }
 }
 
 #[allow(clippy::too_many_arguments)]
 unsafe extern "system" fn bind_with_views(context: *mut c_void, targets: u32, views: *const *mut c_void, depth: *mut c_void, first: u32, count: u32, uavs: *const *mut c_void, counts: *const u32) {
+    let flight = monaka_hook::InFlight::enter();
     if targets != KEEP_TARGETS {
         bound(context, targets, views, depth);
     }
     // SAFETY: forwards the game's own call.
-    unsafe { BIND_ORIGINAL.get()(context, targets, views, depth, first, count, uavs, counts) }
+    unsafe { BIND_ORIGINAL.get(&flight)(context, targets, views, depth, first, count, uavs, counts) }
 }
 
 #[allow(clippy::too_many_arguments)]
 unsafe extern "system" fn bind_with_views_deferred(context: *mut c_void, targets: u32, views: *const *mut c_void, depth: *mut c_void, first: u32, count: u32, uavs: *const *mut c_void, counts: *const u32) {
+    let flight = monaka_hook::InFlight::enter();
     if targets != KEEP_TARGETS {
         bound(context, targets, views, depth);
     }
     // SAFETY: forwards the game's own call.
-    unsafe { BIND_ORIGINAL_DEFERRED.get()(context, targets, views, depth, first, count, uavs, counts) }
+    unsafe { BIND_ORIGINAL_DEFERRED.get(&flight)(context, targets, views, depth, first, count, uavs, counts) }
 }
 
 /// A depth clear of `view` to `clear` (0: reversed depth) on `context`: logged if of a new kind,

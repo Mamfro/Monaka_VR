@@ -5,6 +5,8 @@
 //! with no code of its own in the viewer. The first row is the page's summary: a page longer than
 //! its panel scrolls under it, and it stays in view.
 
+use crate::protocol::{Stamp, Versioned};
+
 #[cfg(test)]
 mod tests;
 
@@ -195,20 +197,6 @@ pub struct PageBlock {
 }
 
 impl PageBlock {
-    pub fn is_blank(&self) -> bool {
-        self.magic == 0
-    }
-
-    pub fn is_compatible(&self) -> bool {
-        self.magic == PAGE_MAGIC && self.version == PAGE_VERSION
-    }
-
-    /// Makes a blank block (all zeros, as a new mapping is) a fresh one, in place.
-    pub fn start(&mut self) {
-        self.magic = PAGE_MAGIC;
-        self.version = PAGE_VERSION;
-    }
-
     pub fn write(&mut self, page: &Page, tick: u64) {
         self.page = *page;
         self.generation += 1;
@@ -236,5 +224,20 @@ impl PageBlock {
             })
             .collect();
         (presses, self.press_sequence.max(seen))
+    }
+}
+
+impl Versioned for PageBlock {
+    const MAGIC: u32 = PAGE_MAGIC;
+    const VERSION: u32 = PAGE_VERSION;
+    const WHAT: &'static str = "page block";
+
+    fn stamp(&self) -> Stamp {
+        Stamp { magic: self.magic, version: self.version }
+    }
+
+    fn start(&mut self) {
+        self.magic = PAGE_MAGIC;
+        self.version = PAGE_VERSION;
     }
 }

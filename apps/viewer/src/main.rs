@@ -23,7 +23,6 @@
 #![deny(unsafe_code)]
 
 mod capture;
-mod chord;
 mod clipboard;
 mod console;
 mod console_feed;
@@ -33,11 +32,11 @@ mod debug_views;
 mod depth;
 mod desktop;
 mod gaze;
+mod menu_quad;
 mod meter;
 mod monaka_menu;
 mod pad;
 mod panel;
-mod reach;
 mod recorder;
 mod smooth;
 mod view_commands;
@@ -47,11 +46,13 @@ use monaka_channel::fingers::FingerChannel;
 use monaka_channel::reticles::ReticleChannel;
 use monaka_channel::hands::HandChannel;
 use monaka_channel::pose::PoseChannel;
-use monaka_channel::reader::{self, AnyReader};
+use monaka_channel::reader::{self, FenceReader};
 use monaka_channel::{ChannelName, tick};
-use monaka_core::math::{self, Quat, Vec3};
+use monaka_core::chord;
+use monaka_core::menu_reach as reach;
+use monaka_core::math;
 use monaka_core::protocol::{FingerPose, HandPose, HeadPose, LEFT_HAND, PadState, RIGHT_HAND, RenderedPair, dxgi_format};
-use monaka_openxr::{Event, Extent2Df, Fovf, Instance, Layer, Loader, Posef, ProjectionView, Quaternionf, Vector3f, sys};
+use monaka_openxr::{Event, Extent2Df, Fovf, Instance, Layer, Loader, Posef, ProjectionView, sys};
 use std::error::Error;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -68,14 +69,48 @@ const PRODUCER_SILENCE_MS: u64 = 15_000;
 pub(crate) fn wait_for_producer(name: &ChannelName, seconds: u64) -> Result<reader::Description, String> {
     let deadline = Instant::now() + Duration::from_secs(seconds);
     loop {
-        if let Some(description) = reader::wait_for(name, Duration::from_millis(100)) {
-            return Ok(description);
+        match reader::wait_for(name, Duration::from_millis(100)) {
+            Some(Ok(description)) => return Ok(description),
+            Some(Err(mismatch)) => return Err(mismatch.to_string()),
+            None => {}
         }
         if console::stop_requested() {
             return Err("stopped before the game drew a frame".into());
         }
         if Instant::now() >= deadline {
             return Err("no GPU stereo producer became ready".into());
+        }
+    }
+}
+
+/// What the viewer changes for a [`monaka_core::manifest::LIVE`] option set in the headset's Monaka
+/// menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Live {
+    Smoothing,
+    Reach,
+    ReachDepth,
+    Proxy,
+}
+
+/// The viewer's part in live option `id`, if it has one.
+fn live_setting(id: &str) -> Option<Live> {
+    use monaka_core::manifest::{CONTROLLER_PROXY, CONTROLLER_SMOOTHING, MENU_REACH_DEPTH, menu_reach};
+    [(CONTROLLER_SMOOTHING.id, Live::Smoothing), (menu_reach("").id, Live::Reach), (MENU_REACH_DEPTH.id, Live::ReachDepth), (CONTROLLER_PROXY.id, Live::Proxy)]
+        .into_iter()
+        .find_map(|(live, what)| (live == id).then_some(what))
+}
+
+/// A block beside the stereo channel, opened for this run: `None` when it could not be (said in
+/// the log, and the run goes on without it), an error when the game pack speaks another version of
+/// it (nothing it carries would be read right).
+pub(crate) fn side_channel<T>(what: &str, opened: monaka_channel::Result<T>) -> Result<Option<T>, String> {
+    match opened {
+        Ok(channel) => Ok(Some(channel)),
+        Err(monaka_channel::Error::Version(mismatch)) => Err(mismatch.to_string()),
+        Err(e) => {
+            println!("No {what}: {e}");
+            Ok(None)
         }
     }
 }
@@ -226,6 +261,27 @@ fn parse_args() -> Result<Args, String> {
     Ok(args)
 }
 
+/// The stereo channel `name` opened on `device`, tried for five seconds: the producer may still be
+/// making its textures when it already describes the channel.
+pub(crate) fn open_channel(name: &ChannelName, device: &windows::Win32::Graphics::Direct3D11::ID3D11Device) -> Result<FenceReader, String> {
+    let open_by = Instant::now() + Duration::from_secs(5);
+    loop {
+        match FenceReader::open(name, device) {
+            Ok(input) => return Ok(input),
+            Err(e) if Instant::now() >= open_by => return Err(format!("cannot open the GPU channel: {e}")),
+            Err(_) => std::thread::sleep(Duration::from_millis(3)),
+        }
+    }
+}
+
+/// Gives each of `buzzes` on its hand, when the controllers can vibrate.
+fn buzz(session: &monaka_openxr::Session<'_>, haptic: Option<&monaka_openxr::Action<'_>>, hand_paths: &[sys::Path; 2], buzzes: impl IntoIterator<Item = debug_menu::Buzz>) {
+    let Some(haptic) = haptic else { return };
+    for (hand, amplitude, seconds) in buzzes {
+        let _ = session.vibrate(haptic, hand_paths[hand], amplitude, seconds);
+    }
+}
+
 /// What the producer publishes, learned before anything is opened.
 type Producer = reader::Description;
 
@@ -233,29 +289,15 @@ type Producer = reader::Description;
 fn swapchain_format(offered: &[i64], producer: &Producer) -> Option<u32> {
     use dxgi_format::*;
     let has = |f: u32| offered.contains(&(f as i64));
-    if producer.fence && producer.format != R8G8B8A8_UNORM {
+    if producer.format != R8G8B8A8_UNORM {
         let srgb = if producer.format == B8G8R8A8_UNORM { B8G8R8A8_UNORM_SRGB } else { producer.format };
         return [producer.format, srgb].into_iter().find(|&f| has(f));
     }
     [R8G8B8A8_UNORM, R8G8B8A8_UNORM_SRGB].into_iter().find(|&f| has(f))
 }
 
-fn quat(q: Quaternionf) -> Quat {
-    [q.x, q.y, q.z, q.w]
-}
-
-fn vec3(v: Vector3f) -> Vec3 {
-    [v.x, v.y, v.z]
-}
-
 fn fov_angles(f: Fovf) -> [f32; 4] {
     [f.angleLeft, f.angleRight, f.angleUp, f.angleDown]
-}
-
-fn pose(orientation: Quat, position: Vec3) -> Posef {
-    let [x, y, z, w] = orientation;
-    let [px, py, pz] = position;
-    Posef { orientation: Quaternionf { x, y, z, w }, position: Vector3f { x: px, y: py, z: pz } }
 }
 
 /// What the runtime offers for eye tracking, through either extension.
@@ -303,8 +345,7 @@ const RIGHT_GRIP: &str = "/user/hand/right/input/grip/pose";
 
 /// A reticle direction the producer said is followed for this long after (ms).
 const RETICLE_SAID_MS: u64 = 250;
-/// The hand-aim reticle: this far along the aim ray, this wide (1.2 degrees).
-const RETICLE_DISTANCE: f32 = 10.0;
+/// The hand-aim reticle: this wide, at its distance (`math::reticle_point`, 1.2 degrees).
 const RETICLE_SIZE: f32 = 0.21;
 const RETICLE_PIXELS: u32 = 64;
 
@@ -339,8 +380,7 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
         None => None,
     };
     if let Some(p) = &producer {
-        let transport = if p.fence { "D3D12 fence channel" } else { "D3D11 keyed channel" };
-        println!("GPU stereo input: {}x{} format {} producer adapter={}:{} ({transport})", p.width, p.height, p.format, p.adapter.high, p.adapter.low);
+        println!("GPU stereo input: {}x{} format {} producer adapter={}:{}", p.width, p.height, p.format, p.adapter.high, p.adapter.low);
     }
     if let Some(runtime) = &args.runtime {
         console::set_runtime_override(runtime);
@@ -495,7 +535,10 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
             None => "No eye gaze (the headset or runtime offers none)",
         }
     );
-    let mut hands_out = controllers.as_ref().and_then(|_| HandChannel::open(name).ok());
+    let mut hands_out = match controllers {
+        Some(_) => side_channel("hand channel", HandChannel::open(name))?,
+        None => None,
+    };
     // Fingers, where the headset tracks them (from the controllers' finger sensing, or cameras).
     let finger_trackers: Option<[_; 2]> = instance
         .hand_tracking(system)
@@ -507,7 +550,10 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
             }
         })
         .flatten();
-    let mut fingers_out = finger_trackers.as_ref().and_then(|_| FingerChannel::open(name).ok());
+    let mut fingers_out = match finger_trackers {
+        Some(_) => side_channel("finger channel", FingerChannel::open(name))?,
+        None => None,
+    };
     println!("{}", if fingers_out.is_some() { "Finger tracking on" } else { "No finger tracking (the headset or runtime offers none)" });
     let mut fingers_seen = [false; 2];
     let mut hands_seen = [false; 2];
@@ -515,9 +561,9 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
     if controllers.is_some() {
         println!("Controller smoothing {}", args.controller_smoothing);
     }
-    let mut poses = PoseChannel::open(name).ok();
+    let mut poses = side_channel("head pose channel (no head tracking)", PoseChannel::open(name))?;
     // Where the producer says a reticle points, when not along the palm (a bow at an angle in it).
-    let mut reticle_aims = if args.reticles.contains(&true) { ReticleChannel::open(name).ok() } else { None };
+    let mut reticle_aims = if args.reticles.contains(&true) { side_channel("reticle channel", ReticleChannel::open(name))? } else { None };
     println!("Forward follows the headset: use its centre/recentre control.");
 
     let offered_formats = session.swapchain_formats()?;
@@ -540,17 +586,10 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
             *reticle = Some(swapchain);
         }
     }
-    // HUD pieces the game publishes on their own, on the hands.
-    let mut hand_panels = [
-        panel::HandPanel::new(name, format, "minimap", RIGHT_HAND, panel::Side::BackOfHand, panel::HAND_WIDTH, false),
-        panel::HandPanel::new(name, format, "quests", RIGHT_HAND, panel::Side::BackOfHand, panel::QUESTS_WIDTH, true),
-        panel::HandPanel::new(name, format, "weapon", RIGHT_HAND, panel::Side::Palm, panel::HAND_WIDTH, false),
-        panel::HandPanel::new(name, format, "health", LEFT_HAND, panel::Side::BackOfHand, panel::HAND_WIDTH, false),
-        panel::HandPanel::new(name, format, "tool", LEFT_HAND, panel::Side::Palm, panel::ICON_WIDTH, false),
-        panel::HandPanel::new(name, format, "weapon_left", LEFT_HAND, panel::Side::Palm, panel::HAND_WIDTH, false),
-    ];
-    let source_format = if producer.fence { producer.format } else { format };
-    let mut source_desc = simple_texture_desc(producer.width, producer.height, DXGI_FORMAT(source_format as i32));
+    // HUD pieces the game publishes on their own, on the hands where it says.
+    let declared = side_channel("HUD panels block", monaka_channel::panels::PanelsChannel::open(name))?;
+    let mut hand_panels = panel::HandPanels::new(name, format, declared);
+    let mut source_desc = simple_texture_desc(producer.width, producer.height, DXGI_FORMAT(producer.format as i32));
     source_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32;
     let sources = [create_texture(&device, &source_desc)?, create_texture(&device, &source_desc)?];
     let eyes = [&sources[0], &sources[1]];
@@ -561,14 +600,7 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
         println!("Monaka menu: hold Start");
     }
 
-    let open_by = Instant::now() + Duration::from_secs(5);
-    let mut input = loop {
-        match AnyReader::open(name, &device, producer.fence) {
-            Ok(input) => break input,
-            Err(e) if Instant::now() >= open_by => return Err(format!("cannot open the GPU channel on the runtime adapter: {e}").into()),
-            Err(_) => std::thread::sleep(Duration::from_millis(3)),
-        }
-    };
+    let mut input = open_channel(name, &device).map_err(|e| format!("{e} on the runtime adapter"))?;
     let ready_by = Instant::now() + Duration::from_secs(10);
     let mut seen = loop {
         if let Some(pair) = input.read(&context, eyes, 0)? {
@@ -638,9 +670,9 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
         // The actions are read once a frame, before the head pose: the gaze goes out with it.
         let synced = attached.is_some_and(|set| session.sync(set).is_ok());
         if let Some(located) = session.locate_views(&local, frame.display_time)? {
-            let positions = [vec3(located[0].pose.position), vec3(located[1].pose.position)];
+            let positions = [located[0].pose.position.xyz(), located[1].pose.position.xyz()];
             let fov = [fov_angles(located[0].fov), fov_angles(located[1].fov)];
-            let mut head = math::head_from_views(quat(located[0].pose.orientation), positions, fov);
+            let mut head = math::head_from_views(located[0].pose.orientation.xyzw(), positions, fov);
             let gaze_readable = |source: &gaze::Source<'_>| synced || matches!(source, gaze::Source::Tracker(_));
             if let Some(source) = gaze_source.as_ref().filter(|s| gaze_readable(s))
                 && let Some(gaze) = source.read(&session, &view_space, frame.display_time, tick())
@@ -666,7 +698,7 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
                 for (hand, (space, path)) in spaces.iter().zip(hand_paths).enumerate() {
                     let pose = session.pose_active(action, path).unwrap_or(false).then(|| session.locate(space, &local, frame.display_time).ok().flatten()).flatten();
                     if let Some(p) = pose {
-                        out[hand] = HandPose { orientation: quat(p.orientation), position: vec3(p.position), valid: 1, received_tick: tick() };
+                        out[hand] = HandPose { orientation: p.orientation.xyzw(), position: p.position.xyz(), valid: 1, received_tick: tick() };
                     }
                 }
             }
@@ -709,61 +741,39 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
                 if let Some(reach) = reach.as_mut() {
                     let head = last_head.as_ref().map(|h| (h.orientation, h.position));
                     let at = [0, 1].map(|h| [grips[h], hands[h]].into_iter().find(|p| p.valid != 0).map(|p| p.position));
-                    for (hand, amplitude, seconds) in reach.update(&mut gamepad, head, at, Instant::now()) {
-                        if let Some(haptic) = &haptic {
-                            let _ = session.vibrate(haptic, hand_paths[hand], amplitude, seconds);
-                        }
-                    }
+                    buzz(&session, haptic.as_ref(), &hand_paths, reach.update(&mut gamepad, head, at, Instant::now()));
                 }
                 let head = last_head.as_ref().map(|h| (h.orientation, h.position));
                 // Start held: the Monaka menu, unless the debug menu has the pad; what it changes
                 // applies at once (the launcher saves it from the line it prints).
                 let asked = monaka_menu.pad(&mut gamepad, head, Instant::now(), debug_views.menu_open());
-                for (hand, amplitude, seconds) in asked.buzzes {
-                    if let Some(haptic) = &haptic {
-                        let _ = session.vibrate(haptic, hand_paths[hand], amplitude, seconds);
-                    }
-                }
-                match asked.changed {
-                    Some(("controller_smoothing", value)) => smoother = smooth::Smoother::new(value.parse().unwrap_or(args.controller_smoothing)),
-                    Some(("menu_reach", value)) => {
+                buzz(&session, haptic.as_ref(), &hand_paths, asked.buzzes);
+                match asked.changed.and_then(|(id, value)| Some((live_setting(id)?, value))) {
+                    Some((Live::Smoothing, value)) => smoother = smooth::Smoother::new(value.parse().unwrap_or(args.controller_smoothing)),
+                    Some((Live::Reach, value)) => {
                         reach_pick = reach::parse(&value).unwrap_or(reach_pick);
                         reach = make_reach(reach_pick, reach_depth);
                     }
-                    Some(("menu_reach_depth", value)) => {
+                    Some((Live::ReachDepth, value)) => {
                         reach_depth = value.parse::<f32>().map_or(reach_depth, |cm| cm / 100.0);
                         reach = make_reach(reach_pick, reach_depth);
                     }
-                    Some(("controller_proxy", value)) => pad.set_proxy(pad::Proxy::parse(&value).unwrap_or_default()),
-                    _ => {}
+                    Some((Live::Proxy, value)) => pad.set_proxy(pad::Proxy::parse(&value).unwrap_or_default()),
+                    None => {}
                 }
                 // Select held: the debug menu (its Save capture: one with the debug drawing on it).
                 // Only with the debug menu on (`--debug-menu`): otherwise Select reaches the game.
                 let (buzzes, capture_drawn) = if args.debug_menu { debug_views.pad(&mut gamepad, head, Instant::now()) } else { (Vec::new(), false) };
-                for (hand, amplitude, seconds) in buzzes {
-                    if let Some(haptic) = &haptic {
-                        let _ = session.vibrate(haptic, hand_paths[hand], amplitude, seconds);
-                    }
+                // A console command picked on the console panel.
+                if let Some(monaka_overlay::panels::Asked::Console(command)) = debug_views.take_asked() {
+                    console_feed.ask(&command);
                 }
+                buzz(&session, haptic.as_ref(), &hand_paths, buzzes);
                 if capture_drawn {
-                    match capture.as_mut().map(capture::Capture::start) {
-                        Some(true) => {}
-                        Some(false) => println!("Capture: the last one is still being saved"),
-                        None => println!("Capture: no folder to save to (--captures)"),
-                    }
+                    capture::start(capture.as_mut());
                 }
-                if chord.step(&mut gamepad, Instant::now()) {
-                    match capture.as_mut().map(capture::Capture::start) {
-                        Some(true) => {
-                            if let Some(haptic) = &haptic {
-                                for path in hand_paths {
-                                    let _ = session.vibrate(haptic, path, 0.6, 0.15);
-                                }
-                            }
-                        }
-                        Some(false) => println!("Capture: the last one is still being saved"),
-                        None => println!("Capture: no folder to save to (--captures)"),
-                    }
+                if chord.step(&mut gamepad, Instant::now()) && capture::start(capture.as_mut()) {
+                    buzz(&session, haptic.as_ref(), &hand_paths, [LEFT_HAND, RIGHT_HAND].map(|hand| (hand, 0.6, 0.15)));
                 }
                 out.write_pad(&PadState { gamepad, valid: 1, received_tick: tick() });
             }
@@ -810,9 +820,7 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
                     depth_chains = Some(depth::DepthChains::new(&session, &offered_formats, depth));
                 }
             }
-            for hand_panel in &mut hand_panels {
-                hand_panel.update(&session, &device, &context);
-            }
+            hand_panels.update(&session, &device, &context);
             let game = debug_views.game();
             let content = monaka_overlay::panels::Content { stats: meter.view(now, game), console: console_feed.view(now), fake_vr: &monaka_overlay::fake_vr::FakeVr::HEADSET };
             debug_views.show_in_headset(&session, &device, &context, &content, now);
@@ -843,7 +851,7 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
                     let e = &pair.eyes[eye];
                     let [left, right, up, down] = e.fov[eye];
                     ProjectionView {
-                        pose: pose(e.orientation, math::eye_position(e, eye)),
+                        pose: Posef::new(e.orientation, math::eye_position(e, eye)),
                         fov: Fovf { angleLeft: left, angleRight: right, angleUp: up, angleDown: down },
                         swapchain: &swapchains[eye],
                         depth: depth_views[eye].take(),
@@ -857,37 +865,27 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
                     let (Some(swapchain), Some((hand, grip)), Some(head)) = (reticle, aimed, &last_head) else { continue };
                     let palm = if grip.valid != 0 { grip.position } else { hand.position };
                     let said = reticle_aims.as_mut().and_then(|r| r.read(side, RETICLE_SAID_MS));
-                    let position = if let (true, Some(direction)) = (args.reticle_palm, said) {
-                        // Along the producer's direction in the palm's frame.
-                        let d = math::rotate(hand.orientation, direction);
-                        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-6);
-                        [0, 1, 2].map(|k| palm[k] + d[k] / l * math::WEAPON_CONVERGENCE)
-                    } else if args.reticle_palm {
-                        math::converged(palm, hand.orientation)
-                    } else {
-                        math::along(head.position, hand.orientation, RETICLE_DISTANCE)
-                    };
+                    let position = math::reticle_point(head.position, hand.orientation, palm, args.reticle_palm, said);
                     layers.push(Layer::Overlay {
                         space: &local,
                         swapchain,
-                        pose: pose(hand.orientation, position),
+                        pose: Posef::new(hand.orientation, position),
                         size: Extent2Df { width: RETICLE_SIZE, height: RETICLE_SIZE },
                     });
                 }
                 if controllers.is_some() {
-                    let main_width = hand_panels[0].shown_size().0;
-                    layers.extend(hand_panels.iter().filter_map(|p| p.layer(&local, &grip_poses, last_head.as_ref(), args.panel_nearest, main_width)));
+                    layers.extend(hand_panels.layers(&local, &grip_poses, last_head.as_ref(), args.panel_nearest));
                 }
             } else {
                 let (space, quad_pose, width) = match &last_head {
                     Some(head) => {
                         let anchored = *screen.get_or_insert_with(|| {
                             let (orientation, position) = math::ahead_of(head.orientation, head.position, SCREEN_DISTANCE);
-                            pose(orientation, position)
+                            Posef::new(orientation, position)
                         });
                         (&local, anchored, args.screen_width)
                     }
-                    None => (&view_space, pose(math::IDENTITY, [0.0, 0.0, -SCREEN_DISTANCE]), 4.0),
+                    None => (&view_space, Posef::new(math::IDENTITY, [0.0, 0.0, -SCREEN_DISTANCE]), 4.0),
                 };
                 for (eye, swapchain) in swapchains.iter().enumerate() {
                     let size = Extent2Df { width, height: width * image_aspect };
@@ -932,8 +930,16 @@ mod tests {
     use super::*;
     use monaka_core::protocol::Luid;
 
-    fn producer(format: u32, fence: bool) -> Producer {
-        Producer { width: 1, height: 1, adapter: Luid::default(), format, fence }
+    #[test]
+    fn every_live_option_has_its_part_in_the_viewer() {
+        for opt in monaka_core::manifest::LIVE {
+            assert!(live_setting(opt.id).is_some(), "{} changes nothing in the viewer", opt.id);
+        }
+        assert_eq!(live_setting("no_such_option"), None);
+    }
+
+    fn producer(format: u32) -> Producer {
+        Producer { width: 1, height: 1, adapter: Luid::default(), format }
     }
 
     #[test]
@@ -952,9 +958,9 @@ mod tests {
     fn swapchain_format_follows_the_game() {
         use dxgi_format::*;
         let offered = [R8G8B8A8_UNORM_SRGB as i64, B8G8R8A8_UNORM_SRGB as i64, R10G10B10A2_UNORM as i64];
-        assert_eq!(swapchain_format(&offered, &producer(R8G8B8A8_UNORM, false)), Some(R8G8B8A8_UNORM_SRGB));
-        assert_eq!(swapchain_format(&offered, &producer(B8G8R8A8_UNORM, true)), Some(B8G8R8A8_UNORM_SRGB));
-        assert_eq!(swapchain_format(&offered, &producer(R10G10B10A2_UNORM, true)), Some(R10G10B10A2_UNORM));
-        assert_eq!(swapchain_format(&[R8G8B8A8_UNORM as i64], &producer(R10G10B10A2_UNORM, true)), None);
+        assert_eq!(swapchain_format(&offered, &producer(R8G8B8A8_UNORM)), Some(R8G8B8A8_UNORM_SRGB));
+        assert_eq!(swapchain_format(&offered, &producer(B8G8R8A8_UNORM)), Some(B8G8R8A8_UNORM_SRGB));
+        assert_eq!(swapchain_format(&offered, &producer(R10G10B10A2_UNORM)), Some(R10G10B10A2_UNORM));
+        assert_eq!(swapchain_format(&[R8G8B8A8_UNORM as i64], &producer(R10G10B10A2_UNORM)), None);
     }
 }

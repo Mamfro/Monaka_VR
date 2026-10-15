@@ -12,6 +12,7 @@ pub(super) mod take_out;
 
 pub use take_out::take_out;
 
+use super::PanelOut;
 use crate::framepass12::Lazy;
 use monaka_channel::ChannelName;
 use monaka_channel::d3d12::compute::{self, DescriptorHeap, Table, srv_desc, uav_desc};
@@ -41,10 +42,6 @@ struct Panel {
     size: (u32, u32),
     texture: ID3D12Resource,
     producer: Option<FenceProducer>,
-    /// Shown at this present.
-    shown: bool,
-    /// Published shown the present before.
-    published_shown: bool,
     failures: u64,
 }
 
@@ -56,6 +53,8 @@ struct Panels {
     heap: DescriptorHeap,
     recorder: Recorder,
     panels: Vec<Panel>,
+    /// Which panels went out shown.
+    states: super::PanelStates,
     /// The layer the heap's views were made for.
     viewed: Option<ID3D12Resource>,
     published: u64,
@@ -75,9 +74,9 @@ impl Panels {
         for piece in pieces {
             let (name, size) = (piece.name, piece.size);
             let texture = d3d12::texture(device, size.0, size.1, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS).map_err(|e| format!("panel {name}: {e}"))?;
-            panels.push(Panel { name, size, texture, producer: None, shown: false, published_shown: false, failures: 0 });
+            panels.push(Panel { name, size, texture, producer: None, failures: 0 });
         }
-        Ok(Self { device: device.clone(), root, crop, clear, heap, recorder, panels, viewed: None, published: 0 })
+        Ok(Self { device: device.clone(), root, crop, clear, heap, recorder, panels, states: super::PanelStates::default(), viewed: None, published: 0 })
     }
 
     /// Views: the layer's SRV at 0, then each panel's UAV.
@@ -97,32 +96,27 @@ impl Panels {
     }
 
     /// Records this present's panels from `layer` (in COMMON, of `size`) for the shown pieces'
-    /// rectangles `rects` (by piece, the layer's pixels): which panels to publish (shown ones and
-    /// ones just cleared). `None` when no command list was free.
-    fn record(&mut self, layer: &ID3D12Resource, size: (u32, u32), rects: &[Option<[f32; 4]>]) -> windows::core::Result<Option<Vec<usize>>> {
+    /// rectangles `rects` (by piece, the layer's pixels): which panels to publish and how (shown
+    /// ones and ones just cleared). `None` when no command list was free.
+    fn record(&mut self, layer: &ID3D12Resource, size: (u32, u32), rects: &[Option<[f32; 4]>]) -> windows::core::Result<Option<Vec<(usize, PanelOut)>>> {
         let Some(list) = self.recorder.begin()? else { return Ok(None) };
         self.view(layer);
         let mut cropped: Vec<(usize, [f32; 4])> = Vec::new();
         let mut cleared: Vec<usize> = Vec::new();
-        for (i, panel) in self.panels.iter_mut().enumerate() {
-            match rects.get(i).copied().flatten() {
-                Some(rect) => {
-                    panel.shown = true;
-                    cropped.push((i, rect));
-                }
-                None => {
-                    panel.shown = false;
-                    if panel.published_shown {
-                        cleared.push(i);
-                    }
-                }
+        for i in 0..self.panels.len() {
+            let rect = rects.get(i).copied().flatten();
+            match (rect, self.states.out(i, rect.is_some())) {
+                (Some(rect), _) => cropped.push((i, rect)),
+                (None, Some(PanelOut::Cleared)) => cleared.push(i),
+                _ => {}
             }
         }
         const SRV: D3D12_RESOURCE_STATES = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         let constants = |panel: &Panel, source: [f32; 4]| Constants { out_width: panel.size.0, out_height: panel.size.1, ui_width: size.0, ui_height: size.1, source };
         let touched: Vec<usize> = cropped.iter().map(|(i, _)| *i).chain(cleared.iter().copied()).collect();
+        let outs = cropped.iter().map(|&(i, _)| (i, PanelOut::Shown)).chain(cleared.iter().map(|&i| (i, PanelOut::Cleared))).collect();
         if touched.is_empty() {
-            return Ok(Some(touched));
+            return Ok(Some(outs));
         }
         // SAFETY: records compute work on our own list with our own heap, root signature and
         // pipelines; every resource is live until the list has executed (the recorder's fence).
@@ -155,14 +149,14 @@ impl Panels {
                 barrier(&list, &self.panels[i].texture, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
             }
         }
-        Ok(Some(touched))
+        Ok(Some(outs))
     }
 
-    /// Publishes the panels `touched` on `channel`'s panel channels (each made at its first
-    /// publish).
-    fn publish(&mut self, queue: &ID3D12CommandQueue, channel: &ChannelName, touched: Vec<usize>, tick: u64) {
+    /// Publishes the panels `touched` (each shown or cleared) on `channel`'s panel channels (each
+    /// made at its first publish).
+    fn publish(&mut self, queue: &ID3D12CommandQueue, channel: &ChannelName, touched: Vec<(usize, PanelOut)>, tick: u64) {
         let device = self.device.clone();
-        for i in touched {
+        for (i, out) in touched {
             let panel = &mut self.panels[i];
             if panel.producer.is_none() {
                 let made = channel.panel(panel.name).ok_or_else(|| "bad channel name".to_owned()).and_then(|name| {
@@ -185,7 +179,7 @@ impl Panels {
             let Some(producer) = panel.producer.as_mut() else { continue };
             match producer.publish((&panel.texture, D3D12_RESOURCE_STATE_COMMON), (&panel.texture, D3D12_RESOURCE_STATE_COMMON), tick) {
                 Ok(true) => {
-                    panel.published_shown = panel.shown;
+                    self.states.went_out(i, out);
                     self.published += 1;
                 }
                 Ok(false) => {}
@@ -224,12 +218,12 @@ pub fn publish(queue: &ID3D12CommandQueue, layer: &ID3D12Resource) -> Vec<[f32; 
             Ok(Some(touched)) => touched,
             Ok(None) => return false,
             Err(e) => {
-                monaka_producer::log_first!(3, "dynamic HUD: panels not recorded: {e}");
+                monaka_producer::log_first(3, format_args!("dynamic HUD: panels not recorded: {e}"));
                 return false;
             }
         };
         if let Err(e) = panels.recorder.submit(queue) {
-            monaka_producer::log_first!(3, "dynamic HUD: panels not submitted: {e}");
+            monaka_producer::log_first(3, format_args!("dynamic HUD: panels not submitted: {e}"));
             return false;
         }
         panels.publish(queue, &frame.channel, touched, monaka_channel::tick());

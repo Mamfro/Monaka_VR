@@ -11,7 +11,7 @@
 //! stops the publishing for the run.
 
 use super::{PAIRS, Settings};
-use crate::pairs12::{PairPublisher12, Step};
+use crate::pairs::d3d12::{PairPublisher12, Step};
 use crate::publish::record_first;
 use monaka_channel::{ChannelName, d3d, d3d12, fence11::FenceProducer11};
 use monaka_core::protocol::HeadPose;
@@ -269,15 +269,4 @@ pub(crate) fn report() -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_side_by_side_back_buffer_splits_into_two_halves() {
-        assert_eq!(eye_size(3840, 2160, 1, 24), Ok((1920, 2160)));
-        assert_eq!(half(0, (1920, 2160)), [0, 0, 1920, 2160]);
-        assert_eq!(half(1, (1920, 2160)), [1920, 0, 3840, 2160]);
-        assert!(eye_size(3841, 2160, 1, 24).is_err(), "an odd width has no halves");
-        assert!(eye_size(3840, 2160, 4, 24).is_err(), "a multisampled back buffer cannot be copied");
-    }
-}
+mod tests;

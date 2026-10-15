@@ -4,14 +4,14 @@
 //! frame's HUD is taken, the dynamic HUD's pieces are cut out of it onto the hands
 //! (`crate::hud_panels::d3d12::publish`, while it takes pieces), and the eye about to be taken (the
 //! back buffer, in PRESENT) gets its HUD: kept out of the frame, the layer is laid back over it
-//! where `HudLayer::over` puts it with the pieces left out (`crate::hudover12`), and over the
+//! where `HudLayer::over` puts it with the pieces left out (`crate::hud_layer::d3d12`), and over the
 //! features' own images of the frame in play (`crate::providers::lay_hud_beside`); drawn into the
 //! frame as well, the pieces are taken out of it (`crate::hud_panels::d3d12::take_out`). A menu is
 //! the game's whole screen, shown flat: the layer goes back where the game laid it out, and from the
 //! next frame's draws on the HUD goes to the frame. The layer is given back every frame.
 
 use crate::hud_panels::d3d12 as panels;
-use crate::hudover12::{self, Params};
+use super::d3d12::{self, Params};
 use crate::providers::{HudLayer12, before_hud, lay_hud_beside, whole_frame};
 use windows::Win32::Graphics::Direct3D12::{D3D12_RESOURCE_STATE_PRESENT, ID3D12CommandQueue, ID3D12Resource};
 
@@ -66,7 +66,7 @@ pub fn at_present<G: HudLayer12>(at: Present<'_>) {
         let rects = panels::publish(queue, layer);
         match step(G::kept_out(), at.menu) {
             Step::LayOver => {
-                hudover12::lay(queue, buffer, D3D12_RESOURCE_STATE_PRESENT, layer, &over_params(size, at.menu, G::over(size, None), &rects));
+                d3d12::lay(queue, buffer, D3D12_RESOURCE_STATE_PRESENT, layer, &over_params(size, at.menu, G::over(size, None), &rects));
                 if in_play {
                     lay_hud_beside::<G>(queue, layer, size, &rects);
                 }

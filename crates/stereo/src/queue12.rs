@@ -57,10 +57,10 @@ pub unsafe fn hook(hooks: &mut Hooks) -> Result<(), Rejection> {
 }
 
 unsafe extern "system" fn execute(queue: *mut c_void, count: u32, lists: *const *mut c_void) {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     note(queue as usize);
     // SAFETY: the original, with the game's own arguments.
-    unsafe { EXECUTE.get()(queue, count, lists) }
+    unsafe { EXECUTE.get(&flight)(queue, count, lists) }
 }
 
 /// Notes that the current thread executed work on `queue`.
@@ -89,7 +89,7 @@ fn note(queue: usize) {
             return;
         }
     }
-    log_first!(1, "queue catcher: more than {SEEN} queues; {queue:#x} is not noted");
+    log_first(1, format_args!("queue catcher: more than {SEEN} queues; {queue:#x} is not noted"));
 }
 
 /// The game's direct queue, asked on the thread that presents `swap`: the queue the swapchain
@@ -98,10 +98,10 @@ fn note(queue: usize) {
 pub fn game_queue(swap: &IDXGISwapChain3) -> Option<ID3D12CommandQueue> {
     // SAFETY: the swapchain being presented, alive for the call.
     if let Some(queue) = unsafe { crate::swapchain_queue::of(swap.as_raw()) } {
-        log_first!(1, "queue catcher: the swapchain presents on {:#x}", queue.as_raw() as usize);
+        log_first(1, format_args!("queue catcher: the swapchain presents on {:#x}", queue.as_raw() as usize));
         return Some(queue);
     }
-    log_first!(1, "queue catcher: the swapchain's queue could not be read; using the presenting thread's");
+    log_first(1, format_args!("queue catcher: the swapchain's queue could not be read; using the presenting thread's"));
     let thread = thread_id();
     let queues: Vec<(usize, u32, u64)> =
         (0..SEEN).map(|i| (QUEUES[i].load(Relaxed), THREADS[i].load(Relaxed), LAST[i].load(Relaxed))).filter(|(q, ..)| *q != 0).collect();
@@ -109,7 +109,7 @@ pub fn game_queue(swap: &IDXGISwapChain3) -> Option<ID3D12CommandQueue> {
         Some(&(q, ..)) => q,
         None if queues.len() == 1 => queues[0].0,
         None => {
-            log_first!(3, "queue catcher: presenting thread {thread} executed on none of {queues:x?}");
+            log_first(3, format_args!("queue catcher: presenting thread {thread} executed on none of {queues:x?}"));
             return None;
         }
     };

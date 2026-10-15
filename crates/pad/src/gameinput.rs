@@ -178,9 +178,9 @@ pub fn install(hooks: &mut Hooks) -> Result<(), Rejection> {
 }
 
 unsafe extern "system" fn get_mouse_state(reading: *mut c_void, state: *mut MouseState) -> bool {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     // SAFETY: forwards the game's own call.
-    let ok = unsafe { GET_MOUSE_STATE.get()(reading, state) };
+    let ok = unsafe { GET_MOUSE_STATE.get(&flight)(reading, state) };
     if ok && !state.is_null() && ACTIVE.load(Acquire) {
         READS.fetch_add(1, Relaxed);
         // SAFETY: the game's out-structure, filled by GameInput.
@@ -285,6 +285,7 @@ const INFO_HEAD: [u8; 0x100] = {
 };
 
 unsafe extern "system" fn query_interface(_this: *mut c_void, _iid: *const c_void, out: *mut *mut c_void) -> i32 {
+    let _flight = InFlight::enter();
     if !out.is_null() {
         // SAFETY: the caller's out-pointer.
         unsafe { *out = std::ptr::null_mut() };
@@ -293,39 +294,49 @@ unsafe extern "system" fn query_interface(_this: *mut c_void, _iid: *const c_voi
 }
 /// AddRef and Release: the objects are static and live as long as this DLL.
 unsafe extern "system" fn add_ref(_this: *mut c_void) -> u32 {
+    let _flight = InFlight::enter();
     1
 }
 /// Returns 0: `S_OK`, `false`, a count of none, a void call done.
 unsafe extern "system" fn nothing(_this: *mut c_void) -> usize {
+    let _flight = InFlight::enter();
     0
 }
 unsafe extern "system" fn not_implemented(_this: *mut c_void) -> i32 {
+    let _flight = InFlight::enter();
     E_NOTIMPL
 }
 unsafe extern "system" fn device_info(_this: *mut c_void) -> *const DeviceInfo {
+    let _flight = InFlight::enter();
     &INFO
 }
 unsafe extern "system" fn device_status(_this: *mut c_void) -> u32 {
+    let _flight = InFlight::enter();
     STATUS_CONNECTED
 }
 /// `GetBatteryState(&state)`: unknown (all zero).
 unsafe extern "system" fn battery(_this: *mut c_void, out: *mut [u8; 32]) {
+    let _flight = InFlight::enter();
     if !out.is_null() {
         // SAFETY: the caller's out-structure (at most 32 bytes in v0).
         unsafe { *out = [0; 32] };
     }
 }
 unsafe extern "system" fn reading_kind(_this: *mut c_void) -> u32 {
+    let _flight = InFlight::enter();
     KIND_GAMEPAD
 }
 unsafe extern "system" fn reading_sequence(_this: *mut c_void, _kind: u32) -> u64 {
+    let _flight = InFlight::enter();
     SEQUENCE.load(Relaxed)
 }
 /// Microseconds, as GameInput counts them.
 unsafe extern "system" fn reading_timestamp(_this: *mut c_void) -> u64 {
+    let _flight = InFlight::enter();
     monaka_channel::tick() * 1000
 }
 unsafe extern "system" fn reading_device(_this: *mut c_void, out: *mut *mut c_void) {
+    let _flight = InFlight::enter();
     if !out.is_null() {
         // SAFETY: the caller's out-pointer; the device is static.
         unsafe { *out = DEVICE.get().copied().unwrap_or(0) as *mut c_void };
@@ -333,6 +344,7 @@ unsafe extern "system" fn reading_device(_this: *mut c_void, out: *mut *mut c_vo
 }
 /// `GetRawReport(&report)`: none.
 unsafe extern "system" fn reading_raw(_this: *mut c_void, out: *mut *mut c_void) -> bool {
+    let _flight = InFlight::enter();
     if !out.is_null() {
         // SAFETY: the caller's out-pointer.
         unsafe { *out = std::ptr::null_mut() };
@@ -361,6 +373,7 @@ const BUTTONS: [(u16, u32); 14] = [
 /// `GetGamepadState(&state)`: the VR pad as `GameInputGamepadState` (buttons, then the triggers
 /// 0..1 and the sticks -1..1, y up, as floats).
 unsafe extern "system" fn reading_gamepad(_this: *mut c_void, out: *mut [u32; 8]) -> bool {
+    let _flight = InFlight::enter();
     if out.is_null() {
         return false;
     }
@@ -446,7 +459,7 @@ pub fn install_pad(hooks: &mut Hooks) -> Result<(), Rejection> {
 }
 
 unsafe extern "system" fn get_current_reading(this: *mut c_void, kind: u32, device: *mut c_void, out: *mut *mut c_void) -> i32 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     if let (Some(&ours), Some(&reading)) = (DEVICE.get(), READING.get())
         && device as usize == ours
         && kind & KIND_GAMEPAD != 0
@@ -458,7 +471,7 @@ unsafe extern "system" fn get_current_reading(this: *mut c_void, kind: u32, devi
         return 0;
     }
     // SAFETY: forwards the game's own call.
-    unsafe { GET_CURRENT_READING.get()(this, kind, device, out) }
+    unsafe { GET_CURRENT_READING.get(&flight)(this, kind, device, out) }
 }
 
 /// The game's device callback: `(token, context, device, timestamp, status, previous status)`.
@@ -521,9 +534,9 @@ fn note(slot: usize, line: impl FnOnce() -> String) {
 }
 
 unsafe extern "system" fn probe_current(this: *mut c_void, kind: u32, device: *mut c_void, out: *mut *mut c_void) -> i32 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     // SAFETY: forwards the game's own call.
-    let hr = unsafe { PROBE_CURRENT.get()(this, kind, device, out) };
+    let hr = unsafe { PROBE_CURRENT.get(&flight)(this, kind, device, out) };
     PROBE_KINDS.fetch_or(u64::from(kind), Relaxed);
     if hr >= 0 {
         PROBE_FOUND.fetch_add(1, Relaxed);
@@ -533,9 +546,9 @@ unsafe extern "system" fn probe_current(this: *mut c_void, kind: u32, device: *m
 }
 
 unsafe extern "system" fn probe_next(this: *mut c_void, reference: *mut c_void, kind: u32, device: *mut c_void, out: *mut *mut c_void) -> i32 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     // SAFETY: forwards the game's own call.
-    let hr = unsafe { PROBE_NEXT.get()(this, reference, kind, device, out) };
+    let hr = unsafe { PROBE_NEXT.get(&flight)(this, reference, kind, device, out) };
     PROBE_KINDS.fetch_or(u64::from(kind), Relaxed);
     if hr >= 0 {
         PROBE_FOUND.fetch_add(1, Relaxed);
@@ -545,25 +558,25 @@ unsafe extern "system" fn probe_next(this: *mut c_void, reference: *mut c_void, 
 }
 
 unsafe extern "system" fn probe_register_reading(this: *mut c_void, device: *mut c_void, kind: u32, threshold: f32, context: *mut c_void, callback: *mut c_void, token: *mut u64) -> i32 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     // SAFETY: forwards the game's own call.
-    let hr = unsafe { PROBE_REGISTER_READING.get()(this, device, kind, threshold, context, callback, token) };
+    let hr = unsafe { PROBE_REGISTER_READING.get(&flight)(this, device, kind, threshold, context, callback, token) };
     note(2, || format!("RegisterReadingCallback(kind {kind:#x}, device {device:?}, callback {}) -> {hr:#x}", Module::describe(callback as usize)));
     hr
 }
 
 unsafe extern "system" fn probe_register_device(this: *mut c_void, device: *mut c_void, kind: u32, status: u32, enumeration: u32, context: *mut c_void, callback: *mut c_void, token: *mut u64) -> i32 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     // SAFETY: forwards the game's own call.
-    let hr = unsafe { PROBE_REGISTER_DEVICE.get()(this, device, kind, status, enumeration, context, callback, token) };
+    let hr = unsafe { PROBE_REGISTER_DEVICE.get(&flight)(this, device, kind, status, enumeration, context, callback, token) };
     note(3, || format!("RegisterDeviceCallback(kind {kind:#x}, status filter {status:#x}, enumeration {enumeration}, callback {}) -> {hr:#x}", Module::describe(callback as usize)));
     hr
 }
 
 unsafe extern "system" fn probe_gamepad(reading: *mut c_void, state: *mut [u32; 8]) -> bool {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     // SAFETY: forwards the game's own call.
-    let ok = unsafe { PROBE_GAMEPAD.get()(reading, state) };
+    let ok = unsafe { PROBE_GAMEPAD.get(&flight)(reading, state) };
     // SAFETY: the game's out-structure, filled when `ok`.
     let seen = if ok && !state.is_null() { Some(unsafe { *state }) } else { None };
     note(4, || {

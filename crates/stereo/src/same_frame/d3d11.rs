@@ -1,14 +1,14 @@
 //! Same-frame pairs on D3D11: each eye is presented on its own through the game's swapchain. The
 //! game's present entry hands each eye's present to [`around_eye_present`], which copies the eye out
 //! of the back buffer just before the present runs and, at the right eye, publishes the pair over
-//! the keyed-mutex channel. DXGI's Present (hooked here) keeps the left eye's present off the
+//! the fence channel. DXGI's Present (hooked here) keeps the left eye's present off the
 //! monitor, and sends a frame without a pair lately (a menu, loading, no head pose) flat.
 //!
 //! The game is recognised by its window, not its swapchain: a mode change (the eye size asked for)
 //! can give it a new one.
 
 use super::{PAIRS, Settings};
-use crate::pairs11::{PairPublisher11, Step};
+use crate::pairs::d3d11::{PairPublisher11, Step};
 use crate::present::{PresentFn, hook_dxgi_present};
 use monaka_channel::{ChannelName, d3d};
 use monaka_core::protocol::HeadPose;
@@ -101,7 +101,7 @@ fn copy_eye(settings: &Settings, swap: usize, eye: usize, pose: HeadPose) -> boo
 
 /// `IDXGISwapChain::Present`, for every swapchain in the process.
 unsafe extern "system" fn dxgi_present(swap: *mut c_void, interval: u32, flags: u32) -> HRESULT {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     if PAIRS.publishing() && flags & DXGI_PRESENT_TEST.0 == 0 {
         ALL_PRESENTS.fetch_add(1, Relaxed);
         // SAFETY: DXGI's own swapchain argument.
@@ -116,7 +116,7 @@ unsafe extern "system" fn dxgi_present(swap: *mut c_void, interval: u32, flags: 
             if window != 0 && window == GAME_WINDOW.load(Relaxed) {
                 PAIRS.present();
                 let eye = settings.presenting().map(|label| label.eye);
-                match shown(swap as usize == DISPATCHED.get(), eye, (settings.hide_left)(), PAIRS.recent_pair()) {
+                match shown(swap as usize == DISPATCHED.get(), eye, PAIRS.recent_pair()) {
                     Shown::Hidden => {
                         HIDDEN.fetch_add(1, Relaxed);
                         return S_OK;
@@ -128,7 +128,7 @@ unsafe extern "system" fn dxgi_present(swap: *mut c_void, interval: u32, flags: 
         }
     }
     // SAFETY: the original, with DXGI's arguments.
-    unsafe { DXGI_PRESENT.get()(swap, interval, flags) }
+    unsafe { DXGI_PRESENT.get(&flight)(swap, interval, flags) }
 }
 
 /// What a present of the game's window does.
@@ -143,11 +143,11 @@ pub(crate) enum Shown {
 }
 
 /// A present of the game's window: `dispatched` (the swapchain whose eye present is dispatched on
-/// this thread), `eye` the frame labels' eye presenting, `hide_left` the game's choice, `recent`
-/// whether a pair finished lately.
-pub(crate) fn shown(dispatched: bool, eye: Option<usize>, hide_left: bool, recent: bool) -> Shown {
+/// this thread), `eye` the frame labels' eye presenting, `recent` whether a pair finished lately.
+/// The left eye's present is kept off the monitor: only the right eye's shows there.
+pub(crate) fn shown(dispatched: bool, eye: Option<usize>, recent: bool) -> Shown {
     match eye {
-        Some(0) if dispatched && hide_left => Shown::Hidden,
+        Some(0) if dispatched => Shown::Hidden,
         None if !recent => Shown::Flat,
         _ => Shown::AsIs,
     }

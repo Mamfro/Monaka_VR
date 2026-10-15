@@ -28,7 +28,16 @@ const WARN: Color32 = Color32::from_rgb(240, 110, 90);
 
 pub struct Panel {
     canvas: Canvas,
-    shown: Option<(Menu, Settings, Status)>,
+    shown: Option<(Menu, Settings, Status, bool)>,
+}
+
+/// The outline round the panel the pad drives, in the headset (points); the others keep the same
+/// room, clear, so nothing moves when it goes elsewhere.
+pub const OUTLINE: f32 = 4.0;
+
+/// The outline's stroke: the accent while `on`, clear otherwise.
+pub(crate) fn outline(on: bool) -> Stroke {
+    Stroke::new(OUTLINE, if on { ACCENT } else { Color32::TRANSPARENT })
 }
 
 impl Panel {
@@ -47,14 +56,15 @@ impl Panel {
         self.shown = None;
     }
 
-    /// Draws the menu when it shows something new; the image when it was drawn.
-    pub fn draw(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, menu: &Menu, settings: &Settings, status: &Status) -> Result<Option<&ID3D11Texture2D>> {
-        let now = (*menu, *settings, *status);
+    /// Draws the menu when it shows something new (`outlined`: the pad drives it, beside other
+    /// panels); the image when it was drawn.
+    pub fn draw(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, menu: &Menu, settings: &Settings, status: &Status, outlined: bool) -> Result<Option<&ID3D11Texture2D>> {
+        let now = (*menu, *settings, *status, outlined);
         if self.shown == Some(now) && self.canvas.image().is_some() {
             return Ok(None);
         }
         let image = self.canvas.draw(device, context, |ui| {
-            layout(ui, menu, settings, status, false);
+            layout(ui, menu, settings, status, false, outlined);
         })?;
         if image.is_some() {
             self.shown = Some(now);
@@ -72,12 +82,12 @@ const PAGE_ROW: f32 = 22.0;
 const FOOTER: f32 = 48.0;
 
 /// The menu's page; with a `pointer` (the 2D window) its tabs and lines take clicks, and the one
-/// made is returned.
-pub fn layout(ui: &mut egui::Ui, menu: &Menu, settings: &Settings, status: &Status, pointer: bool) -> Option<Click> {
+/// made is returned. `outlined`: the pad drives it (the headset, beside other panels).
+pub fn layout(ui: &mut egui::Ui, menu: &Menu, settings: &Settings, status: &Status, pointer: bool, outlined: bool) -> Option<Click> {
     let sense = if pointer { Sense::click() } else { Sense::hover() };
     let mut clicked = None;
-    let inside = ui.available_size() - Vec2::splat(2.0 * EDGE as f32);
-    Frame::new().fill(BACKGROUND).corner_radius(CornerRadius::same(14)).inner_margin(Margin::same(EDGE)).show(ui, |ui| {
+    let inside = ui.available_size() - Vec2::splat(2.0 * (EDGE as f32 + OUTLINE));
+    Frame::new().fill(BACKGROUND).stroke(outline(outlined)).corner_radius(CornerRadius::same(14)).inner_margin(Margin::same(EDGE)).show(ui, |ui| {
         ui.set_min_size(inside);
         ui.set_max_size(inside);
         let row_width = inside.x - 2.0 * ROW_EDGE as f32 - 2.0;
@@ -129,7 +139,7 @@ pub fn layout(ui: &mut egui::Ui, menu: &Menu, settings: &Settings, status: &Stat
             }
         }
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            let keys = if pointer { "Click: switch   Right-click: step back" } else { "Stick: move   A: switch   LT / RT: tabs   B: close" };
+            let keys = if pointer { "Click: switch   Right-click: step back" } else { "Stick / D-pad: move   A: switch   LB / RB: panels   LT / RT: tabs   B: close" };
             ui.label(RichText::new(keys).size(12.0).color(DIM));
             if let Some((first, last, count)) = shown {
                 if last - first < count {

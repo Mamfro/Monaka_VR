@@ -48,11 +48,11 @@ pub use flat::{Flat, FlatPicture};
 pub use labels::{Label, Taken};
 pub use own_pairs::{OwnPairs, Report, join_present, leave_present};
 
-use crate::alternate::{AlternatePublisher, Step};
+use crate::alternate::{Step, d3d11::AlternatePublisher};
 use flat::shaped;
 use labels::Frames;
 use own_pairs::OWN_PAIRS;
-use crate::alternate12::AlternatePublisher12;
+use crate::alternate::d3d12::AlternatePublisher12;
 use crate::present::PresentFn;
 use monaka_channel::pose::{HeadSource, PoseChannel, Synthetic};
 use monaka_core::alternate::Schedule;
@@ -79,7 +79,7 @@ pub struct Pending {
 
 /// Where the pairs go.
 pub enum Publisher {
-    /// The keyed-mutex channel, copies on the swapchain's D3D11 device.
+    /// The fence channel, copies on the swapchain's D3D11 device.
     D3D11(AlternatePublisher),
     /// The fence channel, copies on the game's direct queue (`queue`, looked up at each present
     /// for the swapchain presenting: the game may make it after the hooks go in).
@@ -576,7 +576,7 @@ impl Driver {
                 }
                 (Some(queue), None) => Some(publisher.before_present_with_depth(&swap, &queue, n, frame_depth, &self.head, report)),
                 (None, _) => {
-                    log_first!(3, "present {n}: the game's command queue is not known");
+                    log_first(3, format_args!("present {n}: the game's command queue is not known"));
                     None
                 }
             }),

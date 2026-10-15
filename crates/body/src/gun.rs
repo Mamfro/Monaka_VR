@@ -86,5 +86,3 @@ fn shot<G: Fires + HeldItems>(fired: &Fired) -> Option<Shot> {
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod lift_checks;

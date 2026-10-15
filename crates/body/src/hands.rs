@@ -129,6 +129,4 @@ fn offset(m: &Mat34, local: Vec3) -> Vec3 {
 }
 
 #[cfg(test)]
-mod lift_checks;
-#[cfg(test)]
 mod tests;

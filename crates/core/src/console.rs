@@ -8,6 +8,8 @@
 //! probes, its breakpoints: [`ConsoleBlock::set_status`]) and a log of the questions asked and
 //! the start of each answer, whoever asked ([`ConsoleBlock::post`]).
 
+use crate::protocol::{Stamp, Versioned};
+
 #[cfg(test)]
 mod tests;
 
@@ -45,20 +47,6 @@ pub struct ConsoleBlock {
 const CUT: &str = "\n(cut: the answer is longer than the console holds)";
 
 impl ConsoleBlock {
-    pub fn is_blank(&self) -> bool {
-        self.magic == 0
-    }
-
-    pub fn is_compatible(&self) -> bool {
-        self.magic == CONSOLE_MAGIC && self.version == CONSOLE_VERSION
-    }
-
-    /// Makes a blank block (all zeros, as a new mapping is) a fresh one, in place.
-    pub fn start(&mut self) {
-        self.magic = CONSOLE_MAGIC;
-        self.version = CONSOLE_VERSION;
-    }
-
     /// Tool: asks `command` (cut to fit); its number, for [`ConsoleBlock::answer_to`].
     pub fn ask(&mut self, command: &str) -> u64 {
         let bytes = cut(command, COMMAND_MAX);
@@ -89,6 +77,21 @@ impl ConsoleBlock {
     /// Tool: the answer to question `number`, once given.
     pub fn answer_to(&self, number: u64) -> Option<String> {
         (self.answered == number).then(|| String::from_utf8_lossy(&self.answer[..(self.answer_len as usize).min(ANSWER_MAX)]).into_owned())
+    }
+}
+
+impl Versioned for ConsoleBlock {
+    const MAGIC: u32 = CONSOLE_MAGIC;
+    const VERSION: u32 = CONSOLE_VERSION;
+    const WHAT: &'static str = "console block";
+
+    fn stamp(&self) -> Stamp {
+        Stamp { magic: self.magic, version: self.version }
+    }
+
+    fn start(&mut self) {
+        self.magic = CONSOLE_MAGIC;
+        self.version = CONSOLE_VERSION;
     }
 }
 

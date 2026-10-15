@@ -36,7 +36,7 @@ fn the_stats_panel_draws_in_the_headset() {
     };
     let console = crate::console_view::ConsoleView::default();
     let content = Content { stats: &stats, console: &console, fake_vr: &crate::fake_vr::FakeVr::HEADSET };
-    let image = canvas.draw(&device, &context, |ui| headset_page(ui, PanelId::Stats, &content)).unwrap().expect("drawn").clone();
+    let image = canvas.draw(&device, &context, |ui| headset_page(ui, PanelId::Stats, &content, &HeadsetFocus::default())).unwrap().expect("drawn").clone();
     let (width, height, pixels) = read_image(&device, &context, &image).unwrap();
     assert_eq!([width, height], PanelId::Stats.pixels());
     let shades: std::collections::HashSet<u8> = pixels.chunks(4).map(|p| p[0]).collect();
@@ -62,7 +62,7 @@ fn a_panels_window_matches_the_menu_in_the_2d_window() {
             .draw(&device, &context, |ui| {
                 let ctx = ui.ctx().clone();
                 egui::Window::new("Monaka debug").title_bar(false).frame(egui::Frame::NONE).resizable(false).fixed_size([460.0, 520.0]).fixed_pos([12.0, 12.0]).show(&ctx, |ui| {
-                    crate::menu::panel::layout(ui, &menu, &settings, &status, true);
+                    crate::menu::panel::layout(ui, &menu, &settings, &status, true, false);
                 });
                 window(PanelId::Stats).fixed_pos([500.0, 12.0]).show(&ctx, |ui| window_page(ui, PanelId::Stats, &content, &mut true));
             })
@@ -144,4 +144,29 @@ fn the_fake_vr_panel_shows_the_head_and_hands() {
         std::fs::write(path, monaka_core::png::rgba(width, height, &opaque)).unwrap();
     }
     assert!(pixels.chunks(4).filter(|p| p[3] > 200).count() > 50_000, "the panel is drawn");
+}
+
+/// The Console panel in the headset, driven by the pad: outlined, a button picked, its long log
+/// scrolled up.
+#[test]
+fn the_console_panel_in_the_headset_shows_the_pick_and_the_scrolled_log() {
+    let (device, context, _) = create_device(None).unwrap();
+    let mut canvas = Canvas::new(DXGI_FORMAT_R8G8B8A8_UNORM, PanelId::Console.pixels());
+    let stats = StatsView::default();
+    let console = crate::console_view::ConsoleView {
+        open: true,
+        status: "1 probes in\n  0 arm_palette  180.0 a frame, 16 threads".into(),
+        log: (0..120).map(|n| format!("> line {n}: probe 0 at exe+0x{:x}\n", 0x25f930 + n)).collect(),
+    };
+    let content = Content { stats: &stats, console: &console, fake_vr: &crate::fake_vr::FakeVr::HEADSET };
+    let focus = HeadsetFocus { active: true, console: crate::console_view::ConsoleNav { row: 1, column: 2, scroll: 10 } };
+    let image = canvas.draw(&device, &context, |ui| headset_page(ui, PanelId::Console, &content, &focus)).unwrap().expect("drawn").clone();
+    let (width, height, pixels) = read_image(&device, &context, &image).unwrap();
+    if let Some(path) = std::env::var_os("MONAKA_CONSOLE_HEADSET_PNG") {
+        std::fs::write(path, monaka_core::png::rgba(width, height, &pixels)).unwrap();
+    }
+    // The outline: the accent along the left edge, halfway down.
+    let at = |x: u32, y: u32| &pixels[((y * width + x) * 4) as usize..][..4];
+    let edge = (0..12).map(|x| at(x, height / 2)).find(|p| p[0] > 200 && p[1] > 120 && p[2] < 120);
+    assert!(edge.is_some(), "outlined in the accent");
 }

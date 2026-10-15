@@ -2,9 +2,9 @@
 //! writes the pose each published pair was rendered with. Either side may create it. Every access
 //! waits at most a couple of milliseconds; a miss is not an error.
 
-use crate::shared::{Create, SharedBlock};
-use crate::{ChannelName, Error, Result};
-use monaka_core::protocol::{HeadPose, PoseBlock, RenderedPair};
+use crate::shared::SharedBlock;
+use crate::{ChannelName, Result};
+use monaka_core::protocol::{Block, HeadPose, PoseBlock, RenderedPair, Versioned};
 use std::sync::Mutex;
 use monaka_core::sync::Locked;
 
@@ -16,17 +16,8 @@ pub struct PoseChannel {
 
 impl PoseChannel {
     pub fn open(channel: &ChannelName) -> Result<Self> {
-        let mut block = SharedBlock::<PoseBlock>::create(&channel.pose(), &channel.pose_lock(), Create::OrOpen)?;
-        {
-            let mut record = block.lock(WAIT_MS).tolerant().ok_or(Error::Busy)?;
-            if record.is_blank() {
-                *record = PoseBlock::fresh();
-            }
-            if !record.is_compatible() {
-                return Err(Error::Incompatible("pose block magic or version"));
-            }
-        }
-        Ok(Self { block })
+        let (name, lock) = channel.block(Block::Pose);
+        Ok(Self { block: SharedBlock::<PoseBlock>::open_versioned(&name, &lock, WAIT_MS)? })
     }
 
     fn with<R>(&mut self, f: impl FnOnce(&mut PoseBlock) -> R) -> Option<R> {
@@ -104,46 +95,4 @@ impl Default for HeadSource {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn head_source_prefers_the_synthetic_head() {
-        let name = test_channel("source");
-        let source = HeadSource::new();
-        assert!(source.current().is_none() && !source.connected());
-        let mut viewer = PoseChannel::open(&name).unwrap();
-        let real = HeadPose { valid: 1, ipd: 0.064, ..HeadPose::default() };
-        assert!(viewer.write_head(&real));
-        source.open(Some(PoseChannel::open(&name).unwrap()), None);
-        assert_eq!(source.current(), Some(real));
-        let fake = HeadPose { ipd: 0.07, ..real };
-        source.open(Some(PoseChannel::open(&name).unwrap()), Some(Box::new(move || fake)));
-        assert_eq!(source.current(), Some(fake), "the synthetic head wins");
-        assert!(source.write_pair(5, [fake, fake]), "records still go to the viewer");
-        assert_eq!(viewer.read_pair(5).map(|p| p.eyes[0].ipd), Some(0.07));
-        source.close();
-        assert!(source.current().is_none() && !source.write_pair(6, [fake, fake]));
-    }
-
-    fn test_channel(tag: &str) -> ChannelName {
-        ChannelName::new(format!(r"Local\monaka-test-{tag}-{}", std::process::id())).unwrap()
-    }
-
-    #[test]
-    fn head_and_pairs_travel_between_sides() {
-        let name = test_channel("pose");
-        let mut writer = PoseChannel::open(&name).unwrap();
-        let mut reader = PoseChannel::open(&name).unwrap();
-        assert!(reader.read_head().is_none());
-
-        let head = HeadPose { valid: 1, ipd: 0.064, position: [0.0, 1.6, 0.0], ..HeadPose::default() };
-        assert!(writer.write_head(&head));
-        assert_eq!(reader.read_head(), Some(head));
-
-        let pair = RenderedPair { sequence: 17, eyes: [head, head] };
-        assert!(writer.write_pair(&pair));
-        assert_eq!(reader.read_pair(17), Some(pair));
-        assert!(reader.read_pair(1).is_none());
-    }
-}
+mod tests;

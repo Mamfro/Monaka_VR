@@ -363,5 +363,3 @@ pub fn stop() {
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod lift_checks;

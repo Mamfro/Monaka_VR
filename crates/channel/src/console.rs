@@ -2,9 +2,10 @@
 //! the producer takes questions and answers them. Either side may create it. Every access waits
 //! at most a couple of milliseconds; a miss is not an error.
 
-use crate::shared::{Create, SharedBlock};
-use crate::{ChannelName, Error, Result};
+use crate::shared::SharedBlock;
+use crate::{ChannelName, Result};
 use monaka_core::console::ConsoleBlock;
+use monaka_core::protocol::Block;
 
 const WAIT_MS: u32 = 2;
 
@@ -15,27 +16,19 @@ pub struct ConsoleChannel {
 impl ConsoleChannel {
     /// The producer's console.
     pub fn open(channel: &ChannelName) -> Result<Self> {
-        Self::open_named(&channel.console(), &channel.console_lock())
+        let (name, lock) = channel.block(Block::Console);
+        Self::open_named(&name, &lock)
     }
 
     /// The viewer's own (the 2D window's command line): the same questions and answers, the viewer
     /// answering.
     pub fn open_view(channel: &ChannelName) -> Result<Self> {
-        Self::open_named(&channel.view_console(), &channel.view_console_lock())
+        let (name, lock) = channel.block(Block::ViewConsole);
+        Self::open_named(&name, &lock)
     }
 
     fn open_named(name: &str, lock: &str) -> Result<Self> {
-        let mut block = SharedBlock::<ConsoleBlock>::create(name, lock, Create::OrOpen)?;
-        {
-            let mut record = block.lock(WAIT_MS * 50).tolerant().ok_or(Error::Busy)?;
-            if record.is_blank() {
-                record.start();
-            }
-            if !record.is_compatible() {
-                return Err(Error::Incompatible("console block magic or version"));
-            }
-        }
-        Ok(Self { block })
+        Ok(Self { block: SharedBlock::<ConsoleBlock>::open_versioned(name, lock, WAIT_MS * 50)? })
     }
 
     /// Producer: the question waiting, with its number.

@@ -7,7 +7,6 @@
 use crate::d3d;
 use crate::shared::OwnedHandle;
 use crate::{Error, Result};
-use monaka_core::protocol::{KEY_FREE, KEY_UNREAD};
 use windows::Win32::Foundation::S_OK;
 use windows::Win32::Graphics::Direct3D11::{D3D11_BIND_SHADER_RESOURCE, D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX, D3D11_RESOURCE_MISC_SHARED_NTHANDLE, ID3D11Device, ID3D11Device1, ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
@@ -16,6 +15,11 @@ use windows::core::{HRESULT, HSTRING, Interface};
 
 #[cfg(test)]
 mod tests;
+
+/// Key meaning "the writer may fill the image".
+const KEY_FREE: u64 = 0;
+/// Key meaning "an unread image is waiting".
+const KEY_UNREAD: u64 = 1;
 
 /// `AcquireSync` without waiting: whether `key` was taken.
 fn acquire(mutex: &IDXGIKeyedMutex, key: u64) -> bool {

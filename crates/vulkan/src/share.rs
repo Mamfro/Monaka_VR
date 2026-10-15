@@ -310,14 +310,14 @@ pub fn present(queue: VkQueue, swapchain: VkSwapchainKHR, index: u32) {
         return;
     }
     let (Some(device), Some(chain), Some(family)) = (device::device(), device::swapchain(swapchain), device::family_of(queue)) else {
-        log_first!(3, "a present before the sharing can run: {}", device::state());
+        log_first(3, format_args!("a present before the sharing can run: {}", device::state()));
         return;
     };
     let Some(&image) = chain.images[..chain.count as usize].get(index as usize) else { return };
     let depth = ON_DEPTH.get().and_then(|depth| depth()).filter(|d| {
         let usable = depth_format(d.format).is_some();
         if !usable {
-            log_first!(1, "the game's depth (format {}) cannot go out (32-bit float or 24-bit depth only)", d.format);
+            log_first(1, format_args!("the game's depth (format {}) cannot go out (32-bit float or 24-bit depth only)", d.format));
         }
         usable
     });

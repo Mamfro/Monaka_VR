@@ -1,25 +1,24 @@
 //! Frame generation for VR producers: AMD FSR frame generation through the FFX API from a game's
-//! own loader ([`ffx`]), as a ready-made component ([`feature`]), the HUD composer that keeps a
-//! HUD out of it ([`hud12`]), motion vectors onto each eye's own previous frame ([`motion`]),
-//! each eye's inputs from the calls a game makes for its upscaler ([`inputs`]: depth, motion
-//! vectors, how the frame was rendered; from Streamline's calls for DLSS or FSR's dispatch), the
-//! pacing of generated and real pairs ([`pacing`]), FSR upscaling ([`upscale`]), and the game's own
-//! FSR upscaling through its loader imports ([`ffx_imports`]) kept per eye ([`upscale_per_eye`]).
+//! own loader (`monaka_ffx`) per image stream ([`stream`]), as a ready-made component
+//! ([`feature`]), the HUD composer that keeps a HUD out of it ([`hud12`]), motion vectors onto each
+//! eye's own previous frame ([`motion`]), each eye's inputs from the calls a game makes for its
+//! upscaler ([`inputs`]: depth, motion vectors, how the frame was rendered; from Streamline's calls
+//! for DLSS or FSR's dispatch), the pacing of generated and real pairs ([`pacing`]), and the game's
+//! own FSR upscaling through its loader imports ([`ffx_imports`]) kept per eye ([`upscale_per_eye`]).
 
 pub mod feature;
-pub mod ffx;
 pub mod ffx_imports;
 pub mod hud12;
 pub mod inputs;
 pub mod motion;
 pub mod pacing;
 pub mod stream;
-pub mod upscale;
 pub mod upscale_per_eye;
 
 pub use stream::{EyeStream, FrameInputs, SLOTS, enable, enabled, eyes_skipped, fitting_stream, free_when_idle, skip_eye};
 
 use monaka_core::protocol::HeadPose;
+use monaka_ffx as ffx;
 use monaka_producer::log;
 
 /// Loads AMD's FFX loader shipped with the game (the game folder is searched) and its API.
@@ -75,16 +74,4 @@ pub fn blend(a: &HeadPose, b: &HeadPose, t: f32) -> HeadPose {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn halfway_pose() {
-        let a = HeadPose { orientation: [0.0, 0.0, 0.0, 1.0], position: [0.0, 1.0, 0.0], ipd: 0.06, ..HeadPose::default() };
-        let half = 0.2f32;
-        let b = HeadPose { orientation: [0.0, half.sin(), 0.0, half.cos()], position: [0.2, 1.0, 0.0], ipd: 0.06, ..HeadPose::default() };
-        let m = blend(&a, &b, 0.5);
-        assert!((m.position[0] - 0.1).abs() < 1e-6);
-        assert!((m.orientation[1] - 0.1f32.sin()).abs() < 1e-3);
-    }
-}
+mod tests;

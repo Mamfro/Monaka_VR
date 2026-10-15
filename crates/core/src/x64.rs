@@ -2,6 +2,19 @@
 //! ModRM operand, rip-relative or register-relative displacement, immediate and branch target. It
 //! does not name instructions beyond what scanning needs; anything it cannot account for is `None`
 //! rather than a guess. Covers the legacy one-byte and 0F maps, 0F38/0F3A, VEX and EVEX.
+//!
+//! 32-bit code ([`Mode::Legacy32`], [`decode_in`]) shares the tables: no REX (0x40-0x4F are
+//! `inc`/`dec`), `[disp32]` is an absolute address, moffs are 4 bytes; VEX/EVEX and 16-bit
+//! addressing are refused there.
+
+/// The code being decoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// 64-bit code.
+    Long,
+    /// 32-bit x86 code.
+    Legacy32,
+}
 
 /// Which opcode table an instruction comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,8 +212,9 @@ fn escape(opcode: u8) -> Option<Form> {
     }
 }
 
-fn modrm_operand(bytes: &[u8], at: usize, rex_b: u8, address32: bool) -> Option<(usize, Option<Memory>, Option<u8>)> {
-    let _ = address32; // 32-bit addressing has the same ModRM/SIB shape in 64-bit mode.
+/// The ModRM operand at `at` (32-bit addressing has the same ModRM/SIB shape in either mode;
+/// `[disp32]` is rip-relative in 64-bit code only).
+fn modrm_operand(bytes: &[u8], at: usize, rex_b: u8, code: Mode) -> Option<(usize, Option<Memory>, Option<u8>)> {
     let m = *bytes.get(at)?;
     let (mode, rm) = (m >> 6, m & 7);
     if mode == 3 {
@@ -221,7 +235,7 @@ fn modrm_operand(bytes: &[u8], at: usize, rex_b: u8, address32: bool) -> Option<
     match mode {
         0 if rm == 5 => {
             let displacement = i32::from_le_bytes(bytes.get(disp_at..disp_at + 4)?.try_into().ok()?);
-            Some((length + 4, Some(Memory { base: None, rip_relative: true, displacement, displacement_offset: disp_at as u8 }), None))
+            Some((length + 4, Some(Memory { base: None, rip_relative: code == Mode::Long, displacement, displacement_offset: disp_at as u8 }), None))
         }
         0 => Some((length, Some(Memory { base, rip_relative: false, displacement: 0, displacement_offset: 0 }), None)),
         1 => {
@@ -247,15 +261,23 @@ fn read_imm(bytes: &[u8], at: usize, size: usize) -> Option<i64> {
     })
 }
 
-/// Decodes the instruction at the start of `bytes`.
+/// Decodes the 64-bit instruction at the start of `bytes`.
 pub fn decode(bytes: &[u8]) -> Option<Instruction> {
+    decode_in(bytes, Mode::Long)
+}
+
+/// Decodes the instruction at the start of `bytes`, in `mode`'s code.
+pub fn decode_in(bytes: &[u8], mode: Mode) -> Option<Instruction> {
+    let long = mode == Mode::Long;
     let mut at = 0;
     let mut operand16 = false;
-    let mut address32 = false;
+    // 32-bit addresses: an address-size prefix in 64-bit code, the default in 32-bit code.
+    let mut address32 = !long;
     while let Some(&b) = bytes.get(at) {
         match b {
             0x66 => operand16 = true,
-            0x67 => address32 = true,
+            0x67 if long => address32 = true,
+            0x67 => return None,
             0xf0 | 0xf2 | 0xf3 | 0x2e | 0x36 | 0x3e | 0x26 | 0x64 | 0x65 => {}
             _ => break,
         }
@@ -265,7 +287,8 @@ pub fn decode(bytes: &[u8]) -> Option<Instruction> {
         }
     }
     let mut rex = 0u8;
-    if let Some(&b) = bytes.get(at)
+    if long
+        && let Some(&b) = bytes.get(at)
         && (0x40..=0x4f).contains(&b)
     {
         rex = b;
@@ -276,7 +299,7 @@ pub fn decode(bytes: &[u8]) -> Option<Instruction> {
 
     // VEX (C4/C5) and EVEX (62): always a ModRM operand; an imm8 for map 3 and a few map-1 opcodes.
     if matches!(lead, 0xc4 | 0xc5 | 0x62) {
-        if rex != 0 {
+        if rex != 0 || !long {
             return None;
         }
         let (map, wide, reg_ext, b_ext, prefix_length) = match lead {
@@ -315,7 +338,7 @@ pub fn decode(bytes: &[u8]) -> Option<Instruction> {
             });
         }
         let reg = (*bytes.get(at)? >> 3 & 7) | reg_ext;
-        let (operand, memory, rm_register) = modrm_operand(bytes, at, b_ext, address32)?;
+        let (operand, memory, rm_register) = modrm_operand(bytes, at, b_ext, mode)?;
         at += operand;
         let imm8 = map == 3 || (map == 1 && matches!(opcode, 0x70..=0x73 | 0xc2 | 0xc4..=0xc6));
         let immediate = if imm8 { Some(read_imm(bytes, at, 1)?) } else { None };
@@ -355,7 +378,9 @@ pub fn decode(bytes: &[u8]) -> Option<Instruction> {
     } else {
         at += 1;
         let modrm_at = at;
-        (Map::Legacy, lead, legacy(lead, || bytes.get(modrm_at).map(|m| m >> 3 & 7))?)
+        // 32-bit code's inc/dec r32 (REX in 64-bit code).
+        let shape = if !long && (0x40..=0x4f).contains(&lead) { register(Imm::None) } else { legacy(lead, || bytes.get(modrm_at).map(|m| m >> 3 & 7)) };
+        (Map::Legacy, lead, shape?)
     };
 
     let mut reg = None;
@@ -363,7 +388,7 @@ pub fn decode(bytes: &[u8]) -> Option<Instruction> {
     let mut memory = None;
     if shape.modrm {
         reg = Some((*bytes.get(at)? >> 3 & 7) | rex_r);
-        let (operand, mem, rm) = modrm_operand(bytes, at, rex_b, address32)?;
+        let (operand, mem, rm) = modrm_operand(bytes, at, rex_b, mode)?;
         at += operand;
         memory = mem;
         rm_register = rm;
@@ -418,56 +443,4 @@ pub fn decode(bytes: &[u8]) -> Option<Instruction> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn length(bytes: &[u8]) -> Option<u8> {
-        decode(bytes).map(|i| i.length)
-    }
-
-    #[test]
-    fn common_lengths() {
-        assert_eq!(length(&[0x48, 0x89, 0x5c, 0x24, 0x08]), Some(5), "mov [rsp+8], rbx");
-        assert_eq!(length(&[0x48, 0x81, 0xec, 0x08, 0x01, 0x00, 0x00]), Some(7), "sub rsp, imm32");
-        assert_eq!(length(&[0x48, 0x8d, 0xac, 0x24, 0x60, 0xf9, 0xff, 0xff]), Some(8), "lea rbp, [rsp+disp32]");
-        assert_eq!(length(&[0x0f, 0xb6, 0x81, 0xa0, 0x07, 0x00, 0x00]), Some(7), "movzx eax, byte [rcx+disp32]");
-        assert_eq!(length(&[0x80, 0x3d, 1, 2, 3, 4, 0]), Some(7), "cmp byte [rip+x], imm8");
-        assert_eq!(length(&[0x48, 0xb8, 1, 2, 3, 4, 5, 6, 7, 8]), Some(10), "mov rax, imm64");
-        assert_eq!(length(&[0x66, 0xc7, 0x41, 0x08, 0x34, 0x12]), Some(6), "mov word [rcx+8], imm16");
-        assert_eq!(length(&[0xf6, 0x41, 0x08, 0x01]), Some(4), "test byte [rcx+8], 1");
-        assert_eq!(length(&[0xf6, 0xd8]), Some(2), "neg al: no immediate");
-        assert_eq!(length(&[0xc5, 0xf8, 0x77]), Some(3), "vzeroupper");
-        assert_eq!(length(&[0xc5, 0xfa, 0x10, 0x05, 1, 2, 3, 4]), Some(8), "vmovss xmm0, [rip+x]");
-        assert_eq!(length(&[0xc4, 0xe3, 0x79, 0x04, 0xc0, 0x00]), Some(6), "vpermilps imm8 (map 3)");
-        assert_eq!(length(&[0x66, 0x0f, 0x3a, 0x0f, 0xc1, 0x08]), Some(6), "palignr imm8");
-        assert_eq!(length(&[0x66, 0x0f, 0x38, 0x00, 0xc1]), Some(5), "pshufb");
-        assert_eq!(length(&[0x0f, 0x1f, 0x44, 0x00, 0x00]), Some(5), "nop dword [rax+rax]");
-        assert_eq!(length(&[0xe8, 0, 0, 0, 0]), Some(5));
-        assert_eq!(length(&[0x0f, 0x85, 0, 0, 0, 0]), Some(6), "jne rel32");
-        assert_eq!(length(&[0x66, 0x90]), Some(2), "xchg ax, ax");
-        assert_eq!(length(&[0x06]), None, "push es: invalid in 64-bit mode");
-    }
-
-    #[test]
-    fn operands() {
-        let lea = decode(&[0x48, 0x8d, 0x15, 0x10, 0x00, 0x00, 0x00]).unwrap();
-        assert!(lea.is_lea());
-        assert_eq!(lea.reg, Some(2));
-        assert_eq!(lea.rip_target(0x1000), Some(0x1000 + 7 + 0x10));
-
-        let add = decode(&[0x48, 0x81, 0xc7, 0x30, 0x0e, 0x00, 0x00]).unwrap();
-        assert_eq!((add.reg, add.rm_register, add.immediate), (Some(0), Some(7), Some(0xe30)), "add rdi, 0xE30");
-
-        let cmp = decode(&[0x80, 0x3d, 0x10, 0, 0, 0, 0x05]).unwrap();
-        assert_eq!(cmp.rip_target(0), Some(7 + 0x10), "target counts the trailing immediate");
-
-        let load = decode(&[0x4c, 0x8b, 0x81, 0x08, 0x0e, 0x00, 0x00]).unwrap();
-        assert_eq!((load.reg, load.memory.unwrap().base, load.memory.unwrap().displacement), (Some(8), Some(1), 0xe08), "mov r8, [rcx+0xE08]");
-
-        let call = decode(&[0xe8, 0xfb, 0xff, 0xff, 0xff]).unwrap();
-        assert!(call.is_call());
-        assert_eq!(call.branch_target(0x100), Some(0x100));
-        assert!(decode(&[0xff, 0x50, 0x58]).unwrap().is_indirect_call(), "call [rax+0x58]");
-        assert_eq!(decode(&[0x41, 0x5f]).unwrap().opcode_register, Some(15), "pop r15");
-    }
-}
+mod tests;

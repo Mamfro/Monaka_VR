@@ -19,10 +19,10 @@
 //! The vectors are chained in the scale the game gives FSR for them (to render pixels), read in the
 //! state it describes them in.
 
-use crate::ffx::{Resource, state};
+use monaka_ffx::{Resource, state};
 use crate::ffx_imports::{CreateFn, DestroyFn, DispatchFn};
 use crate::motion::{self, MotionFix};
-use crate::upscale::{GameDispatchCopy, creates_upscaler, read_game_dispatch};
+use monaka_ffx::upscale::{GameDispatchCopy, creates_upscaler, read_game_dispatch};
 use monaka_channel::d3d12;
 use monaka_core::sync::Locked;
 use monaka_hook::mem;
@@ -156,7 +156,7 @@ pub unsafe fn dispatch(dispatch: DispatchFn, handle: usize, desc: *const c_void)
     let (raw_list, raw_motion) = (game.command_list as *mut c_void, game.motion_vectors.resource as *mut c_void);
     // SAFETY: the game's command list being recorded and its motion vectors, live for this frame.
     let (Some(list), Some(motion)) = (unsafe { ID3D12GraphicsCommandList::from_raw_borrowed(&raw_list) }, unsafe { ID3D12Resource::from_raw_borrowed(&raw_motion) }) else {
-        log_first!(3, "fsr: the game's upscale has no command list or motion vectors");
+        log_first(3, format_args!("fsr: the game's upscale has no command list or motion vectors"));
         return None;
     };
     let game_history = GAME_HISTORY.load(Relaxed);

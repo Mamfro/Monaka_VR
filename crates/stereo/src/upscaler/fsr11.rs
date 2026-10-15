@@ -10,7 +10,7 @@
 //!   `crate::providers::FrameInputs11`). The HUD's draws go into a layer of their own
 //!   ([`hud_targets`]).
 //! - At the present loop's step ([`before_present`], joined at install) the HUD layer goes over the
-//!   upscaled eye (the frame labels' presenting eye, at its place from `crate::hud11::eye_rects`)
+//!   upscaled eye (the frame labels' presenting eye, at its place from `crate::hud_layer::d3d11::eye_rects`)
 //!   and that image goes out in place of the back buffer. Frames with no 3D view (a movie, a loading
 //!   screen) have nothing to upscale: they go to the viewer's flat screen, resampled to the eye
 //!   size.
@@ -18,10 +18,10 @@
 //! The game's own object motion (a G-buffer target), when it writes one, is added with a scale the
 //! game gives ([`object_motion`]).
 
-use crate::alternate::{AlternatePublisher, Step};
+use crate::alternate::{Step, d3d11::AlternatePublisher};
 use crate::driver::{Driver, Pending};
 use crate::feature::Presents;
-use crate::afw11::EyeCameras;
+use crate::afw::d3d11::EyeCameras;
 use crate::providers::FrameInputs11;
 use monaka_channel::pose::HeadSource;
 use monaka_core::alternate::{PresentRing, Schedule};
@@ -31,7 +31,7 @@ use monaka_core::feature::Feature;
 use monaka_core::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_fsr11::{EyeFrame, Fsr11, Settings};
-use monaka_framegen::upscale::create;
+use monaka_ffx::upscale::create;
 use monaka_producer::game::Component;
 use monaka_producer::log;
 use monaka_warp::{EyeView, HudLayer, ObjectMotion, Scaler};
@@ -43,8 +43,6 @@ use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID
 use windows::Win32::Graphics::Dxgi::IDXGISwapChain;
 use windows::core::Interface;
 
-#[cfg(test)]
-mod lift_checks;
 #[cfg(test)]
 mod tests;
 
@@ -152,7 +150,7 @@ pub fn start<G: Presents + FrameInputs11>(device: &ID3D11Device, start: Start, d
     let scaler = Scaler::new(device).map_err(|e| format!("FSR flat frames: {e}"))?;
     let line = format!("FSR {}: {}x{} upscaled to {}x{}, {} jitter phases, {start:?}", fsr.version(), start.render.0, start.render.1, start.display.0, start.display.1, fsr.phases());
     let mut state = STATE.locked();
-    state.0.game = Some(GameFns { presenting: G::presenting, scene_depth: G::scene_depth, eye_rects: crate::hud11::eye_rects::<G>, hud_rect: G::hud_rect, probe: G::probe });
+    state.0.game = Some(GameFns { presenting: G::presenting, scene_depth: G::scene_depth, eye_rects: crate::hud_layer::d3d11::eye_rects::<G>, hud_rect: G::hud_rect, probe: G::probe });
     state.0.fsr = Some(fsr);
     state.0.object_scale = start.object_motion;
     state.0.hud = Some(hud);
@@ -165,6 +163,8 @@ pub fn start<G: Presents + FrameInputs11>(device: &ID3D11Device, start: Start, d
 
 /// A reversed depth with an infinite far plane ([`Start::depth_flags`]).
 pub const REVERSED_INFINITE: u32 = create::DEPTH_INVERTED | create::DEPTH_INFINITE;
+/// A standard depth (0 near, 1 far) with an infinite far plane.
+pub const STANDARD_INFINITE: u32 = create::DEPTH_INFINITE;
 
 /// The upscaler runs this run.
 pub fn enabled() -> bool {
@@ -292,7 +292,7 @@ pub fn capture(context: &ID3D11DeviceContext, color: &ID3D11Texture2D, n: u64, s
         }
         Err(monaka_fsr11::Error::Busy) => state.busy += 1,
         Err(e) => {
-            monaka_producer::log_first!(1, "FSR upscale failed: {e}");
+            monaka_producer::log_first(1, format_args!("FSR upscale failed: {e}"));
             state.failures += 1;
         }
     }
@@ -312,7 +312,7 @@ pub fn hud_targets(context: &ID3D11DeviceContext, width: u32, height: u32) -> Op
             Some(views)
         }
         Err(e) => {
-            monaka_producer::log_first!(1, "FSR HUD layer unavailable: {e}");
+            monaka_producer::log_first(1, format_args!("FSR HUD layer unavailable: {e}"));
             state.failures += 1;
             None
         }
@@ -382,7 +382,7 @@ fn publish(device: &ID3D11Device, context: &ID3D11DeviceContext, back: &ID3D11Te
         match layer.composite(context, eye, &image, (game.hud_rect)(rects[eye])) {
             Ok(with_hud) => image = with_hud.clone(),
             Err(e) => {
-                monaka_producer::log_first!(1, "FSR HUD composite failed: {e}");
+                monaka_producer::log_first(1, format_args!("FSR HUD composite failed: {e}"));
                 state.failures += 1;
             }
         }
@@ -408,7 +408,7 @@ fn publish_flat(
     let mut image = match scaler.run(context, back, display) {
         Ok(image) => image.clone(),
         Err(e) => {
-            monaka_producer::log_first!(1, "FSR flat frame failed: {e}");
+            monaka_producer::log_first(1, format_args!("FSR flat frame failed: {e}"));
             state.failures += 1;
             return Step::Failed;
         }
@@ -419,7 +419,7 @@ fn publish_flat(
         match layer.composite(context, 0, &image, (game.hud_rect)(monaka_warp::fit((desc.Width, desc.Height), display))) {
             Ok(with_hud) => image = with_hud.clone(),
             Err(e) => {
-                monaka_producer::log_first!(1, "FSR HUD composite failed: {e}");
+                monaka_producer::log_first(1, format_args!("FSR HUD composite failed: {e}"));
                 state.failures += 1;
             }
         }
@@ -454,4 +454,3 @@ fn release() {
     state.fsr = None;
     state.game = None;
 }
-

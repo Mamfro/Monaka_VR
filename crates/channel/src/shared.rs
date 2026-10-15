@@ -4,7 +4,8 @@ use crate::{Error, Result};
 use monaka_core::console::ConsoleBlock;
 use monaka_core::debug_draw::DebugBlock;
 use monaka_core::page::PageBlock;
-use monaka_core::protocol::{FenceHeader, FingerBlock, HandBlock, KeyedHeader, PoseBlock, ReticleBlock};
+use monaka_core::panels::PanelsBlock;
+use monaka_core::protocol::{FenceHeader, FingerBlock, HandBlock, PoseBlock, ReticleBlock, Stamp, Versioned};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
@@ -35,8 +36,30 @@ unsafe impl SharedRecord for ReticleBlock {}
 unsafe impl SharedRecord for DebugBlock {}
 unsafe impl SharedRecord for PageBlock {}
 unsafe impl SharedRecord for ConsoleBlock {}
-unsafe impl SharedRecord for KeyedHeader {}
+unsafe impl SharedRecord for PanelsBlock {}
+
 unsafe impl SharedRecord for FenceHeader {}
+unsafe impl SharedRecord for Stamp {}
+
+impl<T: SharedRecord + Versioned> SharedBlock<T> {
+    /// The block `name` (guarded by `lock`), made when it is not there yet and started when blank,
+    /// so either side may create it; refused when it holds another layout. Waits up to `wait_ms`
+    /// for the lock.
+    pub fn open_versioned(name: &str, lock: &str, wait_ms: u32) -> Result<Self> {
+        let mut block = Self::create(name, lock, Create::OrOpen)?;
+        {
+            let mut record = block.lock(wait_ms).tolerant().ok_or(Error::Busy)?;
+            if record.is_blank() {
+                record.start();
+            }
+            if !record.is_compatible() {
+                let stamp = record.stamp();
+                return Err(crate::incompatible_block(T::WHAT, (stamp.magic, stamp.version), T::MAGIC, T::VERSION));
+            }
+        }
+        Ok(block)
+    }
+}
 
 /// A kernel handle closed on drop.
 #[derive(Debug)]

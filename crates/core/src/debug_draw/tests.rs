@@ -108,3 +108,36 @@ fn with_block(test: impl FnOnce(&mut DebugBlock) + Send + 'static) {
         .join()
         .unwrap();
 }
+
+/// Each category's place in [`Category::ALL`]. The match is exhaustive: a new category does not
+/// compile here until it is given the next place, and the test below fails until `ALL` has it there.
+fn place(category: Category) -> usize {
+    match category {
+        Category::Controllers => 0,
+        Category::Skeleton => 1,
+        Category::BoneAxes => 2,
+        Category::Fingers => 3,
+        Category::HandTargets => 4,
+        Category::Aim => 5,
+        Category::Swings => 6,
+        Category::Melee => 7,
+        Category::RoomScale => 8,
+        Category::MenuReach => 9,
+        Category::Probe => 10,
+        Category::HideHud => 11,
+        Category::SkipHandRig => 12,
+        Category::Depth => 13,
+        Category::Targets => 14,
+        Category::Stats => 15,
+        Category::FreezeWorld => 16,
+    }
+}
+
+#[test]
+fn all_lists_every_category_once() {
+    const PLACES: usize = 17;
+    assert_eq!(Category::ALL.len(), PLACES, "a category was given a place but not added to ALL");
+    for (at, category) in Category::ALL.into_iter().enumerate() {
+        assert_eq!(place(category), at, "{category:?}");
+    }
+}

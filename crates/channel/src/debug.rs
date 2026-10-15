@@ -3,8 +3,9 @@
 //! it can draw. The viewer writes what its menu wants and reads the rest. Either side may create
 //! it. Every access waits at most a couple of milliseconds; a miss is not an error.
 
-use crate::shared::{Create, SharedBlock};
-use crate::{ChannelName, Error, Result};
+use crate::shared::SharedBlock;
+use crate::{ChannelName, Result};
+use monaka_core::protocol::Block;
 use monaka_core::debug_draw::{COSTS, Categories, CostTime, DEPTH_CANDIDATES, DebugBlock, DebugDepth, DepthCandidate, GameReport, Primitive};
 
 const WAIT_MS: u32 = 2;
@@ -30,17 +31,8 @@ pub enum Source {
 
 impl DebugChannel {
     pub fn open(channel: &ChannelName) -> Result<Self> {
-        let mut block = SharedBlock::<DebugBlock>::create(&channel.debug(), &channel.debug_lock(), Create::OrOpen)?;
-        {
-            let mut record = block.lock(WAIT_MS).tolerant().ok_or(Error::Busy)?;
-            if record.is_blank() {
-                record.start();
-            }
-            if !record.is_compatible() {
-                return Err(Error::Incompatible("debug block magic or version"));
-            }
-        }
-        Ok(Self { block })
+        let (name, lock) = channel.block(Block::Debug);
+        Ok(Self { block: SharedBlock::<DebugBlock>::open_versioned(&name, &lock, WAIT_MS)? })
     }
 
     /// Producer: frame `key`'s primitives (at most [`monaka_core::debug_draw::DEBUG_PRIMITIVES`]).

@@ -1,14 +1,15 @@
-//! The debug menu's panels in the headset ([`monaka_overlay::panels`]): each panel switched on in
-//! the Panels tab floats next to the menu, in the first spot beside it that no other panel takes,
-//! and stays there in the room (menu open or not) until switched off. Its page is drawn again a few
-//! times a second.
+//! The debug menu's panels in the headset ([`monaka_overlay::panels`]): the panels switched on in
+//! the Panels tab float in a row with the menu, the menu first ([`strip`]). While the menu is open
+//! the row slides so the one the pad drives (LB / RB pick it) is where the menu opened, outlined;
+//! with the menu closed the panels stay where they were until switched off. A page is drawn again
+//! a few times a second, and at once when it is outlined or let go.
 
-use crate::debug_menu::pose;
 use monaka_channel::d3d;
 use monaka_core::math::{self, Quat, Vec3};
-use monaka_openxr::{Extent2Df, Layer, Session, Space, Swapchain};
+
+use monaka_openxr::{Extent2Df, Layer, Posef, Session, Space, Swapchain};
 use monaka_overlay::canvas::Canvas;
-use monaka_overlay::panels::{self, Content, PanelId, Panels};
+use monaka_overlay::panels::{self, Content, HeadsetFocus, PanelId, Panels};
 use monaka_overlay::quad::Rectangle;
 use std::time::{Duration, Instant};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
@@ -33,34 +34,36 @@ pub struct Place {
     pub size: [f32; 2],
 }
 
-/// Where a panel of `size` goes beside `menu`: the first spot, outward from the menu's right then
-/// its left, then a row above, that no rectangle of `taken` overlaps.
-pub fn free_spot(menu: &Place, size: [f32; 2], taken: &[Place]) -> Place {
+/// The menu and the panels in a row (`sizes`, the menu's first), left to right a gap apart, their
+/// tops level with the menu's, slid along it so the centre of `active` is where the menu opened
+/// (`menu`, facing the way it faces).
+pub fn strip(menu: &Place, sizes: &[[f32; 2]], active: usize) -> Vec<Place> {
     let right = math::rotate(menu.orientation, [1.0, 0.0, 0.0]);
     let up = math::rotate(menu.orientation, [0.0, 1.0, 0.0]);
-    let along = |p: &Place| {
-        let d = [0, 1, 2].map(|k| p.centre[k] - menu.centre[k]);
-        (dot(d, right), dot(d, up))
-    };
-    let overlaps = |x: f32, y: f32| {
-        taken.iter().chain(std::iter::once(menu)).any(|other| {
-            let (ox, oy) = along(other);
-            (x - ox).abs() < (size[0] + other.size[0]) * 0.5 + GAP * 0.5 && (y - oy).abs() < (size[1] + other.size[1]) * 0.5 + GAP * 0.5
+    let mut along = 0.0;
+    let centres: Vec<f32> = sizes
+        .iter()
+        .map(|size| {
+            let centre = along + size[0] * 0.5;
+            along += size[0] + GAP;
+            centre
         })
-    };
-    // Top edges level with the menu's, then the same a row up.
-    let level = (size[1] - menu.size[1]) * -0.5;
-    let first = (menu.size[0] + size[0]) * 0.5 + GAP;
-    let step = size[0] + GAP;
-    let rows = [level, level + menu.size[1].max(size[1]) + GAP];
-    let spots = rows.iter().flat_map(|&y| (0..4).flat_map(move |n| [1.0f32, -1.0].map(|side| (side * (first + n as f32 * step), y))));
-    let (x, y) = spots.clone().find(|(x, y)| !overlaps(*x, *y)).unwrap_or((first, level));
-    let centre = [0, 1, 2].map(|k| menu.centre[k] + right[k] * x + up[k] * y);
-    Place { orientation: menu.orientation, centre, size }
+        .collect();
+    let slide = centres.get(active.min(sizes.len().saturating_sub(1))).copied().unwrap_or(0.0);
+    sizes
+        .iter()
+        .zip(centres)
+        .map(|(size, centre)| {
+            let (x, y) = (centre - slide, (menu.size[1] - size[1]) * 0.5);
+            Place { orientation: menu.orientation, centre: [0, 1, 2].map(|k| menu.centre[k] + right[k] * x + up[k] * y), size: *size }
+        })
+        .collect()
 }
 
-fn dot(a: Vec3, b: Vec3) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+/// Panel `id`'s size in the room (metres).
+pub fn size(id: PanelId) -> [f32; 2] {
+    let [w, h] = id.pixels();
+    [WIDTH, WIDTH * h as f32 / w as f32]
 }
 
 struct Shown<'s> {
@@ -69,6 +72,8 @@ struct Shown<'s> {
     canvas: Canvas,
     swapchain: Option<Swapchain<'s>>,
     drawn_at: Option<Instant>,
+    /// What it was last drawn as (outlined or not, the console's place).
+    drawn_as: Option<HeadsetFocus>,
     failed: bool,
 }
 
@@ -82,28 +87,30 @@ impl<'s> HeadsetPanels<'s> {
         Self { format, shown: Vec::new() }
     }
 
-    /// Follows the Panels tab: a panel switched on goes next to the menu (`menu`, where it is now),
-    /// one switched off goes away.
-    pub fn follow(&mut self, wanted: Panels, menu: &Place) {
+    /// Follows the Panels tab: a panel switched on is shown, one switched off goes away. `places`:
+    /// where each of `wanted` goes in the row ([`strip`], in `wanted`'s order); a panel already shown
+    /// moves there only when `slide` (the menu open), a new one goes there at once.
+    pub fn follow(&mut self, wanted: Panels, places: &[Place], slide: bool) {
         self.shown.retain(|s| wanted.has(s.id));
-        for id in wanted.iter() {
-            if self.shown.iter().any(|s| s.id == id) {
-                continue;
+        for (id, place) in wanted.iter().zip(places) {
+            match self.shown.iter_mut().find(|s| s.id == id) {
+                Some(shown) if slide => shown.place = *place,
+                Some(_) => {}
+                None => self.shown.push(Shown { id, place: *place, canvas: Canvas::new(self.format, id.pixels()), swapchain: None, drawn_at: None, drawn_as: None, failed: false }),
             }
-            let [w, h] = id.pixels();
-            let taken: Vec<Place> = self.shown.iter().map(|s| s.place).collect();
-            let place = free_spot(menu, [WIDTH, WIDTH * h as f32 / w as f32], &taken);
-            self.shown.push(Shown { id, place, canvas: Canvas::new(self.format, id.pixels()), swapchain: None, drawn_at: None, failed: false });
         }
     }
 
-    /// Draws each panel's page when it is due, and hands it to the headset.
-    pub fn show(&mut self, session: &'s Session<'_>, device: &ID3D11Device, context: &ID3D11DeviceContext, content: &Content<'_>, now: Instant) {
+    /// Draws each panel's page when it is due or shown otherwise now (`focus`: outlined, the
+    /// console's place), and hands it to the headset.
+    pub fn show(&mut self, session: &'s Session<'_>, device: &ID3D11Device, context: &ID3D11DeviceContext, content: &Content<'_>, now: Instant, focus: impl Fn(PanelId) -> HeadsetFocus) {
         for shown in self.shown.iter_mut().filter(|s| !s.failed) {
-            if shown.drawn_at.is_some_and(|at| now.duration_since(at) < REDRAW) {
+            let wanted = focus(shown.id);
+            if shown.drawn_as == Some(wanted) && shown.drawn_at.is_some_and(|at| now.duration_since(at) < REDRAW) {
                 continue;
             }
             shown.drawn_at = Some(now);
+            shown.drawn_as = Some(wanted);
             if shown.swapchain.is_none() {
                 let [w, h] = shown.id.pixels();
                 match session.create_swapchain(self.format.0 as i64, w, h) {
@@ -116,7 +123,7 @@ impl<'s> HeadsetPanels<'s> {
                 }
             }
             let id = shown.id;
-            let image = match shown.canvas.draw(device, context, |ui| panels::headset_page(ui, id, content)) {
+            let image = match shown.canvas.draw(device, context, |ui| panels::headset_page(ui, id, content, &wanted)) {
                 Ok(Some(image)) => image.clone(),
                 Ok(None) => continue,
                 Err(e) => {
@@ -141,7 +148,7 @@ impl<'s> HeadsetPanels<'s> {
     pub fn layers<'a>(&'a self, space: &'a Space<'a>) -> impl Iterator<Item = Layer<'a>> + 'a {
         self.shown.iter().filter(|s| !s.failed && s.drawn_at.is_some()).filter_map(move |s| {
             let swapchain = s.swapchain.as_ref()?;
-            Some(Layer::Overlay { space, swapchain, pose: pose(s.place.orientation, s.place.centre), size: Extent2Df { width: s.place.size[0], height: s.place.size[1] } })
+            Some(Layer::Overlay { space, swapchain, pose: Posef::new(s.place.orientation, s.place.centre), size: Extent2Df { width: s.place.size[0], height: s.place.size[1] } })
         })
     }
 

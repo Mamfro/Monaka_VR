@@ -2,9 +2,10 @@
 //! the presses; the viewer (and the 2D window) reads the rows and leaves presses. Either side may
 //! create it. Every access waits at most a couple of milliseconds; a miss is not an error.
 
-use crate::shared::{Create, SharedBlock};
+use crate::shared::SharedBlock;
 use crate::{ChannelName, Error, Result};
 use monaka_core::page::{Page, PageBlock, Press};
+use monaka_core::protocol::Block;
 
 const WAIT_MS: u32 = 2;
 
@@ -16,17 +17,9 @@ pub struct PageChannel {
 
 impl PageChannel {
     pub fn open(channel: &ChannelName) -> Result<Self> {
-        let mut block = SharedBlock::<PageBlock>::create(&channel.page(), &channel.page_lock(), Create::OrOpen)?;
-        let seen = {
-            let mut record = block.lock(WAIT_MS).tolerant().ok_or(Error::Busy)?;
-            if record.is_blank() {
-                record.start();
-            }
-            if !record.is_compatible() {
-                return Err(Error::Incompatible("page block magic or version"));
-            }
-            record.press_sequence
-        };
+        let (name, lock) = channel.block(Block::Page);
+        let mut block = SharedBlock::<PageBlock>::open_versioned(&name, &lock, WAIT_MS)?;
+        let seen = block.lock(WAIT_MS).tolerant().ok_or(Error::Busy)?.press_sequence;
         Ok(Self { block, seen })
     }
 

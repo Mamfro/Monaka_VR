@@ -20,10 +20,39 @@ pub enum Stage {
     RightDrain,
     /// From one pair finished to the next.
     FrameInterval,
+    /// OpenGL: the frame copied out at `SwapBuffers` (with frame warping the eye and its depth;
+    /// the interop lock included).
+    GlColour,
+    /// OpenGL: the eye upscaled (FSR; the warp thread).
+    GlUpscale,
+    /// OpenGL: the frame captured for the warp, the pair warped and published (the warp thread).
+    GlWarp,
+    /// OpenGL: all of the loop's work at `SwapBuffers`.
+    GlPresent,
+    /// The game's own `SwapBuffers`, after the loop's work.
+    GameSwap,
+    /// The game's render thread from one `SwapBuffers` returning to the next one called.
+    GameRender,
+    /// The render thread's CPU time from one `SwapBuffers` to the next (the loop's and the game's).
+    RenderCpu,
 }
 
 impl Stage {
-    pub const ALL: [Stage; 6] = [Stage::MonoScene, Stage::LeftScene, Stage::LeftDrain, Stage::RightScene, Stage::RightDrain, Stage::FrameInterval];
+    pub const ALL: [Stage; 13] = [
+        Stage::MonoScene,
+        Stage::LeftScene,
+        Stage::LeftDrain,
+        Stage::RightScene,
+        Stage::RightDrain,
+        Stage::FrameInterval,
+        Stage::GlColour,
+        Stage::GlUpscale,
+        Stage::GlWarp,
+        Stage::GlPresent,
+        Stage::GameSwap,
+        Stage::GameRender,
+        Stage::RenderCpu,
+    ];
 
     /// Its name in the report.
     pub const fn name(self) -> &'static str {
@@ -34,6 +63,13 @@ impl Stage {
             Stage::RightScene => "right scene",
             Stage::RightDrain => "right drain",
             Stage::FrameInterval => "frame interval",
+            Stage::GlColour => "GL copy out",
+            Stage::GlUpscale => "FSR",
+            Stage::GlWarp => "warp and publish",
+            Stage::GlPresent => "Monaka at SwapBuffers",
+            Stage::GameSwap => "game's SwapBuffers",
+            Stage::GameRender => "game's render thread between swaps",
+            Stage::RenderCpu => "render thread CPU per frame",
         }
     }
 }
@@ -62,7 +98,8 @@ impl Timings {
 
     /// A pair finished: the time since the last one.
     pub fn pair_done(&self) {
-        let now = START.elapsed().as_nanos() as u64;
+        // At least 1: 0 is "none yet" (the clock may start at this very call).
+        let now = (START.elapsed().as_nanos() as u64).max(1);
         let last = self.last_pair.swap(now, Relaxed);
         if last != 0 {
             self.time(Stage::FrameInterval, Duration::from_nanos(now.saturating_sub(last)));
@@ -89,3 +126,6 @@ impl Default for Timings {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests;

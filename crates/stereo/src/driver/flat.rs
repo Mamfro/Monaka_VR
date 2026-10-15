@@ -90,7 +90,7 @@ pub(super) fn shaped(device: &ID3D11Device, context: &ID3D11DeviceContext, back:
         match Scaler::new(device) {
             Ok(made) => *scaler = Some(made),
             Err(e) => {
-                log_first!(1, "flat frames unavailable: {e}");
+                log_first(1, format_args!("flat frames unavailable: {e}"));
                 return None;
             }
         }
@@ -98,7 +98,7 @@ pub(super) fn shaped(device: &ID3D11Device, context: &ID3D11DeviceContext, back:
     let image = match scaler.as_mut().expect("made above").run_into(context, back, size, rect) {
         Ok(image) => image.clone(),
         Err(e) => {
-            log_first!(1, "a flat frame failed: {e}");
+            log_first(1, format_args!("a flat frame failed: {e}"));
             return None;
         }
     };

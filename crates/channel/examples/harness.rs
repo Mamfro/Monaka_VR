@@ -35,16 +35,37 @@
 //!   same image to both eyes). The pad, not Esc: a key would put the game in keyboard mode.
 //! - `end`: stop.
 //!
+//! The gamepad goes to the producer as the viewer sends it: through the controller proxy, the d-pad
+//! layer and the held d-pad choices ([`monaka_core::pad_layer`]), the menus by reach
+//! ([`monaka_core::menu_reach`]), the Monaka menu's Start hold ([`monaka_core::hold`]: Start held
+//! half a second opens or closes it, and the game then gets an idle pad; a shorter press reaches the
+//! game as a tap when let go) and the capture chord (Start and Back together, [`monaka_core::chord`]).
+//! Each is set as the viewer's options set it:
+//!
+//! - `layer <layer|shift|rest|none>`: that layer control held (`layer`: the d-pad and Back, as the
+//!   thumbrest; `shift`: the d-pad only; `rest`: the proxy's stand-in, the left grip).
+//! - `act_like <touch|index|off>`: the controller proxy.
+//! - `dpad_hold <directions>`: the d-pad directions a pick keeps held (`left,right`; `none`).
+//! - `reach <same|other|off> [depth cm] [buttons|stick]`: the menus by reach (off until set), which
+//!   pick with the same or the other hand's stick, the zone's depth behind the head (15 by default),
+//!   and whether a pick presses a face button or is handed to the game as its right stick.
+//! - `monaka_menu <on|off>`: the Monaka menu's Start hold (on, as the launcher runs the viewer).
+//!
 //! Only one reader may hold a channel: run it instead of the viewer.
 
 use monaka_channel::d3d::{copy_texture, create_device, create_texture, find_adapter, read_image, simple_texture_desc};
 use monaka_channel::fingers::FingerChannel;
 use monaka_channel::hands::HandChannel;
 use monaka_channel::pose::PoseChannel;
-use monaka_channel::reader::{self, AnyReader};
+use monaka_channel::reader::{self, FenceReader};
 use monaka_channel::{ChannelName, tick};
-use monaka_core::png;
+use monaka_channel::reticles::ReticleChannel;
+use monaka_core::chord::Chord;
+use monaka_core::hold::HoldToggle;
+use monaka_core::menu_reach::{self, Pick, PickWith, Reach};
 use monaka_core::pad::{Gamepad, button};
+use monaka_core::pad_layer::{Held, Layers, Proxy, dpad_directions};
+use monaka_core::png;
 use monaka_core::protocol::{FingerPose, HandPose, HeadPose, PadState, RenderedPair};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -69,6 +90,11 @@ enum Step {
     /// Esc pressed only if the next pair is not what this asks: a menu up (true) or not (false).
     Menu(bool),
     Depth(bool),
+    Layer(Held),
+    ActLike(Proxy),
+    DpadHold(u16),
+    Reach(Option<(Pick, f32, PickWith)>),
+    MonakaMenu(bool),
     End,
 }
 
@@ -251,6 +277,28 @@ fn parse_script(text: &str) -> Result<Vec<(u64, Step)>, String> {
             Some("depth") => Step::Depth(words.get(2) != Some(&"off")),
             Some("unpause") => Step::Menu(false),
             Some("pause") => Step::Menu(true),
+            Some("layer") => Step::Layer(match words.get(2).copied() {
+                Some("layer") => Held { layer: true, ..Held::default() },
+                Some("shift") => Held { shift: true, ..Held::default() },
+                Some("rest") => Held { rest: true, ..Held::default() },
+                Some("none") => Held::default(),
+                _ => return Err(bad("layer takes layer, shift, rest or none")),
+            }),
+            Some("act_like") => Step::ActLike(Proxy::parse(words.get(2).copied().unwrap_or("")).map_err(|e| bad(&e))?),
+            Some("dpad_hold") => Step::DpadHold(match words.get(2).copied() {
+                Some("none") => 0,
+                Some(list) => dpad_directions(list).map_err(|e| bad(&e))?,
+                None => return Err(bad("dpad_hold takes directions or none")),
+            }),
+            Some("reach") => Step::Reach(match menu_reach::parse(words.get(2).copied().unwrap_or("")).map_err(|e| bad(&e))? {
+                None => None,
+                Some(pick) => {
+                    let depth = words.get(3).map(|_| number(3)).transpose()?.map_or(menu_reach::DEPTH, |cm| cm / 100.0);
+                    let with = words.get(4).map(|w| menu_reach::parse_with(w)).transpose().map_err(|e| bad(&e))?.unwrap_or(PickWith::Buttons);
+                    Some((pick, depth, with))
+                }
+            }),
+            Some("monaka_menu") => Step::MonakaMenu(words.get(2) != Some(&"off")),
             Some("end") => Step::End,
             _ => return Err(bad("unknown command")),
         };
@@ -267,9 +315,51 @@ fn turn(yaw: f32, pitch: f32) -> [f32; 4] {
     [cy * sp, sy * cp, -sy * sp, cy * cp]
 }
 
-/// The viewer's hand-aim ring: this far along the aim, this wide (`apps/viewer`).
-const RETICLE_DISTANCE: f32 = 10.0;
+/// The viewer's hand-aim ring: this wide (`apps/viewer`), where `math::reticle_point` places it.
 const RETICLE_SIZE: f32 = 0.21;
+/// A reticle direction the producer said is followed for this long after (ms), as the viewer does.
+const RETICLE_SAID_MS: u64 = 250;
+
+/// The pad's way from the script to the producer, as the viewer's from the controllers (see the
+/// module's notes): what each stage keeps between reads.
+struct PadChain {
+    layers: Layers,
+    held: Held,
+    reach: Option<Reach>,
+    /// The Monaka menu's Start hold, and whether the menu is open (none: no menu).
+    menu: Option<(HoldToggle, bool)>,
+    chord: Chord,
+}
+
+impl PadChain {
+    fn new() -> Self {
+        Self { layers: Layers::new(0, Proxy::None), held: Held::default(), reach: None, menu: Some((HoldToggle::new(button::START), false)), chord: Chord::default() }
+    }
+
+    /// The pad the producer gets for the script's `pad` this read, with the head and the hands' grip
+    /// positions; says what the viewer would have done on the way.
+    fn send(&mut self, mut pad: Gamepad, head: &HeadPose, hands: [Option<[f32; 3]>; 2], at: Instant, ms: u64) -> Gamepad {
+        self.layers.apply(&mut pad, self.held, at);
+        if let Some(reach) = self.reach.as_mut() {
+            for (hand, _, _) in reach.update(&mut pad, Some((head.orientation, head.position)), hands, at) {
+                println!("{ms:>6} ms: reach: buzz on the {} hand", ["left", "right"][hand]);
+            }
+        }
+        if let Some((toggle, open)) = self.menu.as_mut() {
+            if toggle.toggled(&mut pad, at) {
+                *open = !*open;
+                println!("{ms:>6} ms: Monaka menu {}", if *open { "opened" } else { "closed" });
+            }
+            if *open {
+                pad = Gamepad::default();
+            }
+        }
+        if self.chord.step(&mut pad, at) {
+            println!("{ms:>6} ms: capture chord");
+        }
+        pad
+    }
+}
 
 /// A 10-bit (R10G10B10A2) texture's texels rewritten as 8-bit RGBA in place, so the BMP writer
 /// reads them as it does every other eye (Control's swapchain is 10-bit).
@@ -351,15 +441,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let folder = PathBuf::from(args.next().ok_or(usage)?);
     std::fs::create_dir_all(&folder)?;
 
-    let producer = reader::wait_for(&name, Duration::from_secs(10)).ok_or("no producer on that channel")?;
+    let producer = reader::wait_for(&name, Duration::from_secs(10)).ok_or("no producer on that channel")?.map_err(|mismatch| mismatch.to_string())?;
     let (width, height, format) = (producer.width, producer.height, DXGI_FORMAT(producer.format as i32));
     println!("channel {width}x{height}; {} steps", script.len());
     let (device, context, _) = create_device(Some(&find_adapter(producer.adapter)?))?;
     // The producer can still be creating its textures when it already describes the channel
-    // ("no valid keyed header"): retry for a few seconds, as the viewer does.
+    // ("no valid fence header"): retry for a few seconds, as the viewer does.
     let opened = std::time::Instant::now();
     let mut reader = loop {
-        match AnyReader::open(&name, &device, producer.fence) {
+        match FenceReader::open(&name, &device) {
             Ok(reader) => break reader,
             Err(e) if opened.elapsed() < Duration::from_secs(5) => {
                 let _ = e;
@@ -379,6 +469,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut hand_poses: [Option<([f32; 3], f32, f32)>; 2] = [None, None];
     let mut finger_bends: [Option<f32>; 2] = [None, None];
     let mut gamepad = Gamepad::default();
+    let mut chain = PadChain::new();
+    let mut reach_set: Option<(Pick, f32, PickWith)> = None;
+    let mut reticle_aims = ReticleChannel::open(&name).ok();
     let mut wanted: Vec<(String, bool)> = Vec::new();
     let mut reticle: Option<(usize, bool)> = None;
     let mut menu_wanted: Option<bool> = None;
@@ -387,7 +480,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut saved_depths: Vec<(String, [ID3D11Texture2D; 2])> = Vec::new();
     let mut saved: Vec<SavedPair> = Vec::new();
     // The HUD panels' readers (opened as their channels appear) and the panels saved with a pair.
-    let mut panels: Vec<(&'static str, Option<(AnyReader, ID3D11Texture2D, windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC)>)> = PANELS.iter().map(|p| (*p, None)).collect();
+    let mut panels: Vec<(&'static str, Option<(FenceReader, ID3D11Texture2D, windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC)>)> = PANELS.iter().map(|p| (*p, None)).collect();
     let mut saved_panels: Vec<(String, ID3D11Texture2D)> = Vec::new();
     let mut next = 0;
     let started = Instant::now();
@@ -420,7 +513,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Step::Key(scan) => press_key(*scan),
                 Step::Menu(open) => menu_wanted = Some(*open),
                 Step::Depth(on) => save_depth = *on,
+                Step::Layer(held) => chain.held = *held,
+                Step::ActLike(proxy) => chain.layers.proxy = *proxy,
+                Step::DpadHold(directions) => chain.layers.hold = *directions,
+                Step::Reach(set) => reach_set = *set,
+                Step::MonakaMenu(on) => chain.menu = on.then(|| (HoldToggle::new(button::START), false)),
                 Step::End => ended = true,
+            }
+            if matches!(script[next].1, Step::Reach(_) | Step::DpadHold(_)) {
+                // As the viewer makes it: with the held directions, and only when it can open anything.
+                chain.reach = reach_set.map(|(pick, depth, with)| Reach::new(pick, chain.layers.hold, depth).picking_with(with)).filter(Reach::active);
             }
             next += 1;
         }
@@ -448,6 +550,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             start_until = None;
         }
+        let held_at = located.map(|h| h.map(|(_, grip)| grip.position));
+        let sent = chain.send(sent, &head, held_at, Instant::now(), now);
         hands.write_pad(&PadState { gamepad: sent, valid: 1, received_tick: tick() });
         let fingers_now = finger_bends.map(|bend| match bend {
             Some(b) => FingerPose { valid: 1, received_tick: tick(), fingers: [[b, b, b, 0.0]; 5], ..FingerPose::default() },
@@ -469,15 +573,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 println!("{:>6} ms: {} (pair {}), {}", started.elapsed().as_millis(), if flat { "a menu is up" } else { "no menu" }, pair.sequence, if flat != open { "Start pressed" } else { "left as it is" });
             }
-            // The ring as the viewer places it now: 10 m along the controller's aim, from its palm
-            // (the grip's place) or from the head.
+            // The ring as the viewer places it now: from the palm (the grip's place), along the
+            // direction the producer says or the controller's aim, or along the aim from the head.
             let ring = reticle.and_then(|(side, palm)| {
                 let (aim, grip) = located[side]?;
-                Some(if palm {
-                    monaka_core::math::along(grip.position, aim.orientation, RETICLE_DISTANCE)
-                } else {
-                    monaka_core::math::along(head.position, aim.orientation, RETICLE_DISTANCE)
-                })
+                let said = reticle_aims.as_mut().and_then(|r| r.read(side, RETICLE_SAID_MS));
+                Some(monaka_core::math::reticle_point(head.position, aim.orientation, grip.position, palm, said))
             });
             for (save, full) in wanted.drain(..) {
                 let copies = [texture()?, texture()?];
@@ -494,8 +595,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for (piece, slot) in &mut panels {
                     if slot.is_none()
                         && let Some(panel_name) = name.panel(piece)
-                        && let Some(description) = reader::describe_any(&panel_name)
-                        && let Ok(reader) = AnyReader::open(&panel_name, &device, description.fence)
+                        && let Some(Ok(description)) = reader::describe_any(&panel_name)
+                        && let Ok(reader) = FenceReader::open(&panel_name, &device)
                     {
                         let desc = simple_texture_desc(description.width, description.height, DXGI_FORMAT(description.format as i32));
                         if let Ok(panel) = create_texture(&device, &desc) {

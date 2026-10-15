@@ -11,9 +11,8 @@ use crate::view_commands;
 use crate::{PRODUCER_SILENCE_MS, console, meter};
 use monaka_channel::d3d::{self, create_texture, find_adapter, simple_texture_desc};
 use monaka_channel::pose::PoseChannel;
-use monaka_channel::reader::AnyReader;
 use monaka_channel::{ChannelName, tick};
-use monaka_core::protocol::{HeadPose, RenderedPair, dxgi_format};
+use monaka_core::protocol::{HeadPose, RenderedPair};
 use monaka_overlay::blit::{self, BlitPass};
 use monaka_channel::console::ConsoleChannel;
 use monaka_channel::hands::HandChannel;
@@ -42,9 +41,7 @@ pub fn run(name: &ChannelName, seconds: u64, producer_wait: u64, captures: Optio
     let adapter = find_adapter(producer.adapter)?;
     println!("GPU: {}", d3d::describe_adapter(&adapter));
     let (device, context, _) = d3d::create_device(Some(&adapter))?;
-    // A keyed channel's eyes are RGBA8; a fence channel's are the producer's own format.
-    let format = if producer.fence { producer.format } else { dxgi_format::R8G8B8A8_UNORM };
-    let mut source_desc = simple_texture_desc(producer.width, producer.height, DXGI_FORMAT(format as i32));
+    let mut source_desc = simple_texture_desc(producer.width, producer.height, DXGI_FORMAT(producer.format as i32));
     source_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32;
     let sources = [create_texture(&device, &source_desc)?, create_texture(&device, &source_desc)?];
     let eyes = [&sources[0], &sources[1]];
@@ -53,16 +50,16 @@ pub fn run(name: &ChannelName, seconds: u64, producer_wait: u64, captures: Optio
     drawn_desc.BindFlags = (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32;
     let drawn = [create_texture(&device, &drawn_desc)?, create_texture(&device, &drawn_desc)?];
 
-    let mut poses = PoseChannel::open(name).ok();
+    let mut poses = crate::side_channel("head pose channel", PoseChannel::open(name))?;
     // Still, straight ahead, with a headset's field of view: the game renders as for a headset.
     // The fake head and controllers (the Fake VR panel): the head ahead, the hands held forward.
     let mut fake = FakeVr::desktop();
     let mut head = HeadPose::synthetic(fake.head[0], fake.head[1], HeadPose::SYNTHETIC_FOV, IPD);
-    let mut hands = HandChannel::open(name).ok();
+    let mut hands = crate::side_channel("hand channel", HandChannel::open(name))?;
     if let Some(poses) = poses.as_mut() {
         poses.write_head(&head);
     }
-    let mut debug_views = DebugViews::new(name, DXGI_FORMAT(format as i32), captures.clone());
+    let mut debug_views = DebugViews::new(name, DXGI_FORMAT(producer.format as i32), captures.clone());
     let mut console_feed = ConsoleFeed::new(name);
     // The window's own command line (`monaka_play view`), and where its captures go.
     let mut commands = ConsoleChannel::open_view(name).ok();
@@ -71,14 +68,7 @@ pub fn run(name: &ChannelName, seconds: u64, producer_wait: u64, captures: Optio
     let mut blit = BlitPass::new(&device)?;
     let mut window = Window::open(&device, "Monaka 2D", SIZE)?;
 
-    let open_by = Instant::now() + Duration::from_secs(5);
-    let mut input = loop {
-        match AnyReader::open(name, &device, producer.fence) {
-            Ok(input) => break input,
-            Err(e) if Instant::now() >= open_by => return Err(format!("cannot open the GPU channel: {e}").into()),
-            Err(_) => std::thread::sleep(Duration::from_millis(3)),
-        }
-    };
+    let mut input = crate::open_channel(name, &device)?;
     console::catch_ctrl_c();
     let deadline = Instant::now() + Duration::from_secs(seconds);
     let mut meter = meter::Meter::new("Window", [producer.width, producer.height], Instant::now());
@@ -181,11 +171,7 @@ pub fn run(name: &ChannelName, seconds: u64, producer_wait: u64, captures: Optio
             channel.answer(number, &answer);
         }
         if capture_asked {
-            match capture.as_mut().map(Capture::start) {
-                Some(true) => {}
-                Some(false) => println!("Capture: the last one is still being saved"),
-                None => println!("Capture: no folder to save to (--captures)"),
-            }
+            crate::capture::start(capture.as_mut());
         }
         window.present()?;
         frames += 1;

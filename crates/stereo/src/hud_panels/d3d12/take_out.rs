@@ -54,7 +54,7 @@ fn take_out_with(fix: &mut FramePass, queue: &ID3D12CommandQueue, frame: &ID3D12
     // SAFETY: reads a resource descriptor.
     let desc = unsafe { frame.GetDesc() };
     if let Err(why) = fix.ensure(&desc) {
-        monaka_producer::log_first!(3, "dynamic HUD: pieces stay in the eyes: {why}");
+        monaka_producer::log_first(3, format_args!("dynamic HUD: pieces stay in the eyes: {why}"));
         return false;
     }
     fix.view(layer);
@@ -96,7 +96,7 @@ fn take_out_with(fix: &mut FramePass, queue: &ID3D12CommandQueue, frame: &ID3D12
     match fix.recorder.submit(queue) {
         Ok(_) => true,
         Err(e) => {
-            monaka_producer::log_first!(3, "dynamic HUD: pieces stay in the eyes: {e}");
+            monaka_producer::log_first(3, format_args!("dynamic HUD: pieces stay in the eyes: {e}"));
             false
         }
     }

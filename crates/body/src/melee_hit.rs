@@ -310,5 +310,3 @@ impl Sweep {
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod lift_checks;

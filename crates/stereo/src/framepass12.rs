@@ -1,7 +1,7 @@
 //! A compute pass over a swapchain frame, which has no unordered access: the frame (or its
 //! rectangles) copied out, a shader run from that copy and the UI layer into a scratch texture,
 //! the result copied back, on the game's queue before the eye is taken. The HUD's passes over the
-//! eyes (the lay-over [`crate::hudover12`], and a game's own) are this with their own shader and
+//! eyes (the lay-over [`crate::hud_layer::d3d12`], and a game's own) are this with their own shader and
 //! constants.
 
 use monaka_channel::d3d12::compute::{self, DescriptorHeap, Table, srv_desc, uav_desc};

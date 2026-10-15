@@ -11,6 +11,7 @@
 
 mod look;
 mod options;
+mod pc;
 mod reload;
 mod screenshot;
 
@@ -19,13 +20,11 @@ use monaka_core::manifest::{DEBUG_MENU, DIAGNOSTIC_LOGGING, DIAGNOSTIC_MARKER};
 use monaka_launch::games::{self, Game, Launch, MONAKA, Shown, TABS};
 use monaka_launch::session::{self, Console, Event, Shows, State, Stop};
 use monaka_launch::settings::Settings;
-use monaka_launch::{Paths, packs, system};
+use monaka_launch::{Paths, packs};
+use pc::Pc;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
-use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW};
-use windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
-use windows::core::{HSTRING, PCWSTR};
 
 /// Where Monaka's releases are, for an update.
 const RELEASES: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/releases");
@@ -92,6 +91,7 @@ struct App {
     ctx: egui::Context,
     paths: Paths,
     settings: Settings,
+    pc: Box<dyn Pc>,
     libraries: Vec<PathBuf>,
     /// The games on offer (Monaka's own built ones, then the packs'); may be empty.
     list: &'static [Game],
@@ -126,9 +126,12 @@ struct App {
 
 impl App {
     fn new(ctx: &egui::Context, screenshot: Option<screenshot::Request>) -> App {
+        App::with(ctx, screenshot, Paths::locate(), Settings::load(), Box::new(pc::ThisPc), reload::Watch::new())
+    }
+
+    /// The window over `paths` and `settings`, asking `pc`, reloading when `reload_watch` says.
+    fn with(ctx: &egui::Context, screenshot: Option<screenshot::Request>, paths: Paths, settings: Settings, pc: Box<dyn Pc>, reload_watch: Option<reload::Watch>) -> App {
         look::start(ctx, screenshot.as_ref().and_then(|r| r.dark));
-        let settings = Settings::load();
-        let paths = Paths::locate();
         let catalogue = games::rescan(&paths);
         let list = catalogue.games;
         let mut selected = settings.selected.as_deref().and_then(|id| list.iter().position(|g| g.id == id)).unwrap_or(0);
@@ -144,7 +147,8 @@ impl App {
             ctx: ctx.clone(),
             paths,
             settings,
-            libraries: system::steam_libraries(),
+            libraries: pc.steam_libraries(),
+            pc,
             list,
             selected,
             tab,
@@ -162,7 +166,7 @@ impl App {
             dialog: None,
             told_too_new: Vec::new(),
             screenshot: screenshot.map(|r| (r.file, 0)),
-            reload_watch: reload::Watch::new(),
+            reload_watch,
             reload_waiting: false,
         };
         for problem in &catalogue.problems {
@@ -236,7 +240,7 @@ impl App {
 
     /// Unpacks a pack the player picks, and asks with the warning before adding it.
     fn add_pack(&mut self) {
-        let Some(file) = pick_pack_file() else { return };
+        let Some(file) = self.pc.pick_pack_file() else { return };
         let staged = match packs::stage(&file, &self.paths.packs) {
             Ok(staged) => staged,
             Err(why) => return self.say(&format!("Game pack not added: {why}"), true),
@@ -290,7 +294,7 @@ impl App {
                 Err(why) => self.say(&why, true),
             },
             Dialog::Update(_) if ok => {
-                let _ = system::open(RELEASES);
+                let _ = self.pc.open(RELEASES);
             }
             Dialog::Remove { .. } | Dialog::Update(_) => {}
         }
@@ -299,14 +303,14 @@ impl App {
     /// Updates what is ready (SteamVR, the game).
     fn refresh_checks(&mut self) {
         self.checked = Instant::now();
-        self.checks.steamvr_up = system::steamvr_running();
-        self.checks.other_session = self.running.is_none() && system::viewer_running();
+        self.checks.steamvr_up = self.pc.steamvr_running();
+        self.checks.other_session = self.running.is_none() && self.pc.viewer_running();
         let Some(game) = self.game() else { return };
         let runs_as = game.runs_as(&self.settings.values(game.id));
         let executables: Vec<&str> = runs_as.iter().map(String::as_str).collect();
-        self.checks.game_up = !executables.is_empty() && !system::game_processes(&executables, game.steam_app).is_empty();
+        self.checks.game_up = !executables.is_empty() && self.pc.game_running(&executables, game.steam_app);
         // A pack for any game knows no Steam app.
-        self.checks.game_installed = self.libraries.is_empty() || game.any_game() || system::steam_installed(&self.libraries, game.steam_app);
+        self.checks.game_installed = self.libraries.is_empty() || game.any_game() || self.pc.steam_installed(&self.libraries, game.steam_app);
     }
 
     fn start_session(&mut self, shows: Shows) {
@@ -428,7 +432,7 @@ impl App {
     fn open_logs(&mut self) {
         let folder = self.run_folder.clone().unwrap_or_else(|| self.paths.runs.clone());
         let _ = std::fs::create_dir_all(&folder);
-        if let Err(why) = system::open(&folder.to_string_lossy()) {
+        if let Err(why) = self.pc.open(&folder.to_string_lossy()) {
             self.say(&why, true);
         }
     }
@@ -555,7 +559,7 @@ impl App {
             (false, false) => "SteamVR: not running. Start it and turn on your headset.",
         };
         if ready_line(ui, steamvr_line, "Start SteamVR", !checks.steamvr_up)
-            && let Err(why) = system::launch_steam_game(STEAMVR_APP)
+            && let Err(why) = self.pc.launch_steam_game(STEAMVR_APP)
         {
             self.say(&why, true);
         }
@@ -571,7 +575,7 @@ impl App {
         if ready_line(ui, game_line, "Start game", can_start_game)
             && let Some(game) = game
         {
-            match system::launch_steam_game(game.steam_app) {
+            match self.pc.launch_steam_game(game.steam_app) {
                 Ok(()) => self.say(&format!("Starting {} through Steam...", game.name), false),
                 Err(why) => self.say(&why, true),
             }
@@ -580,6 +584,9 @@ impl App {
         let game_ready = checks.game_up || game.is_some_and(|g| g.launch == Launch::AtStart) || (checks.game_installed && game.is_some_and(|g| matches!(g.launch, Launch::Auto { .. })));
         let stopping = self.running.as_ref().is_some_and(|r| r.stop.requested());
         let can_press = if idle { game.is_some() && checks.steamvr_up && game_ready && !checks.other_session } else { !stopping && !self.closing };
+        // Enter presses it too, while nothing else has the keyboard (a text field, or a focused
+        // button that Enter presses itself).
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter)) && ui.memory(|m| m.focused().is_none());
         ui.horizontal(|ui| {
             let label = match (idle, stopping) {
                 (true, _) => "Start VR",
@@ -590,7 +597,7 @@ impl App {
             if idle && can_press {
                 start = start.fill(ui.visuals().selection.bg_fill);
             }
-            if ui.add_enabled(can_press, start).clicked() {
+            if ui.add_enabled(can_press, start).clicked() || (enter && can_press) {
                 if idle {
                     self.start_session(Shows::Headset);
                 } else {
@@ -775,27 +782,5 @@ fn ready_line(ui: &mut egui::Ui, text: &str, button: &str, enabled: bool) -> boo
     .inner
 }
 
-/// The player's pick of a game pack file (a .zip, or a lone .dll), if any.
-fn pick_pack_file() -> Option<PathBuf> {
-    let mut file = vec![0u16; 1024];
-    let filter: Vec<u16> = "Game packs (*.zip, *.dll)\0*.zip;*.dll\0\0".encode_utf16().collect();
-    let title = HSTRING::from("Add game pack");
-    let mut dialog = OPENFILENAMEW {
-        lStructSize: size_of::<OPENFILENAMEW>() as u32,
-        // The button was just pressed, so ours is the active window: the dialog stays over it.
-        // SAFETY: reads this thread's active window.
-        hwndOwner: unsafe { GetActiveWindow() },
-        lpstrFilter: PCWSTR(filter.as_ptr()),
-        lpstrFile: windows::core::PWSTR(file.as_mut_ptr()),
-        nMaxFile: file.len() as u32,
-        lpstrTitle: PCWSTR(title.as_ptr()),
-        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
-        ..Default::default()
-    };
-    // SAFETY: the dialog writes the chosen path into our buffer, which outlives the call.
-    if !unsafe { GetOpenFileNameW(&mut dialog) }.as_bool() {
-        return None;
-    }
-    let length = file.iter().position(|&c| c == 0).unwrap_or(file.len());
-    Some(PathBuf::from(String::from_utf16_lossy(&file[..length])))
-}
+#[cfg(test)]
+mod tests;

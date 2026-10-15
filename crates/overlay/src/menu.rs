@@ -228,7 +228,7 @@ pub const TABS: [Tab; 6] = [
             Item::Category(Category::Probe),
         ],
     },
-    Tab { name: "Game", items: &[Item::Category(Category::HideHud), Item::Category(Category::SkipHandRig)] },
+    Tab { name: "Game", items: &[Item::Category(Category::HideHud), Item::Category(Category::SkipHandRig), Item::Category(Category::FreezeWorld)] },
     Tab { name: "Views", items: &[Item::View, Item::Target, Item::DepthBuffer, Item::DepthPass, Item::DepthNear, Item::DepthCurve, Item::DepthRange] },
     Tab { name: "Tools", items: &[Item::SaveCapture, Item::Freeze, Item::CaptureOverlays, Item::Record, Item::SaveRecording] },
     Tab { name: "Panels", items: &[Item::Panel(PanelId::Stats), Item::Panel(PanelId::Console), Item::Panel(PanelId::FakeVr)] },
@@ -419,7 +419,8 @@ fn buttons(status: &Status) -> Vec<usize> {
 }
 
 /// Turns the left stick's vertical and horizontal push into presses: one at the push, then
-/// repeating while held, like a console menu.
+/// repeating while held, like a console menu. The D-pad counts as the stick pushed all the way
+/// ([`StickRepeat::step_pad`]).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StickRepeat {
     /// The direction held and when it next repeats (seconds).
@@ -434,6 +435,19 @@ const FIRST_REPEAT: f64 = 0.4;
 const REPEAT: f64 = 0.12;
 
 impl StickRepeat {
+    /// The left stick and the D-pad of `pad` at `now` (seconds): a D-pad direction held is the
+    /// stick pushed all the way that way.
+    pub fn step_pad(&mut self, pad: &monaka_core::pad::Gamepad, now: f64) -> Option<Press> {
+        use monaka_core::pad::button;
+        let held = |bit: u16| pad.buttons & bit != 0;
+        let along = |stick: i16, plus: u16, minus: u16| match (held(plus), held(minus)) {
+            (true, false) => 1.0,
+            (false, true) => -1.0,
+            _ => f32::from(stick) / 32767.0,
+        };
+        self.step(along(pad.thumb_lx, button::DPAD_RIGHT, button::DPAD_LEFT), along(pad.thumb_ly, button::DPAD_UP, button::DPAD_DOWN), now)
+    }
+
     /// The stick at `x`, `y` (each -1..=1, up positive) at `now` (seconds).
     pub fn step(&mut self, x: f32, y: f32, now: f64) -> Option<Press> {
         let pushed = if y >= PUSH {

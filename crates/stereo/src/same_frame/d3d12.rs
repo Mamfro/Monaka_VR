@@ -7,13 +7,13 @@
 //! no eye without a pair lately goes out flat.
 //!
 //! With per-eye frame generation (`crate::framegen12::pairs`) each eye goes to its generator
-//! instead, and with frame warping on a game fed one eye per frame (`crate::afw12`'s
+//! instead, and with frame warping on a game fed one eye per frame (`crate::afw::d3d12`'s
 //! `frame_warping_pairs`) each frame (the HUD laid over) goes to the warp, its pair of one moment
 //! made there; both publish through the pair sink ([`sink`]): any feature's finished pairs go out
 //! there, on the loop's channel, counted with its own.
 
 use super::{EyeHud, PAIRS, Settings};
-use crate::pairs12::{PairDepth, PairPublisher12, Step};
+use crate::pairs::d3d12::{PairDepth, PairPublisher12, Step};
 use monaka_channel::{ChannelName, d3d12};
 use monaka_core::protocol::HeadPose;
 use monaka_core::sync::Locked;
@@ -81,7 +81,7 @@ pub fn present(swap: &IDXGISwapChain3, own: impl FnOnce(&ID3D12Resource) -> Opti
     match label {
         Some(label) => eye(&settings, &buffer, label.eye.min(1), label.pose),
         // Frame warping takes every frame of no eye too (its own flat and unlabelled frames).
-        None if crate::afw12::on_same_frame() => settings.queue().is_some_and(|queue| crate::afw12::pair_present(&queue, &buffer, D3D12_RESOURCE_STATE_PRESENT, None)),
+        None if crate::afw::d3d12::on_same_frame() => settings.queue().is_some_and(|queue| crate::afw::d3d12::pair_present(&queue, &buffer, D3D12_RESOURCE_STATE_PRESENT, None)),
         None => {
             if !PAIRS.recent_pair() {
                 sink([(&buffer, D3D12_RESOURCE_STATE_PRESENT); 2], None, None);
@@ -105,7 +105,7 @@ fn channel_ready(settings: &Settings, buffer: &ID3D12Resource) -> bool {
         return false;
     }
     let Some(queue) = settings.queue() else {
-        log_first!(3, "game queue unavailable; not publishing yet");
+        log_first(3, format_args!("game queue unavailable; not publishing yet"));
         return false;
     };
     if !publisher.ready_for(buffer, &queue) {
@@ -125,10 +125,10 @@ fn eye(settings: &Settings, buffer: &ID3D12Resource, eye: usize, pose: HeadPose)
         (pair_hud.done)(queue, hud.as_ref());
     }
     let (image, state) = shown.map_or((buffer.clone(), D3D12_RESOURCE_STATE_PRESENT), |eye| (eye, D3D12_RESOURCE_STATE_COMMON));
-    if crate::afw12::on_same_frame() {
+    if crate::afw::d3d12::on_same_frame() {
         // One eye per frame, warped into the other: every frame its own pair.
         let label = Some(crate::driver::Pending { eye, pose });
-        return queue.is_some_and(|queue| crate::afw12::pair_present(&queue, &image, state, label));
+        return queue.is_some_and(|queue| crate::afw::d3d12::pair_present(&queue, &image, state, label));
     }
     let pair = settings.pair(eye, &PAIR);
     let mut guard = PUBLISHER.locked();
@@ -176,7 +176,7 @@ fn lay(queue: &ID3D12CommandQueue, buffer: &ID3D12Resource, hud: &EyeHud, eye: u
         Ok(true) => overlay.eye(eye).cloned(),
         Ok(false) => None,
         Err(e) => {
-            log_first!(1, "HUD lay-over not run: {e}");
+            log_first(1, format_args!("HUD lay-over not run: {e}"));
             None
         }
     };

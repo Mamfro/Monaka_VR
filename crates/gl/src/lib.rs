@@ -1,6 +1,6 @@
 //! OpenGL games into the D3D11 channels. A GL framebuffer (the default back buffer or any
 //! framebuffer object) is copied, flipped to top-down, into a D3D11 texture on our own device
-//! through `WGL_NV_DX_interop2`; from there the keyed channel, the alternate-eye publisher and the
+//! through `WGL_NV_DX_interop2`; from there the fence channel, the alternate-eye publisher and the
 //! depth warp work as for a Direct3D game.
 //!
 //! A [`Canvas`] is a framebuffer of our own the game's own draw calls can be run into (a HUD piece
@@ -179,6 +179,26 @@ pub struct Bridge {
     /// The depth copy's target (`R32_FLOAT`) and pass, made at the first depth copy.
     depth_target: Option<Target>,
     depth_pass: Option<DepthPass>,
+    /// [`Bridge::capture_eye`]'s slots, made as they are first used.
+    eye_slots: Vec<EyeSlot>,
+}
+
+/// One slot of [`Bridge::capture_eye`]: an eye's colour target and the depth target beside it.
+#[derive(Default)]
+struct EyeSlot {
+    colour: Option<Target>,
+    depth: Option<Target>,
+}
+
+/// The depth [`Bridge::capture_eye`] copies with the eye: GL depth texture `texture` (`size` its
+/// width and height; `multisampled`: its sample 0 is read) over the part `region` covers (x, y from
+/// the top-left, width, height: fractions).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DepthSource {
+    pub texture: u32,
+    pub size: (u32, u32),
+    pub multisampled: bool,
+    pub region: [f32; 4],
 }
 
 impl Bridge {
@@ -190,7 +210,7 @@ impl Bridge {
         if interop.is_null() {
             return Err(Error::Failed("wglDXOpenDeviceNV (is the D3D11 device on the GL context's GPU?)"));
         }
-        Ok(Self { gl, device: device.clone(), interop, target: None, depth_target: None, depth_pass: None })
+        Ok(Self { gl, device: device.clone(), interop, target: None, depth_target: None, depth_pass: None, eye_slots: Vec::new() })
     }
 
     pub fn device(&self) -> &ID3D11Device {
@@ -268,6 +288,17 @@ impl Bridge {
         }
     }
 
+    /// `target` when it is `width` x `height`, else freed and made again at that size in `format`.
+    fn sized(&self, target: Option<Target>, width: u32, height: u32, format: DXGI_FORMAT) -> Result<Target> {
+        match target {
+            Some(target) if target.width == width && target.height == height => Ok(target),
+            other => {
+                self.free(other);
+                self.make_target(width, height, format)
+            }
+        }
+    }
+
     fn save() -> SavedState {
         let mut state = SavedState { read: 0, draw: 0, read_buffer: 0, scissor: false, srgb: false };
         // SAFETY: GL state queries into locals, context current.
@@ -309,6 +340,21 @@ impl Bridge {
             glDisable(GL_FRAMEBUFFER_SRGB);
             // GL rows run bottom-up, D3D's top-down: the destination is flipped.
             (gl.blit_framebuffer)(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            Self::restore(gl, &saved, source);
+            if (gl.unlock_objects)(interop, 1, &mut object) == 0 {
+                return Err(Error::Failed("wglDXUnlockObjectsNV"));
+            }
+        }
+        Ok(&self.target.as_ref().expect("made above").texture)
+    }
+
+    /// Puts back the state [`Bridge::save`] read, after a copy from framebuffer `source`.
+    ///
+    /// # Safety
+    /// The GL context is current.
+    unsafe fn restore(gl: Functions, saved: &SavedState, source: u32) {
+        // SAFETY: binds and enables of the state read before, context current (the caller's).
+        unsafe {
             (gl.bind_framebuffer)(GL_READ_FRAMEBUFFER, saved.read as u32);
             (gl.bind_framebuffer)(GL_DRAW_FRAMEBUFFER, saved.draw as u32);
             if source == 0 || saved.read == 0 {
@@ -320,11 +366,76 @@ impl Bridge {
             if saved.srgb {
                 glEnable(GL_FRAMEBUFFER_SRGB);
             }
-            if (gl.unlock_objects)(interop, 1, &mut object) == 0 {
-                return Err(Error::Failed("wglDXUnlockObjectsNV"));
-            }
         }
-        Ok(&self.target.as_ref().expect("made above").texture)
+    }
+
+    /// Copies the eye at `rect` (pixels: left, top from the top-left, width, height) of GL
+    /// framebuffer `source` (0: the default back buffer; `frame` its width and height), and with
+    /// `depth` the depth under it, into slot `slot`'s D3D11 textures at the eye's size (`RGBA8`,
+    /// `R32_FLOAT`), top row first, under one interop lock. A slot's textures are reused until the
+    /// size changes, so a slot goes back to this copy only once D3D11 is done reading it.
+    pub fn capture_eye(&mut self, slot: usize, source: u32, frame: (u32, u32), rect: [u32; 4], depth: Option<DepthSource>) -> Result<(ID3D11Texture2D, Option<ID3D11Texture2D>)> {
+        let [left, top, width, height] = rect;
+        let inside = left.checked_add(width).is_some_and(|right| right <= frame.0) && top.checked_add(height).is_some_and(|bottom| bottom <= frame.1);
+        if !monaka_core::protocol::dimensions_ok(width, height) || !inside {
+            return Err(Error::Failed("eye capture rect"));
+        }
+        if depth.is_some_and(|d| !monaka_core::protocol::dimensions_ok(d.size.0, d.size.1)) {
+            return Err(Error::Failed("depth capture size"));
+        }
+        if depth.is_some() && self.depth_pass.is_none() {
+            self.depth_pass = Some(DepthPass::new()?);
+        }
+        if self.eye_slots.len() <= slot {
+            self.eye_slots.resize_with(slot + 1, EyeSlot::default);
+        }
+        let colour = self.eye_slots[slot].colour.take();
+        self.eye_slots[slot].colour = Some(self.sized(colour, width, height, DXGI_FORMAT_R8G8B8A8_UNORM)?);
+        if depth.is_some() {
+            let old = self.eye_slots[slot].depth.take();
+            self.eye_slots[slot].depth = Some(self.sized(old, width, height, DXGI_FORMAT_R32_FLOAT)?);
+        }
+        let gl = self.gl;
+        let interop = self.interop;
+        let made = &self.eye_slots[slot];
+        let colour = made.colour.as_ref().expect("made above");
+        let depth_target = made.depth.as_ref().filter(|_| depth.is_some());
+        let mut objects: Vec<*mut c_void> = std::iter::once(colour.object).chain(depth_target.map(|t| t.object)).collect();
+        let saved = Self::save();
+        // SAFETY: the shared textures are locked around the GL copies into them, context current;
+        // the state changed is restored before the unlock.
+        unsafe {
+            if (gl.lock_objects)(interop, objects.len() as i32, objects.as_mut_ptr()) == 0 {
+                return Err(Error::Failed("wglDXLockObjectsNV"));
+            }
+            (gl.bind_framebuffer)(GL_READ_FRAMEBUFFER, source);
+            if source == 0 {
+                glReadBuffer(GL_BACK);
+            }
+            (gl.bind_framebuffer)(GL_DRAW_FRAMEBUFFER, colour.framebuffer);
+            glDisable(GL_SCISSOR_TEST);
+            glDisable(GL_FRAMEBUFFER_SRGB);
+            // GL rows run bottom-up, D3D's top-down: the source counts from the bottom, the
+            // destination is flipped.
+            let (x, y) = (left as i32, (frame.1 - top - height) as i32);
+            let (w, h) = (width as i32, height as i32);
+            (gl.blit_framebuffer)(x, y, x + w, y + h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            Self::restore(gl, &saved, source);
+        }
+        let drawn = match (depth, depth_target) {
+            (Some(d), Some(target)) => {
+                let pass = self.depth_pass.as_mut().expect("made above");
+                pass.draw(d.texture, d.multisampled, texel_rect(d.size.0, d.size.1, d.region), target.framebuffer, width, height, gl.bind_framebuffer)
+            }
+            _ => Ok(()),
+        };
+        // SAFETY: unlocks the objects locked above.
+        if unsafe { (gl.unlock_objects)(interop, objects.len() as i32, objects.as_mut_ptr()) } == 0 {
+            return Err(Error::Failed("wglDXUnlockObjectsNV"));
+        }
+        drawn?;
+        let made = &self.eye_slots[slot];
+        Ok((made.colour.as_ref().expect("made above").texture.clone(), made.depth.as_ref().filter(|_| depth.is_some()).map(|t| t.texture.clone())))
     }
 
     /// Copies the depth of GL texture `source` (`size` its width and height; `multisampled`: its
@@ -363,6 +474,10 @@ impl Bridge {
         self.release_target();
         let depth = self.depth_target.take();
         self.free(depth);
+        for slot in std::mem::take(&mut self.eye_slots) {
+            self.free(slot.colour);
+            self.free(slot.depth);
+        }
         if let Some(pass) = self.depth_pass.take() {
             pass.release();
         }
@@ -597,6 +712,53 @@ mod tests {
             assert_eq!(draw as u32, source);
             assert_ne!(glIsEnabled(GL_SCISSOR_TEST), 0);
         }
+        bridge.release();
+    }
+
+    #[test]
+    fn an_eye_arrives_from_its_part_of_the_frame_top_down() {
+        gl_context();
+        let gl = Functions::load().unwrap();
+        let (w, h) = (64u32, 32u32);
+        // Quarters, as seen: red top-left, green top-right, blue bottom-left, white bottom-right.
+        let source = unsafe {
+            let mut texture = 0u32;
+            glGenTextures(1, &mut texture);
+            glBindTexture(GL_TEXTURE_2D, texture);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8 as i32, w as i32, h as i32, 0, GL_RGBA, GL_UNSIGNED_BYTE, std::ptr::null());
+            let mut framebuffer = 0u32;
+            (gl.gen_framebuffers)(1, &mut framebuffer);
+            (gl.bind_framebuffer)(GL_DRAW_FRAMEBUFFER, framebuffer);
+            (gl.framebuffer_texture_2d)(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+            glEnable(GL_SCISSOR_TEST);
+            let (hw, hh) = (w as i32 / 2, h as i32 / 2);
+            for (x, y, rgb) in [(0, hh, [1.0, 0.0, 0.0]), (hw, hh, [0.0, 1.0, 0.0]), (0, 0, [0.0, 0.0, 1.0]), (hw, 0, [1.0, 1.0, 1.0])] {
+                glScissor(x, y, hw, hh);
+                glClearColor(rgb[0], rgb[1], rgb[2], 1.0);
+                glClear(GL_COLOR_BUFFER_BIT);
+            }
+            framebuffer
+        };
+        let (device, context, _) = create_device(None).unwrap();
+        let mut bridge = Bridge::new(&device).unwrap();
+        // The middle of the frame: its top-left corner in the red quarter, bottom-right in white.
+        let (eye, depth) = bridge.capture_eye(1, source, (w, h), [16, 8, 32, 16], None).unwrap();
+        let (other, _) = bridge.capture_eye(0, source, (w, h), [16, 8, 32, 16], None).unwrap();
+        unsafe { glFinish() };
+        assert!(depth.is_none());
+        assert_ne!(eye.as_raw(), other.as_raw(), "each slot its own texture");
+        assert_eq!(d3d::texture_desc(&eye).Width, 32);
+        assert_eq!(read_pixel(&device, &context, &eye, 2, 2).unwrap(), [255, 0, 0, 255], "top-left");
+        assert_eq!(read_pixel(&device, &context, &eye, 29, 2).unwrap(), [0, 255, 0, 255], "top-right");
+        assert_eq!(read_pixel(&device, &context, &eye, 2, 13).unwrap(), [0, 0, 255, 255], "bottom-left");
+        assert_eq!(read_pixel(&device, &context, &eye, 29, 13).unwrap(), [255, 255, 255, 255], "bottom-right");
+        unsafe {
+            let mut draw = 0i32;
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &mut draw);
+            assert_eq!(draw as u32, source);
+            assert_ne!(glIsEnabled(GL_SCISSOR_TEST), 0);
+        }
+        assert!(bridge.capture_eye(0, source, (w, h), [40, 8, 32, 16], None).is_err(), "past the frame's edge");
         bridge.release();
     }
 

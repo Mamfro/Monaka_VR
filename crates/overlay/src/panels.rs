@@ -3,9 +3,9 @@
 //! menu) and the 2D window as a window of its own. What they show comes from the viewer each time
 //! they are drawn ([`Content`]).
 
-use crate::console_view::{self, ConsoleView};
+use crate::console_view::{self, ConsoleNav, ConsoleView};
 use crate::fake_vr::{self, FakeVr};
-use crate::menu::panel::{BACKGROUND, DIM, TEXT};
+use crate::menu::panel::{BACKGROUND, DIM, OUTLINE, TEXT, outline};
 use crate::stats::{self, StatsView};
 use egui::{CornerRadius, Frame, Margin, RichText, Vec2};
 
@@ -136,15 +136,29 @@ pub fn window_page(ui: &mut egui::Ui, id: PanelId, content: &Content<'_>, open: 
     layout(ui, id, content)
 }
 
-/// Panel `id` as the headset shows it: its title over its page, on the menu's background.
-pub fn headset_page(ui: &mut egui::Ui, id: PanelId, content: &Content<'_>) {
-    let inside = ui.available_size() - Vec2::splat(2.0 * EDGE as f32);
-    Frame::new().fill(BACKGROUND).corner_radius(CornerRadius::same(14)).inner_margin(Margin::same(EDGE)).show(ui, |ui| {
+/// How the headset shows a panel: outlined while the pad drives it, and where the console is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeadsetFocus {
+    pub active: bool,
+    pub console: ConsoleNav,
+}
+
+/// Panel `id` as the headset shows it: its title over its page, on the menu's background, outlined
+/// while the pad drives it (`focus`).
+pub fn headset_page(ui: &mut egui::Ui, id: PanelId, content: &Content<'_>, focus: &HeadsetFocus) {
+    let inside = ui.available_size() - Vec2::splat(2.0 * (EDGE as f32 + OUTLINE));
+    Frame::new().fill(BACKGROUND).stroke(outline(focus.active)).corner_radius(CornerRadius::same(14)).inner_margin(Margin::same(EDGE)).show(ui, |ui| {
         ui.set_min_size(inside);
         ui.set_max_size(inside);
         ui.label(RichText::new(id.label()).size(20.0).color(TEXT).strong());
         ui.add_space(4.0);
-        // The headset's panels are pictures: their buttons are pressed in the 2D window.
-        let _ = layout(ui, id, content);
+        match id {
+            // The stick picks the console's buttons ([`ConsoleNav`]).
+            PanelId::Console => console_view::headset_layout(ui, content.console, &focus.console, focus.active),
+            // Pictures: their buttons are pressed in the 2D window.
+            _ => {
+                let _ = layout(ui, id, content);
+            }
+        }
     });
 }

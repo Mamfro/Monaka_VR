@@ -240,5 +240,3 @@ fn into(frame: &Mat34, v: Vec3) -> Vec3 {
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod lift_checks;

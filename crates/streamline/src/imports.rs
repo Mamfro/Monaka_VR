@@ -6,9 +6,7 @@
 //! which also hooks the game's `slDLSSSetOptions`), then Streamline. The provider so always sees
 //! the game's own constants, tags and motion vectors, and records its copies on the game's list
 //! before per-eye DLSS records its rebase: frame generation and per-eye DLSS each take the game's
-//! vectors and carry them in their own way. With `reset_every_frame`, DLSS is told to drop its
-//! history every frame, so it never carries one eye into the other (at the cost of its temporal
-//! anti-aliasing).
+//! vectors and carry them in their own way.
 
 use crate::{EvaluateFn, FreeFn, INTERPOSER, SetConstantsFn, SetOptionsFn, SetTagFn, Tag, feature, per_eye, read_tags};
 use monaka_hook::module::Module;
@@ -16,7 +14,7 @@ use monaka_hook::{Hooks, InFlight, Original};
 use monaka_producer::log;
 use std::ffi::c_void;
 use std::sync::{Mutex, OnceLock};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use windows::Win32::Graphics::Direct3D12::ID3D12GraphicsCommandList;
 
 /// `slSetTagForFrame`'s handler: the call's number (from 1), the frame token, the viewport handle,
@@ -53,7 +51,6 @@ pub struct PerEye {
 #[derive(Clone, Copy, Default)]
 pub struct Install {
     pub handlers: Handlers,
-    pub reset_every_frame: bool,
     pub per_eye: Option<PerEye>,
 }
 
@@ -65,11 +62,9 @@ static SET_CONSTANTS: Original<SetConstantsFn> = Original::new();
 static EVALUATE: Original<EvaluateFn> = Original::new();
 static SET_OPTIONS: Original<SetOptionsFn> = Original::new();
 static GET_NATIVE: AtomicUsize = AtomicUsize::new(0);
-static RESET_EVERY_FRAME: AtomicBool = AtomicBool::new(false);
 static TAG_CALLS: AtomicU64 = AtomicU64::new(0);
 static CONSTANT_CALLS: AtomicU64 = AtomicU64::new(0);
 static EVALUATE_CALLS: AtomicU64 = AtomicU64::new(0);
-static RESETS: AtomicU64 = AtomicU64::new(0);
 
 fn handlers() -> Handlers {
     HANDLERS.get().copied().unwrap_or_default()
@@ -93,7 +88,7 @@ pub fn tag_calls() -> u64 {
 }
 
 unsafe extern "system" fn set_tag(frame: usize, viewport: *const u8, tags: *const u8, count: u32, commands: *mut c_void) -> i32 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     let n = TAG_CALLS.fetch_add(1, Relaxed) + 1;
     let all = read_tags(tags, count);
     if let Some(handle) = handlers().tags {
@@ -105,14 +100,14 @@ unsafe extern "system" fn set_tag(frame: usize, viewport: *const u8, tags: *cons
     if let Some((ours, eye_viewport)) = per_eye::tags(viewport, tags, count) {
         // SAFETY: the original, with this eye's viewport and tags (the motion vectors ours), which
         // live until the frame's next tags.
-        return unsafe { SET_TAG.get()(frame, eye_viewport, ours, count, commands) };
+        return unsafe { SET_TAG.get(&flight)(frame, eye_viewport, ours, count, commands) };
     }
     // SAFETY: the original, with the game's arguments.
-    unsafe { SET_TAG.get()(frame, viewport, tags, count, commands) }
+    unsafe { SET_TAG.get(&flight)(frame, viewport, tags, count, commands) }
 }
 
 unsafe extern "system" fn set_constants(constants: *const u8, frame: usize, viewport: *const u8) -> i32 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     let n = CONSTANT_CALLS.fetch_add(1, Relaxed) + 1;
     let handlers = handlers();
     let eye = handlers.constants.and_then(|handle| handle(n, constants, frame, viewport));
@@ -124,26 +119,17 @@ unsafe extern "system" fn set_constants(constants: *const u8, frame: usize, view
     {
         // SAFETY: the original, with the game's frame and this eye's constants and viewport, which
         // live until the frame's next constants.
-        return unsafe { SET_CONSTANTS.get()(ours, frame, eye_viewport) };
-    }
-    if RESET_EVERY_FRAME.load(Relaxed)
-        && let Some(mut copy) = crate::Constants::read(constants)
-    {
-        copy.set_reset(true);
-        RESETS.fetch_add(1, Relaxed);
-        // SAFETY: the original, with the game's frame and viewport and a copy of its constants
-        // that lives until it returns.
-        return unsafe { SET_CONSTANTS.get()(copy.as_ptr(), frame, viewport) };
+        return unsafe { SET_CONSTANTS.get(&flight)(ours, frame, eye_viewport) };
     }
     if let Some(handle) = handlers.unchanged {
         handle(n, constants, frame, viewport);
     }
     // SAFETY: the original, with the game's arguments.
-    unsafe { SET_CONSTANTS.get()(constants, frame, viewport) }
+    unsafe { SET_CONSTANTS.get(&flight)(constants, frame, viewport) }
 }
 
 unsafe extern "system" fn evaluate(feature: u32, frame: *const u8, inputs: *const *const u8, count: u32, commands: *mut c_void) -> i32 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     let n = EVALUATE_CALLS.fetch_add(1, Relaxed) + 1;
     if let Some(handle) = handlers().evaluate {
         handle(n, feature, frame, inputs, count, commands);
@@ -158,21 +144,21 @@ unsafe extern "system" fn evaluate(feature: u32, frame: *const u8, inputs: *cons
     {
         // SAFETY: the original, with the game's frame and command list and this eye's viewport (the
         // motion-vector rebase recorded just before on the same list).
-        return unsafe { EVALUATE.get()(feature, frame, ours.as_ptr(), count, commands) };
+        return unsafe { EVALUATE.get(&flight)(feature, frame, ours.as_ptr(), count, commands) };
     }
     // SAFETY: the original, with the game's arguments.
-    unsafe { EVALUATE.get()(feature, frame, inputs, count, commands) }
+    unsafe { EVALUATE.get(&flight)(feature, frame, inputs, count, commands) }
 }
 
 /// `slDLSSSetOptions` through the pointer the renderer keeps: the game's call, then the same
 /// options for both eye viewports.
 unsafe extern "system" fn set_options(viewport: *const u8, options: *const u8) -> i32 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     // SAFETY: the original, with the game's arguments.
-    let result = unsafe { SET_OPTIONS.get()(viewport, options) };
+    let result = unsafe { SET_OPTIONS.get(&flight)(viewport, options) };
     if result == 0 {
         // SAFETY: Streamline's own function, with our eye viewport copies and the game's options.
-        per_eye::on_options(viewport, options, |v, o| unsafe { SET_OPTIONS.get()(v, o) });
+        per_eye::on_options(viewport, options, |v, o| unsafe { SET_OPTIONS.get(&flight)(v, o) });
     }
     result
 }
@@ -194,10 +180,6 @@ pub unsafe fn native_list(commands: *mut c_void) -> Option<ID3D12GraphicsCommand
 /// # Safety
 /// `renderer` must be the game's renderer DLL, importing these from [`INTERPOSER`].
 pub unsafe fn install(hooks: &mut Hooks, renderer: &Module, install: Install) -> Option<Module> {
-    RESET_EVERY_FRAME.store(install.reset_every_frame, Relaxed);
-    if install.reset_every_frame {
-        log!("DLSS history reset every frame (dlss_reset=1)");
-    }
     let interposer = crate::interposer()?;
     if HANDLERS.set(install.handlers).is_err() {
         log!("Streamline imports: handlers already set; the first stay");
@@ -241,10 +223,10 @@ pub fn release() {
     log!("DLSS resources of the eye viewports freed (results {results:?})");
 }
 
-/// Logs the calls' rates over the last `seconds`, the resets and per-eye DLSS's counts.
+/// Logs the calls' rates over the last `seconds` and per-eye DLSS's counts.
 pub fn report(seconds: f64) {
     static LAST: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
     let now = [TAG_CALLS.load(Relaxed), CONSTANT_CALLS.load(Relaxed)];
     let rate = monaka_producer::rates(now, &LAST, seconds);
-    log!("streamline: tag calls {:.1}/s, constants {:.1}/s, DLSS resets {}; {}", rate[0], rate[1], RESETS.load(Relaxed), per_eye::report());
+    log!("streamline: tag calls {:.1}/s, constants {:.1}/s; {}", rate[0], rate[1], per_eye::report());
 }

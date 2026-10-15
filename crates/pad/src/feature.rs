@@ -14,16 +14,17 @@
 use crate::actions::Actions;
 use crate::remap::Remaps;
 use monaka_core::feature::Feature;
-use monaka_core::manifest::CONTROLLER_PAD;
+use monaka_core::manifest::{CONTROLLER_PAD, CONTROLLER_PROXY};
 use monaka_producer::game::{Component, Game, Lack, On, Start};
 use std::sync::atomic::{AtomicBool, Ordering::*};
 
-/// The gamepad component for game `G`.
+/// The gamepad component for game `G`, offering the pad and the controller proxy. A game with
+/// options of its own lists these two among them.
 pub const fn gamepad<G: Game>() -> Component<G> {
     Component {
         name: "gamepad",
         features: &[Feature::Gamepad],
-        options: &[CONTROLLER_PAD],
+        options: &[CONTROLLER_PAD, CONTROLLER_PROXY],
         needs_channel: true,
         on: on::<G>,
         install: install::<G>,

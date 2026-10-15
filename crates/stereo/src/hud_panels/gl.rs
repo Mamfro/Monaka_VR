@@ -5,8 +5,8 @@
 //! layer it runs nowhere. After the left eye's layer each panel is captured into D3D11
 //! (`monaka_gl::Bridge`, on a device of our own) and published.
 
-use super::Piece;
-use crate::panel11::Panel;
+use super::{PanelOut, Piece};
+use crate::hud_panels::panel::Panel;
 use monaka_channel::{ChannelName, d3d};
 use monaka_core::protocol::LEFT_HAND;
 use monaka_core::sync::Locked;
@@ -36,10 +36,8 @@ struct Backend {
     broken: bool,
     /// The eye whose layer is being drawn.
     eye: Option<usize>,
-    /// This frame's first piece draw has run (every shown piece's canvases cleared).
-    started: bool,
-    /// By piece: shown this frame, its canvases cleared and drawn into.
-    drawn: Vec<bool>,
+    /// Which panels are drawn into this frame, and went out shown.
+    states: super::PanelStates,
 }
 
 // SAFETY: used only under the mutex, and its GL objects only on the render thread (made, drawn
@@ -86,7 +84,7 @@ impl Gpu {
 /// Before eye `eye`'s 2D layer (0 left), on the render thread.
 pub fn layer_begins(eye: usize) {
     if super::active() {
-        BACKEND.locked().get_or_insert_with(|| Backend { gpu: None, broken: false, eye: None, started: false, drawn: Vec::new() }).eye = Some(eye);
+        BACKEND.locked().get_or_insert_with(|| Backend { gpu: None, broken: false, eye: None, states: super::PanelStates::default() }).eye = Some(eye);
     }
 }
 
@@ -99,12 +97,11 @@ pub fn layer_ends(eye: usize) {
     if eye != LEFT_HAND {
         return;
     }
-    backend.started = false;
+    let outs = backend.states.end();
     let Some(gpu) = backend.gpu.as_mut() else { return };
-    for (piece, drawn) in gpu.pieces.iter_mut().zip(backend.drawn.iter_mut()) {
-        let Some(piece) = piece else { continue };
-        let drawn = std::mem::take(drawn);
-        if drawn {
+    for (index, out) in outs.into_iter().enumerate() {
+        let (Some(out), Some(Some(piece))) = (out, gpu.pieces.get_mut(index)) else { continue };
+        if out == PanelOut::Shown {
             for (canvas, target) in piece.canvases.iter().zip(piece.panel.targets()) {
                 let (w, h) = canvas.size();
                 match gpu.bridge.capture(canvas.framebuffer(), w, h) {
@@ -114,7 +111,9 @@ pub fn layer_ends(eye: usize) {
                 }
             }
         }
-        piece.panel.publish(&gpu.context, drawn);
+        if piece.panel.publish(&gpu.context, out) && backend.states.went_out(index, out) {
+            super::note_change(piece.panel.piece(), out);
+        }
     }
 }
 
@@ -138,7 +137,6 @@ pub fn draw(piece: usize, draw: &dyn Fn()) -> bool {
     let mut guard = BACKEND.locked();
     let Some(backend) = guard.as_mut() else { return false };
     let Some(eye) = backend.eye.filter(|_| !backend.broken) else { return false };
-    backend.drawn.resize(frame.pieces.len(), false);
     if eye != LEFT_HAND {
         return true;
     }
@@ -155,21 +153,20 @@ pub fn draw(piece: usize, draw: &dyn Fn()) -> bool {
             }
         }
     }
-    let Backend { gpu, started, drawn, .. } = backend;
+    let Backend { gpu, states, .. } = backend;
     let gpu = gpu.as_mut().expect("made above");
-    if !*started {
-        *started = true;
+    if states.start(frame.pieces.len()) {
         for (index, shown) in frame.rects.iter().enumerate() {
             if shown.is_some()
                 && let Some(piece) = gpu.piece(&frame.channel, frame.pieces, index)
             {
                 piece.canvases[0].clear([0.0, 0.0, 0.0, 0.0]);
                 piece.canvases[1].clear([1.0, 1.0, 1.0, 1.0]);
-                drawn[index] = true;
+                states.ready(index);
             }
         }
     }
-    let Some(piece) = gpu.pieces.get(piece).and_then(Option::as_ref).filter(|_| drawn[piece]) else { return false };
+    let Some(piece) = gpu.pieces.get(piece).and_then(Option::as_ref).filter(|_| states.is_ready(piece)) else { return false };
     let Some(viewport) = viewport_for(rect, piece.canvases[0].size()) else { return false };
     for canvas in &piece.canvases {
         canvas.draw(viewport, draw);
@@ -201,20 +198,4 @@ pub fn viewport_for(rect: [f32; 4], size: (u32, u32)) -> Option<[i32; 4]> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_viewport_puts_the_rectangle_on_the_canvas() {
-        // The layout's right quarter, its lower half: four layouts wide, two high, moved left by
-        // three canvases; its bottom at the canvas's bottom.
-        let [x, y, w, h] = viewport_for([0.75, 0.5, 0.25, 0.5], (100, 50)).unwrap();
-        assert_eq!((w, h), (400, 100));
-        assert_eq!(x, -300);
-        assert_eq!(y, 0, "the layout's bottom is the rectangle's bottom");
-        // The top half instead: the layout's top at the canvas's top.
-        let [_, y, _, h] = viewport_for([0.75, 0.0, 0.25, 0.5], (100, 50)).unwrap();
-        assert_eq!(y + h, 50);
-        assert!(viewport_for([0.0, 0.0, 0.0, 0.5], (100, 50)).is_none(), "an empty rectangle");
-    }
-}
+mod tests;

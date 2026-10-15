@@ -1,14 +1,14 @@
 //! The dynamic HUD's panels drawn with D3D11, on the game's own device and immediate context: a
 //! piece's draw runs into its panel's two targets (black and white) bound past the game's hooked
-//! `OMSetRenderTargets` ([`crate::hud11::set_targets_unhooked`]), with the viewport scaled and moved
+//! `OMSetRenderTargets` ([`crate::hud_layer::d3d11::set_targets_unhooked`]), with the viewport scaled and moved
 //! so the piece's rectangle fills the panel and the game's own scissor carried over (with the
 //! panel's own depth-stencil for a masked HUD); then the game's targets, viewport and scissor are
 //! given back. The panels are made on the game's device in the format of its HUD target, so their
 //! texels are what the eye image's would be.
 
 use super::Piece;
-use crate::hud11::set_targets_unhooked;
-use crate::panel11::Panel;
+use crate::hud_layer::d3d11::set_targets_unhooked;
+use crate::hud_panels::panel::Panel;
 use monaka_channel::ChannelName;
 use monaka_core::sync::Locked;
 use monaka_producer::log;
@@ -34,10 +34,8 @@ struct Backend {
     gpu: Option<Gpu>,
     /// The panels could not be made: the pieces stay in the HUD.
     broken: bool,
-    /// This frame's first piece draw has run (every shown piece's panel cleared).
-    started: bool,
-    /// By piece: shown this frame, its panel cleared and drawn into.
-    drawn: Vec<bool>,
+    /// Which panels are drawn into this frame, and went out shown.
+    states: super::PanelStates,
 }
 
 static BACKEND: Mutex<Option<Backend>> = Mutex::new(None);
@@ -99,7 +97,7 @@ pub fn draw(context: *mut c_void, piece: usize, layout: D3D11_VIEWPORT, draw: &d
     let Some(frame) = super::frame() else { return false };
     let Some(rect) = frame.rects.get(piece).copied().flatten() else { return false };
     let mut guard = BACKEND.locked();
-    let backend = guard.get_or_insert_with(|| Backend { gpu: None, broken: false, started: false, drawn: vec![false; frame.pieces.len()] });
+    let backend = guard.get_or_insert_with(|| Backend { gpu: None, broken: false, states: super::PanelStates::default() });
     if backend.broken {
         return false;
     }
@@ -113,22 +111,21 @@ pub fn draw(context: *mut c_void, piece: usize, layout: D3D11_VIEWPORT, draw: &d
             }
         }
     }
-    let Backend { gpu, started, drawn, .. } = backend;
+    let Backend { gpu, states, .. } = backend;
     let gpu = gpu.as_mut().expect("made above");
     // The frame's first piece draw: every shown piece's panel starts empty, and goes out this
     // frame drawn or not.
-    if !*started {
-        *started = true;
+    if states.start(frame.pieces.len()) {
         for (index, shown) in frame.rects.iter().enumerate() {
             if shown.is_some()
                 && let Some(panel) = gpu.panel(&frame.channel, frame.pieces, index)
             {
                 panel.clear(ctx);
-                drawn[index] = true;
+                states.ready(index);
             }
         }
     }
-    let Some(panel) = gpu.panels.get(piece).and_then(Option::as_ref).filter(|_| drawn[piece]) else { return false };
+    let Some(panel) = gpu.panels.get(piece).and_then(Option::as_ref).filter(|_| states.is_ready(piece)) else { return false };
     draw_into(ctx, context, panel, frame.pieces[piece].size, layout, rect, draw);
     DRAWS.fetch_add(1, Relaxed);
     true
@@ -139,11 +136,12 @@ pub fn draw(context: *mut c_void, piece: usize, layout: D3D11_VIEWPORT, draw: &d
 pub fn frame_end(context: &ID3D11DeviceContext) {
     let mut guard = BACKEND.locked();
     let Some(backend) = guard.as_mut() else { return };
-    backend.started = false;
+    let outs = backend.states.end();
     let Some(gpu) = backend.gpu.as_mut() else { return };
-    for (panel, drawn) in gpu.panels.iter_mut().zip(backend.drawn.iter_mut()) {
-        if let Some(panel) = panel {
-            panel.publish(context, std::mem::take(drawn));
+    for (index, out) in outs.into_iter().enumerate() {
+        let (Some(out), Some(Some(panel))) = (out, gpu.panels.get_mut(index)) else { continue };
+        if panel.publish(context, out) && backend.states.went_out(index, out) {
+            super::note_change(panel.piece(), out);
         }
     }
 }
@@ -235,15 +233,4 @@ fn intersect(a: &RECT, b: &RECT) -> RECT {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_panel_viewport_puts_the_rectangle_on_the_panel() {
-        let base = D3D11_VIEWPORT { TopLeftX: 0.0, TopLeftY: 0.0, Width: 1000.0, Height: 500.0, MinDepth: 0.0, MaxDepth: 1.0 };
-        // The layout's right quarter, lower half: four panels wide, two high, moved left by three.
-        let view = panel_viewport(base, [0.75, 0.5, 0.25, 0.5], (100, 50));
-        assert_eq!((view.Width, view.Height), (400.0, 100.0));
-        assert_eq!((view.TopLeftX, view.TopLeftY), (-300.0, -50.0));
-    }
-}
+mod tests;

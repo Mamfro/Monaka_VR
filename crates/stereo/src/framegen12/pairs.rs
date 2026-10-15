@@ -25,7 +25,7 @@ use crate::providers::FrameInputs;
 use monaka_channel::d3d12::{self, Recorder};
 use monaka_core::protocol::HeadPose;
 use monaka_core::sync::Locked;
-use monaka_framegen::ffx::Size2;
+use monaka_ffx::Size2;
 use monaka_framegen::hud12::HudComposer;
 use monaka_framegen::inputs::{self, Motion};
 use monaka_framegen::pacing::{Interval, Pacing};
@@ -39,24 +39,14 @@ use std::time::{Duration, Instant};
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16_TYPELESS};
 
-/// What a game sets for its frame generation of pairs (PC checks among them).
-#[derive(Clone, Copy)]
-pub struct Checks {
-    /// The game's per-eye history epoch: when it changes, each eye's generation starts afresh.
-    pub epoch: fn() -> u32,
-    /// The game's UI layer is used to keep the HUD out of the interpolation (off: the finished frames
-    /// are interpolated, the HUD moving with the world).
-    pub hud_free: bool,
-    /// The newest real frame's UI layer goes over the generated frame.
-    pub compose: bool,
-    /// Each eye's world without the HUD is published in place of the generated frame.
-    pub show_hud_free: bool,
+/// No per-eye history epoch: generation starts afresh only when the HUD layer comes or goes.
+fn no_epoch() -> u32 {
+    0
 }
 
-const NO_CHECKS: Checks = Checks { epoch: || 0, hud_free: true, compose: true, show_hud_free: false };
-
 static ON: AtomicBool = AtomicBool::new(false);
-static CHECKS: Mutex<Checks> = Mutex::new(NO_CHECKS);
+/// The game's per-eye history epoch: when it changes, each eye's generation starts afresh.
+static EPOCH: Mutex<fn() -> u32> = Mutex::new(no_epoch);
 
 pub static GENERATED: AtomicU64 = AtomicU64::new(0);
 pub static REAL: AtomicU64 = AtomicU64::new(0);
@@ -67,7 +57,7 @@ static HUD_LAID: AtomicU64 = AtomicU64::new(0);
 
 /// Per-eye frame generation of same-frame pairs for game `G`. FSR frame generation is loaded by
 /// `monaka_framegen::feature::framegen()`, which this `needs`; the game says when it is on (`on`) by
-/// struct update, and its checks ([`set_checks`]) at its install.
+/// struct update, and its history epoch ([`set_epoch`]) at its install.
 pub const fn per_eye_pairs<G: PresentsPairs + FrameInputs>() -> Component<G> {
     Component { name: "frame generation per eye", install: install::<G>, release: close, ..Component::NONE }
 }
@@ -79,9 +69,9 @@ fn install<G: PresentsPairs + FrameInputs>(_: &mut Start<'_, G>) -> Result<(), L
     Ok(())
 }
 
-/// The game's checks for this run.
-pub fn set_checks(checks: Checks) {
-    *CHECKS.locked() = checks;
+/// The game's per-eye history epoch for this run.
+pub fn set_epoch(epoch: fn() -> u32) {
+    *EPOCH.locked() = epoch;
 }
 
 /// Frame generation of pairs runs: the component is on and FSR frame generation is loaded.
@@ -202,7 +192,6 @@ pub fn present(queue: &ID3D12CommandQueue, buffer: &ID3D12Resource, eye: usize, 
 /// At eye `index`'s (0 or 1) present: keep the frame and generate the one before it. True when the
 /// generated frame is usable (the eye's previous frame was real and continuous).
 fn eye_present(state: &mut State, queue: &ID3D12CommandQueue, index: usize, buffer: &ID3D12Resource, hud: Option<&EyeHud>) -> bool {
-    let checks = *CHECKS.locked();
     state.hud_laid[index] = false;
     // SAFETY: reads a descriptor.
     let frame = unsafe { buffer.GetDesc() };
@@ -243,7 +232,7 @@ fn eye_present(state: &mut State, queue: &ID3D12CommandQueue, index: usize, buff
             return false;
         }
     };
-    let epoch = (checks.epoch)();
+    let epoch = (*EPOCH.locked())();
     let same = |t: &ID3D12Resource| {
         // SAFETY: reads a descriptor.
         let d = unsafe { t.GetDesc() };
@@ -253,7 +242,7 @@ fn eye_present(state: &mut State, queue: &ID3D12CommandQueue, index: usize, buff
         state.composer = Some(HudComposer::new(&device).map_err(|why| log!("HUD kept out of frame generation: unavailable ({why})")));
     }
     let composer_ready = matches!(state.composer, Some(Ok(_)));
-    let hud_free = hud_free.filter(|(_, ui)| composer_ready && same(ui) && frame.Format == DXGI_FORMAT_R8G8B8A8_UNORM && checks.hud_free);
+    let hud_free = hud_free.filter(|(_, ui)| composer_ready && same(ui) && frame.Format == DXGI_FORMAT_R8G8B8A8_UNORM);
     let reset = stream.epoch != epoch || stream.hud_free != hud_free.is_some();
     (stream.epoch, stream.hud_free) = (epoch, hud_free.is_some());
     let Ok(Some(list)) = state.recorder.begin() else { return skip("command lists busy") };
@@ -279,7 +268,6 @@ fn eye_present(state: &mut State, queue: &ID3D12CommandQueue, index: usize, buff
     let source = if hud_free.is_some() { &world } else { &real };
     let generated = stream.eye.generate(&list, &camera, &depth, &motion, motion_view, source, reset, 16.7);
     if generated.is_ok()
-        && checks.compose
         && let (Some((_, ui)), Some(Ok(composer))) = (&hud_free, state.composer.as_mut())
     {
         composer.compose(&list, index, ui, &stream.eye.output);
@@ -332,7 +320,6 @@ fn left(queue: &ID3D12CommandQueue, buffer: &ID3D12Resource, hud: Option<&EyeHud
 
 /// The right eye's present: the generated pair now, the real pair half a frame later.
 fn right(queue: &ID3D12CommandQueue, buffer: &ID3D12Resource, pose: HeadPose, hud: Option<&EyeHud>) -> bool {
-    let checks = *CHECKS.locked();
     let mut guard = STATE.locked();
     let Some(state) = guard.as_mut() else { return false };
     state.generated[1] = eye_present(state, queue, 1, buffer, hud);
@@ -352,10 +339,7 @@ fn right(queue: &ID3D12CommandQueue, buffer: &ID3D12Resource, pose: HeadPose, hu
         let mut halfway = monaka_framegen::blend(&previous, &pose, 0.5);
         // Marks a generated pair for PC checks (the probe); gaze is otherwise unused.
         halfway.gaze.sample_time = -1;
-        let shown = if checks.show_hud_free {
-            // Each eye's world without the HUD in place of the generated frame.
-            [l.world[l.world_slot].clone(), r.world[r.world_slot].clone()]
-        } else if hud_laid && let Some((gl, gr)) = pair(&state.generated_shown) {
+        let shown = if hud_laid && let Some((gl, gr)) = pair(&state.generated_shown) {
             [gl, gr]
         } else {
             [l.eye.output.clone(), r.eye.output.clone()]
@@ -378,7 +362,7 @@ fn right(queue: &ID3D12CommandQueue, buffer: &ID3D12Resource, pose: HeadPose, hu
 pub fn close() {
     ON.store(false, Release);
     PACING.stop();
-    *CHECKS.locked() = NO_CHECKS;
+    *EPOCH.locked() = no_epoch;
     let Some(state) = STATE.locked().take() else { return };
     monaka_framegen::free_when_idle(state, |s| &s.recorder);
 }

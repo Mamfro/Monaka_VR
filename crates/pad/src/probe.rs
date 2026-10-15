@@ -94,39 +94,41 @@ const SLOT_GET_STATE: usize = 9;
 const SLOT_GET_DATA: usize = 10;
 const SLOT_POLL: usize = 25;
 
-macro_rules! di_hooks {
-    ($state:ident, $data:ident, $poll:ident, $state_fn:ident, $data_fn:ident, $poll_fn:ident) => {
-        static $state: Original<GetDeviceStateFn> = Original::new();
-        static $data: Original<GetDeviceDataFn> = Original::new();
-        static $poll: Original<PollFn> = Original::new();
-        unsafe extern "system" fn $state_fn(device: *mut c_void, size: u32, out: *mut c_void) -> i32 {
-            let _flight = InFlight::enter();
-            // SAFETY: forwards the game's own call.
-            let result = unsafe { $state.get()(device, size, out) };
-            // The state size tells the device kind: 16/20 mouse, 256 keyboard, 80/272 joystick.
-            note(|m| format!("DirectInput GetDeviceState size {size} by {m}"));
-            result
-        }
-        unsafe extern "system" fn $data_fn(device: *mut c_void, size: u32, out: *mut c_void, count: *mut u32, flags: u32) -> i32 {
-            let _flight = InFlight::enter();
-            // SAFETY: forwards the game's own call.
-            let result = unsafe { $data.get()(device, size, out, count, flags) };
-            // SAFETY: the game's in-out count, read after the call filled it.
-            let got = if count.is_null() { 0 } else { unsafe { *count } };
-            note(|m| format!("DirectInput GetDeviceData (device {device:p}{}) by {m}", if got > 0 { ", with data" } else { "" }));
-            result
-        }
-        unsafe extern "system" fn $poll_fn(device: *mut c_void) -> i32 {
-            let _flight = InFlight::enter();
-            note(|m| format!("DirectInput Poll (device {device:p}) by {m}"));
-            // SAFETY: forwards the game's own call.
-            unsafe { $poll.get()(device) }
-        }
-    };
+/// How many DirectInput method sets are watched (the wide and the ANSI interface, when they differ).
+const DI_SETS: usize = 2;
+/// Each set's originals, by its number.
+static DI_STATE: [Original<GetDeviceStateFn>; DI_SETS] = [const { Original::new() }; DI_SETS];
+static DI_DATA: [Original<GetDeviceDataFn>; DI_SETS] = [const { Original::new() }; DI_SETS];
+static DI_POLL: [Original<PollFn>; DI_SETS] = [const { Original::new() }; DI_SETS];
+
+/// Set `N`'s watch on `GetDeviceState`.
+unsafe extern "system" fn di_state<const N: usize>(device: *mut c_void, size: u32, out: *mut c_void) -> i32 {
+    let flight = InFlight::enter();
+    // SAFETY: forwards the game's own call.
+    let result = unsafe { DI_STATE[N].get(&flight)(device, size, out) };
+    // The state size tells the device kind: 16/20 mouse, 256 keyboard, 80/272 joystick.
+    note(|m| format!("DirectInput GetDeviceState size {size} by {m}"));
+    result
 }
 
-di_hooks!(DI_STATE_1, DI_DATA_1, DI_POLL_1, di_state_1, di_data_1, di_poll_1);
-di_hooks!(DI_STATE_2, DI_DATA_2, DI_POLL_2, di_state_2, di_data_2, di_poll_2);
+/// Set `N`'s watch on `GetDeviceData`.
+unsafe extern "system" fn di_data<const N: usize>(device: *mut c_void, size: u32, out: *mut c_void, count: *mut u32, flags: u32) -> i32 {
+    let flight = InFlight::enter();
+    // SAFETY: forwards the game's own call.
+    let result = unsafe { DI_DATA[N].get(&flight)(device, size, out, count, flags) };
+    // SAFETY: the game's in-out count, read after the call filled it.
+    let got = if count.is_null() { 0 } else { unsafe { *count } };
+    note(|m| format!("DirectInput GetDeviceData (device {device:p}{}) by {m}", if got > 0 { ", with data" } else { "" }));
+    result
+}
+
+/// Set `N`'s watch on `Poll`.
+unsafe extern "system" fn di_poll<const N: usize>(device: *mut c_void) -> i32 {
+    let flight = InFlight::enter();
+    note(|m| format!("DirectInput Poll (device {device:p}) by {m}"));
+    // SAFETY: forwards the game's own call.
+    unsafe { DI_POLL[N].get(&flight)(device) }
+}
 
 /// The device method addresses of DirectInput 8 for interface `iid` (a mouse device of our own,
 /// released at once).
@@ -178,9 +180,9 @@ static READ_FILE: Original<Args6> = Original::new();
 const RID_INPUT: u32 = 0x1000_0003;
 
 unsafe extern "system" fn raw_data(handle: *mut c_void, command: u32, data: *mut c_void, size: *mut u32, header: u32) -> u32 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     // SAFETY: forwards the game's own call.
-    let result = unsafe { RAW_DATA.get()(handle, command, data, size, header) };
+    let result = unsafe { RAW_DATA.get(&flight)(handle, command, data, size, header) };
     if command == RID_INPUT && !data.is_null() && result != u32::MAX && result >= 4 {
         // SAFETY: RAWINPUTHEADER.dwType, just filled: 0 mouse, 1 keyboard, 2 HID.
         let kind = unsafe { *(data as *const u32) };
@@ -190,9 +192,9 @@ unsafe extern "system" fn raw_data(handle: *mut c_void, command: u32, data: *mut
 }
 
 unsafe extern "system" fn raw_buffer(data: *mut c_void, size: *mut u32, header: u32) -> u32 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     // SAFETY: forwards the game's own call.
-    let result = unsafe { RAW_BUFFER.get()(data, size, header) };
+    let result = unsafe { RAW_BUFFER.get(&flight)(data, size, header) };
     if !data.is_null() && result != u32::MAX && result > 0 {
         // SAFETY: the first record's RAWINPUTHEADER.dwType.
         let kind = unsafe { *(data as *const u32) };
@@ -202,49 +204,49 @@ unsafe extern "system" fn raw_buffer(data: *mut c_void, size: *mut u32, header: 
 }
 
 unsafe extern "system" fn hid_usages(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     note(|m| format!("HidP_GetUsages by {m}"));
     // SAFETY: forwards the game's own call with its eight arguments.
-    unsafe { HID_USAGES.get()(a, b, c, d, e, f, g, h) }
+    unsafe { HID_USAGES.get(&flight)(a, b, c, d, e, f, g, h) }
 }
 
 unsafe extern "system" fn hid_value(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     note(|m| format!("HidP_GetUsageValue by {m}"));
     // SAFETY: as above.
-    unsafe { HID_VALUE.get()(a, b, c, d, e, f, g, h) }
+    unsafe { HID_VALUE.get(&flight)(a, b, c, d, e, f, g, h) }
 }
 
 unsafe extern "system" fn hid_data(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) -> u64 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     note(|m| format!("HidP_GetData by {m}"));
     // SAFETY: as above, six arguments.
-    unsafe { HID_DATA.get()(a, b, c, d, e, f) }
+    unsafe { HID_DATA.get(&flight)(a, b, c, d, e, f) }
 }
 
 unsafe extern "system" fn hid_report(a: u64, b: u64, c: u64) -> u64 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     note(|m| format!("HidD_GetInputReport by {m}"));
     // SAFETY: as above, three arguments.
-    unsafe { HID_REPORT.get()(a, b, c) }
+    unsafe { HID_REPORT.get(&flight)(a, b, c) }
 }
 
 /// Every driver request, by caller and control code: whatever reads a pad (any XInput copy asks
 /// the Xbox controller driver, codes 0x8000e0xx) shows up here under its own module.
 unsafe extern "system" fn io_control(a: u64, code: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64) -> u64 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     let code = code as u32;
     note(|m| format!("DeviceIoControl {code:#010x} by {m}"));
     // SAFETY: forwards the call with its eight arguments.
-    unsafe { IO_CONTROL.get()(a, code as u64, c, d, e, f, g, h) }
+    unsafe { IO_CONTROL.get(&flight)(a, code as u64, c, d, e, f, g, h) }
 }
 
 /// File reads, by caller (a HID pad read straight from its device file shows up here).
 unsafe extern "system" fn read_file(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) -> u64 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     note(|m| format!("ReadFile by {m}"));
     // SAFETY: as above, five arguments (the sixth is padding).
-    unsafe { READ_FILE.get()(a, b, c, d, e, f) }
+    unsafe { READ_FILE.get(&flight)(a, b, c, d, e, f) }
 }
 
 /// Prepares the probe's hooks (enabled with the producer's others); each API that is not loaded
@@ -261,20 +263,15 @@ pub fn install(hooks: &mut Hooks) {
                     seen.push(methods);
                 }
             }
-            for (i, [state, data, poll]) in seen.into_iter().enumerate().take(2) {
+            let detours: [(GetDeviceStateFn, GetDeviceDataFn, PollFn); DI_SETS] = [(di_state::<0>, di_data::<0>, di_poll::<0>), (di_state::<1>, di_data::<1>, di_poll::<1>)];
+            for (i, [state, data, poll]) in seen.into_iter().enumerate().take(DI_SETS) {
+                let (state_detour, data_detour, poll_detour) = detours[i];
                 // SAFETY: IDirectInputDevice8 methods of these signatures.
                 let hooked = unsafe {
-                    if i == 0 {
-                        hooks
-                            .inline_chained(&DI_STATE_1, "GetDeviceState", state, di_state_1 as GetDeviceStateFn)
-                            .and_then(|()| hooks.inline_chained(&DI_DATA_1, "GetDeviceData", data, di_data_1 as GetDeviceDataFn))
-                            .and_then(|()| hooks.inline_chained(&DI_POLL_1, "Poll", poll, di_poll_1 as PollFn))
-                    } else {
-                        hooks
-                            .inline_chained(&DI_STATE_2, "GetDeviceState", state, di_state_2 as GetDeviceStateFn)
-                            .and_then(|()| hooks.inline_chained(&DI_DATA_2, "GetDeviceData", data, di_data_2 as GetDeviceDataFn))
-                            .and_then(|()| hooks.inline_chained(&DI_POLL_2, "Poll", poll, di_poll_2 as PollFn))
-                    }
+                    hooks
+                        .inline_chained(&DI_STATE[i], "GetDeviceState", state, state_detour)
+                        .and_then(|()| hooks.inline_chained(&DI_DATA[i], "GetDeviceData", data, data_detour))
+                        .and_then(|()| hooks.inline_chained(&DI_POLL[i], "Poll", poll, poll_detour))
                 };
                 if let Err(e) = hooked {
                     skip("DirectInput", e.to_string());

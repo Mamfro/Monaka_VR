@@ -149,5 +149,3 @@ fn release<G: ThrowsByHand>() {
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod lift_checks;

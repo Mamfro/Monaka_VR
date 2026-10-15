@@ -13,8 +13,8 @@
 
 use monaka_channel::d3d::{self, adapter_luid, find_adapter};
 use monaka_channel::d3d12::{Recorder, wait_fence};
-use monaka_framegen::ffx::{self, Api, Float2, Resource, Size2, state};
-use monaka_framegen::upscale::{self, Upscaler};
+use monaka_ffx::{self as ffx, Api, Float2, Resource, Size2, state};
+use monaka_ffx::upscale::{self, Upscaler};
 use monaka_warp::{EyeView, MotionPass, ObjectMotion};
 use std::fmt;
 use std::path::Path;
@@ -33,8 +33,14 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_R8G8B8A8_U
 use windows::Win32::Graphics::Dxgi::IDXGIResource1;
 use windows::core::Interface;
 
+mod framegen;
+
+pub use framegen::{FrameGen11, GenFrame, GenSettings};
+
 /// AMD's loader and the upscaler provider it loads.
 pub const UPSCALER_DLL: &str = "amd_fidelityfx_upscaler_dx12.dll";
+/// The frame generation provider ([`load_with_framegen`]).
+pub const FRAMEGEN_DLL: &str = "amd_fidelityfx_framegeneration_dx12.dll";
 
 #[derive(Debug)]
 pub enum Error {
@@ -93,7 +99,19 @@ fn at<T>(what: &str, result: windows::core::Result<T>) -> Result<T> {
 /// AMD's FFX API from `dir` (the loader and the upscaler provider, loaded by full path so the
 /// loader finds its provider already loaded instead of searching the game's folders).
 pub fn load(dir: &Path) -> Result<Api> {
-    Api::load(Some(dir), &[UPSCALER_DLL]).map_err(|e| match e {
+    load_providers(dir, &[UPSCALER_DLL])
+}
+
+/// [`load`] with the frame generation provider too (the upscaler's when `dir` has it), both before
+/// the loader, which then finds both in the process: for a run that uses frame generation
+/// ([`FrameGen11`]) with or without the upscaler, whichever is made first loading the loader.
+pub fn load_with_framegen(dir: &Path) -> Result<Api> {
+    let providers: &[&str] = if dir.join(UPSCALER_DLL).exists() { &[UPSCALER_DLL, FRAMEGEN_DLL] } else { &[FRAMEGEN_DLL] };
+    load_providers(dir, providers)
+}
+
+fn load_providers(dir: &Path, providers: &[&str]) -> Result<Api> {
+    Api::load(Some(dir), providers).map_err(|e| match e {
         ffx::LoadError::Os(_, e) => Error::Os(e),
         other => Error::Unavailable(other.to_string()),
     })
@@ -214,15 +232,22 @@ pub struct Settings {
     pub depth_flags: u32,
 }
 
-impl Fsr11 {
-    /// A D3D12 device on the game device's adapter, the shared textures and one upscaling context
-    /// per eye.
-    pub fn new(device: &ID3D11Device, api: Api, settings: Settings) -> Result<Self> {
+/// A D3D12 device and direct queue on the game device's adapter, and one fence both devices
+/// share: what the upscaler and frame generation ([`FrameGen11`]) each work over.
+struct Beside {
+    device12: ID3D12Device,
+    queue: ID3D12CommandQueue,
+    fence12: ID3D12Fence,
+    fence11: ID3D11Fence,
+}
+
+impl Beside {
+    fn new(device: &ID3D11Device) -> Result<Self> {
         let adapter = find_adapter(adapter_luid(device)?)?;
         let device5: ID3D11Device5 = device.cast()?;
         let mut device12: Option<ID3D12Device> = None;
         // SAFETY: creation calls on the game's adapter, into locals.
-        let (device12, queue, fence12, fence11) = unsafe {
+        unsafe {
             at("D3D12 device", D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_11_0, &mut device12))?;
             let device12 = device12.ok_or_else(|| Error::Unavailable("D3D12 device".into()))?;
             let queue: ID3D12CommandQueue = device12.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC { Type: D3D12_COMMAND_LIST_TYPE_DIRECT, ..Default::default() })?;
@@ -232,8 +257,16 @@ impl Fsr11 {
             let opened = device5.OpenSharedFence(handle, &mut fence11);
             let _ = CloseHandle(handle);
             at("opening the shared fence", opened)?;
-            (device12, queue, fence12, fence11.ok_or_else(|| Error::Unavailable("shared fence".into()))?)
-        };
+            Ok(Self { device12, queue, fence12, fence11: fence11.ok_or_else(|| Error::Unavailable("shared fence".into()))? })
+        }
+    }
+}
+
+impl Fsr11 {
+    /// A D3D12 device on the game device's adapter, the shared textures and one upscaling context
+    /// per eye.
+    pub fn new(device: &ID3D11Device, api: Api, settings: Settings) -> Result<Self> {
+        let Beside { device12, queue, fence12, fence11 } = Beside::new(device)?;
         let recorder = Recorder::on(&device12, 3, fence12.clone())?;
         let (render, display) = (settings.render, settings.display);
         // The sRGB back buffer copies into UNORM as stored.

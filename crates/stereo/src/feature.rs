@@ -7,8 +7,8 @@
 //! [`Driver::pending`] for the eye and pose to draw. An engine with a present call of its own
 //! hooks that and calls [`Driver::around_present`] from it ([`Entry::Game`]).
 
-use crate::alternate::AlternatePublisher;
-use crate::alternate12::AlternatePublisher12;
+use crate::alternate::d3d11::AlternatePublisher;
+use crate::alternate::d3d12::AlternatePublisher12;
 use crate::driver::{Driver, Flat, FlatPicture, Install, Publisher};
 use crate::present::PresentFn;
 use monaka_channel::pose::PoseChannel;
@@ -29,7 +29,7 @@ static PRESENT_ORIGINAL: Original<PresentFn> = Original::new();
 /// What a build draws with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Graphics {
-    /// Pairs over the keyed-mutex channel, copied on the swapchain's device.
+    /// Pairs over the fence channel, copied on the swapchain's device.
     D3D11,
     /// Pairs over the fence channel, copied on the game's direct queue ([`Loop::queue`]).
     D3D12,
@@ -143,8 +143,9 @@ fn install<G: Presents>(start: &mut Start<'_, G>) -> Result<(), Lack> {
 
 /// `IDXGISwapChain::Present`, for every swapchain in the process.
 unsafe extern "system" fn dxgi_present(swap: *mut core::ffi::c_void, interval: u32, flags: u32) -> HRESULT {
+    let flight = monaka_hook::InFlight::enter();
     // SAFETY: the caller passes a live swapchain; the original is DXGI's Present.
-    unsafe { DRIVER.present(swap, interval, flags, PRESENT_ORIGINAL.get()) }
+    unsafe { DRIVER.present(swap, interval, flags, PRESENT_ORIGINAL.get(&flight)) }
 }
 
 fn arm() {

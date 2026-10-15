@@ -31,8 +31,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::*};
 
 #[cfg(test)]
-mod lift_checks;
-#[cfg(test)]
 mod tests;
 
 /// How a game takes the turn as a facing the mod owns: its look targets, read and written, and

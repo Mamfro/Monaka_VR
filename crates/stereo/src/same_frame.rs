@@ -10,14 +10,14 @@
 //!
 //! - [`d3d11`]: each eye presented on its own through a D3D11 swapchain, copied out of the back
 //!   buffer as its present is dispatched; the left eye's present kept off the monitor; pairs over
-//!   the keyed-mutex channel.
+//!   the fence channel.
 //! - [`d3d12`]: each eye presented on its own through a D3D12 swapchain, the left eye kept on the
 //!   game's queue until the right eye's present publishes the pair (with both eyes' depth, the HUD
 //!   laid over each); pairs over the fence channel. Its pair sink ([`d3d12::sink`]) takes whole
 //!   pairs from the features that make their own (per-eye frame generation, a game's own method).
 //! - [`gl`]: both eyes drawn side by side in one OpenGL frame, read back at `SwapBuffers` onto a
-//!   D3D11 device of the loop's own and split; pairs over the keyed-mutex channel. Or one eye per
-//!   frame with its depth, the other eye warped from it ([`gl::GlWarp`], `crate::afw11`).
+//!   D3D11 device of the loop's own and split; pairs over the fence channel. Or one eye per
+//!   frame with its depth, the other eye warped from it ([`gl::GlWarp`], `crate::afw::d3d11`).
 //! - [`side_by_side`]: both eyes drawn side by side in one D3D12 or D3D11 back buffer (an engine's
 //!   own stereo), its halves copied out at the present on the swapchain's device; pairs over the
 //!   fence channel.
@@ -36,8 +36,6 @@
 pub mod d3d11;
 pub mod d3d12;
 pub mod gl;
-#[cfg(test)]
-mod lift_checks;
 pub mod side_by_side;
 #[cfg(test)]
 mod tests;
@@ -129,14 +127,10 @@ pub struct PairLoop<G: Game> {
     pub hud: Option<PairHud>,
     /// Why a frame goes to the flat screen, as the game knows it, beside the run's situations.
     pub flat: Option<fn() -> Option<Flat>>,
-    /// D3D11: the left eye's present is kept off the monitor (only the right eye's shows there).
-    pub hide_left: fn() -> bool,
     /// The game's own counts, logged with the loop's.
     pub rate: Option<fn()>,
     /// What the game starts afresh when stereo pauses ([`Pairs::pause`]): each eye's history.
     pub paused: Option<fn()>,
-    /// PC checks: stereo kept off, every frame mono (stereo never resumes, [`Pairs::resume`]).
-    pub mono: fn() -> bool,
     /// OpenGL: frame warping for this run (the game draws one eye per frame), or none.
     pub warp: fn(&Start<'_, G>) -> Option<gl::GlWarp>,
 }
@@ -158,10 +152,8 @@ impl<G: Game> PairLoop<G> {
             report: None,
             hud: None,
             flat: None,
-            hide_left: || true,
             rate: None,
             paused: None,
-            mono: || false,
             warp: |_| None,
         }
     }
@@ -190,10 +182,8 @@ pub(crate) struct Settings {
     pub report: Option<fn(&mut HeadPose)>,
     pub hud: Option<PairHud>,
     pub flat: Option<fn() -> Option<Flat>>,
-    pub hide_left: fn() -> bool,
     pub rate: Option<fn()>,
     pub paused: Option<fn()>,
-    pub mono: fn() -> bool,
 }
 
 impl Settings {
@@ -255,10 +245,8 @@ fn install<G: PresentsPairs + EyeSite>(start: &mut Start<'_, G>) -> Result<(), L
         report: game.report,
         hud: game.hud,
         flat: game.flat,
-        hide_left: game.hide_left,
         rate: game.rate,
         paused: game.paused,
-        mono: game.mono,
     });
     match output {
         // SAFETY: called at start, before the hooks are enabled.
@@ -433,12 +421,9 @@ impl Pairs {
         log!("stereo stopped for this run: {reason}");
     }
 
-    /// At the start of a frame: stereo runs again once a pause is over, while publishing, not
-    /// stopped for the run and not held mono ([`PairLoop::mono`]). Whether it runs.
+    /// At the start of a frame: stereo runs again once a pause is over, while publishing and not
+    /// stopped for the run. Whether it runs.
     pub fn resume(&self) -> bool {
-        if self.settings().is_some_and(|s| (s.mono)()) {
-            return self.running();
-        }
         if !self.running() && !self.blocked.load(Acquire) && monaka_channel::tick() >= self.resume_at.load(Acquire) && self.publishing() {
             self.running.store(true, Release);
         }

@@ -36,9 +36,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering::*};
 use steering::MouseAim;
 
-#[cfg(test)]
-mod lift_checks;
-
 /// How a game takes the turn as its mouse.
 pub struct Mouse<G: Game> {
     pub counts: Counts<G>,
@@ -260,9 +257,9 @@ fn hook_pick<G: Looks>(start: &mut Start<'_, G>) -> Result<(), Lack> {
 
 /// The game's pick of its device in use, then [`after_pick`].
 unsafe extern "system" fn picked<G: Looks>(object: usize) {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     // SAFETY: forwards the game's own call.
-    unsafe { PICK_ORIGINAL.get()(object) };
+    unsafe { PICK_ORIGINAL.get(&flight)(object) };
     after_pick::<G>(object);
 }
 

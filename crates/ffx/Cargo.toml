@@ -1,0 +1,27 @@
+[package]
+name = "monaka_ffx"
+description = "AMD's FidelityFX API from a game's own loader: FSR frame generation and FSR upscaling contexts, without the rest of Monaka's frame generation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+monaka_hook.workspace = true
+
+[dev-dependencies]
+monaka_channel.workspace = true
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+]
+
+[lints]
+workspace = true

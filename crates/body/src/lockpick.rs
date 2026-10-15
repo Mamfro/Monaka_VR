@@ -247,5 +247,3 @@ fn release<G: Lockpicks>() {
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod lift_checks;

@@ -70,10 +70,11 @@ struct ObjectData {
 // SAFETY: integers only, every bit pattern valid; no padding (4 x u32 then a usize).
 unsafe impl mem::Plain for ObjectData {}
 
-static STATE_1: Original<GetDeviceStateFn> = Original::new();
-static DATA_1: Original<GetDeviceDataFn> = Original::new();
-static STATE_2: Original<GetDeviceStateFn> = Original::new();
-static DATA_2: Original<GetDeviceDataFn> = Original::new();
+/// How many DirectInput method sets are hooked (the wide and the ANSI interface, when they differ).
+const SETS: usize = 2;
+/// Each set's originals, by its number.
+static STATE: [Original<GetDeviceStateFn>; SETS] = [const { Original::new() }; SETS];
+static DATA: [Original<GetDeviceDataFn>; SETS] = [const { Original::new() }; SETS];
 
 /// Queues `dx`, `dy` counts (fractions carry over).
 pub fn add(dx: f64, dy: f64) {
@@ -259,32 +260,28 @@ fn after_data(device: *mut c_void, size: u32, out: *mut c_void, count: *mut u32,
     }
 }
 
-macro_rules! mouse_hooks {
-    ($state:ident, $data:ident, $state_fn:ident, $data_fn:ident) => {
-        unsafe extern "system" fn $state_fn(device: *mut c_void, size: u32, out: *mut c_void) -> i32 {
-            let _flight = InFlight::enter();
-            // SAFETY: forwards the game's own call.
-            let result = unsafe { $state.get()(device, size, out) };
-            if result >= 0 {
-                after_state(size, out);
-            }
-            result
-        }
-        unsafe extern "system" fn $data_fn(device: *mut c_void, size: u32, out: *mut c_void, count: *mut u32, flags: u32) -> i32 {
-            let _flight = InFlight::enter();
-            let capacity = if count.is_null() { 0 } else { mem::read::<u32>(count as usize).unwrap_or(0) };
-            // SAFETY: forwards the game's own call.
-            let result = unsafe { $data.get()(device, size, out, count, flags) };
-            if result >= 0 {
-                after_data(device, size, out, count, capacity, flags);
-            }
-            result
-        }
-    };
+/// Set `N`'s detour for `GetDeviceState`.
+unsafe extern "system" fn state<const N: usize>(device: *mut c_void, size: u32, out: *mut c_void) -> i32 {
+    let flight = InFlight::enter();
+    // SAFETY: forwards the game's own call.
+    let result = unsafe { STATE[N].get(&flight)(device, size, out) };
+    if result >= 0 {
+        after_state(size, out);
+    }
+    result
 }
 
-mouse_hooks!(STATE_1, DATA_1, state_1, data_1);
-mouse_hooks!(STATE_2, DATA_2, state_2, data_2);
+/// Set `N`'s detour for `GetDeviceData`.
+unsafe extern "system" fn data<const N: usize>(device: *mut c_void, size: u32, out: *mut c_void, count: *mut u32, flags: u32) -> i32 {
+    let flight = InFlight::enter();
+    let capacity = if count.is_null() { 0 } else { mem::read::<u32>(count as usize).unwrap_or(0) };
+    // SAFETY: forwards the game's own call.
+    let result = unsafe { DATA[N].get(&flight)(device, size, out, count, flags) };
+    if result >= 0 {
+        after_data(device, size, out, count, capacity, flags);
+    }
+    result
+}
 
 /// Prepares the hooks on DirectInput's device reads (enabled with the producer's others; counts
 /// go out only while [`ACTIVE`]). Returns how many method sets were hooked (the ANSI and wide
@@ -304,45 +301,18 @@ pub fn install(hooks: &mut Hooks) -> Result<usize, Rejection> {
     if seen.is_empty() {
         return Err(Rejection::unsupported("could not make a DirectInput mouse to find its methods"));
     }
-    for (i, [state, data, _]) in seen.iter().copied().enumerate().take(2) {
+    let detours: [(GetDeviceStateFn, GetDeviceDataFn); SETS] = [(state::<0>, data::<0>), (state::<1>, data::<1>)];
+    let names = [("GetDeviceState", "GetDeviceData"), ("GetDeviceState (second interface)", "GetDeviceData (second interface)")];
+    for (i, [state_at, data_at, _]) in seen.iter().copied().enumerate().take(SETS) {
         // SAFETY: IDirectInputDevice8 methods of these signatures.
         unsafe {
-            if i == 0 {
-                hooks.inline_chained(&STATE_1, "GetDeviceState", state, state_1 as GetDeviceStateFn)?;
-                hooks.inline_chained(&DATA_1, "GetDeviceData", data, data_1 as GetDeviceDataFn)?;
-            } else {
-                hooks.inline_chained(&STATE_2, "GetDeviceState (second interface)", state, state_2 as GetDeviceStateFn)?;
-                hooks.inline_chained(&DATA_2, "GetDeviceData (second interface)", data, data_2 as GetDeviceDataFn)?;
-            }
+            hooks.inline_chained(&STATE[i], names[i].0, state_at, detours[i].0)?;
+            hooks.inline_chained(&DATA[i], names[i].1, data_at, detours[i].1)?;
         }
     }
-    log!("fake mouse: DirectInput reads hooked ({} method set(s))", seen.len().min(2));
-    Ok(seen.len().min(2))
+    log!("fake mouse: DirectInput reads hooked ({} method set(s))", seen.len().min(SETS));
+    Ok(seen.len().min(SETS))
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn object_data_and_caps_have_directinputs_sizes() {
-        assert_eq!(size_of::<ObjectData>(), 16 + size_of::<usize>());
-        assert_eq!(size_of::<DevCaps>(), 44);
-    }
-
-    #[test]
-    fn whole_counts_go_out_and_fractions_stay_per_source() {
-        add(2.75, -1.5);
-        add_other(1.5, 0.0);
-        let taken = take();
-        assert_eq!(taken, [[2, -1], [1, 0]]);
-        assert_eq!(total(&taken), [3, -1]);
-        let rest = pending();
-        assert!((rest[0] - 0.75).abs() < 1e-9 && (rest[1] + 0.5).abs() < 1e-9, "only the head's pending: {rest:?}");
-        give_back(taken);
-        assert_eq!(take(), [[2, -1], [1, 0]]);
-        add(-0.75, 0.5);
-        add_other(-0.5, 0.0);
-        assert_eq!(take(), [[0, 0], [0, 0]]);
-    }
-}
+mod tests;

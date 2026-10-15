@@ -1,7 +1,7 @@
 //! The dynamic HUD ready-made (`Feature::HudPanels`, the `world_hud` option): HUD pieces (the
 //! minimap, a gun's ammo, ...) taken out of the HUD in front of the eyes and put on the hands,
 //! each on its own panel (`<channel>-panel-<piece>`, which the viewer places by the piece's name;
-//! [`crate::panel11`]).
+//! [`crate::hud_panels::panel`]).
 //!
 //! Two methods, one set of pieces. Draw-level: while the game draws its HUD, its HUD pieces
 //! provider says which draws are which piece's ([`d3d11::draw`], [`gl::draw`]) and where each
@@ -26,12 +26,14 @@
 pub mod d3d11;
 pub mod d3d12;
 pub mod gl;
-#[cfg(test)]
-mod lift_checks;
+pub mod panel;
 #[cfg(test)]
 mod tests;
 
 use monaka_channel::ChannelName;
+use monaka_channel::panels::PanelsChannel;
+pub use monaka_core::panels::{Place, Side};
+use monaka_producer::log;
 use monaka_core::feature::Feature;
 use monaka_core::hud::{LAYOUT_FRESH_MS, fit, union};
 use monaka_core::manifest::WORLD_HUD;
@@ -41,12 +43,34 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering::*};
 use std::time::Instant;
 
-/// A piece a game puts on a hand: the viewer's name for it (where it goes: `minimap`, `weapon`,
-/// `weapon_left`, ...) and its panel's size in pixels (the piece's box is made this shape).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A piece a game puts on a hand: its name (its channel's, `<channel>-panel-<name>`), its panel's
+/// size in pixels (the piece's box is made this shape), and where the viewer puts it ([`places`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Piece {
     pub name: &'static str,
     pub size: (u32, u32),
+    pub place: Place,
+}
+
+/// Where the pieces games share go: the map on the back of the right hand with the quest list
+/// beside it, the weapon above the right palm, health on the back of the left hand, the quick item
+/// (one icon) and a second gun above the left palm.
+pub mod places {
+    use monaka_core::panels::{Place, Side};
+    use monaka_core::protocol::{LEFT_HAND, RIGHT_HAND};
+
+    /// A panel about a hand's width (metres); the quests (a wide list of text) wider, one icon
+    /// smaller.
+    const HAND_WIDTH: f32 = 0.08;
+    const LIST_WIDTH: f32 = 0.20;
+    const ICON_WIDTH: f32 = 0.05;
+
+    pub const MINIMAP: Place = Place { hand: RIGHT_HAND, side: Side::BackOfHand, width: HAND_WIDTH, beside: false };
+    pub const QUESTS: Place = Place { hand: RIGHT_HAND, side: Side::BackOfHand, width: LIST_WIDTH, beside: true };
+    pub const WEAPON: Place = Place { hand: RIGHT_HAND, side: Side::Palm, width: HAND_WIDTH, beside: false };
+    pub const HEALTH: Place = Place { hand: LEFT_HAND, side: Side::BackOfHand, width: HAND_WIDTH, beside: false };
+    pub const TOOL: Place = Place { hand: LEFT_HAND, side: Side::Palm, width: ICON_WIDTH, beside: false };
+    pub const WEAPON_LEFT: Place = Place { hand: LEFT_HAND, side: Side::Palm, width: HAND_WIDTH, beside: false };
 }
 
 /// A game whose HUD pieces go on the hands. Its pieces are named by their index in [`PIECES`]
@@ -110,6 +134,8 @@ struct State {
     /// The game's boxes, for layer crops.
     boxes: Option<Boxes>,
     shown: Vec<Option<Shown>>,
+    /// The pieces declared to the viewer, kept open while the panels run.
+    _declared: Option<PanelsChannel>,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -119,7 +145,21 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// The ready-made's part of the component's install: the run's channel and the game's pieces.
 pub fn install<G: HudPieces>(start: &mut Start<'_, G>) -> Result<(), Lack> {
     let channel = start.channel()?.clone();
-    *STATE.locked() = Some(State { channel, pieces: G::PIECES, masked: G::MASKED, margin: G::MARGIN, boxes: None, shown: vec![None; G::PIECES.len()] });
+    let declared = match PanelsChannel::open(&channel) {
+        Ok(mut block) => {
+            let count = block.declare(G::PIECES.iter().map(|p| (p.name, p.place)));
+            if count < G::PIECES.len() {
+                log!("HUD panels: {} of {} pieces declared to the viewer", count, G::PIECES.len());
+            }
+            Some(block)
+        }
+        Err(e) => {
+            log!("HUD panels: the viewer cannot be told the pieces ({e}); none go on the hands");
+            None
+        }
+    };
+    let shown = vec![None; G::PIECES.len()];
+    *STATE.locked() = Some(State { channel, pieces: G::PIECES, masked: G::MASKED, margin: G::MARGIN, boxes: None, shown, _declared: declared });
     Ok(())
 }
 
@@ -243,4 +283,80 @@ fn frame() -> Option<Frame> {
 fn pixels(rect: [f32; 4], size: (u32, u32)) -> [f32; 4] {
     let (w, h) = (size.0 as f32, size.1 as f32);
     [rect[0] * w, rect[1] * h, rect[2] * w, rect[3] * h]
+}
+
+/// Logs piece `name`'s panel changing to `out`.
+fn note_change(name: &str, out: PanelOut) {
+    monaka_producer::log!("HUD panel {name}: {}", if out == PanelOut::Shown { "drawn: on the hand" } else { "gone: cleared" });
+}
+
+/// What goes out of a piece's panel at a frame's end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelOut {
+    /// The piece as drawn this frame.
+    Shown,
+    /// Empty: the piece stopped showing.
+    Cleared,
+}
+
+/// The panels' states across frames, the same for every backend: which pieces' panels were made
+/// ready this frame (cleared at its first piece draw, [`PanelStates::start`]), and which went out
+/// shown last. A panel goes out every frame its piece shows, and once, cleared, when it stops; a
+/// panel whose clear did not go out is cleared again the next frame.
+#[derive(Debug, Default)]
+pub struct PanelStates {
+    started: bool,
+    ready: Vec<bool>,
+    published_shown: Vec<bool>,
+}
+
+impl PanelStates {
+    /// The frame's first piece draw, of `pieces` pieces: true the first time each frame, when the
+    /// caller readies each shown piece's panel ([`PanelStates::ready`]).
+    pub fn start(&mut self, pieces: usize) -> bool {
+        self.ready.resize(pieces, false);
+        self.published_shown.resize(pieces, false);
+        !std::mem::replace(&mut self.started, true)
+    }
+
+    /// Piece `piece`'s panel is cleared for this frame's draws.
+    pub fn ready(&mut self, piece: usize) {
+        if let Some(ready) = self.ready.get_mut(piece) {
+            *ready = true;
+        }
+    }
+
+    /// Whether piece `piece`'s draws go into its panel this frame.
+    pub fn is_ready(&self, piece: usize) -> bool {
+        self.ready.get(piece).copied().unwrap_or(false)
+    }
+
+    /// What goes out of piece `piece`'s panel, `shown` or not this frame (none: nothing).
+    pub fn out(&self, piece: usize, shown: bool) -> Option<PanelOut> {
+        match (shown, self.published_shown.get(piece).copied().unwrap_or(false)) {
+            (true, _) => Some(PanelOut::Shown),
+            (false, true) => Some(PanelOut::Cleared),
+            (false, false) => None,
+        }
+    }
+
+    /// The frame's end for a draw-level backend: by piece, what goes out (the pieces readied this
+    /// frame shown), and the frame's marks gone.
+    pub fn end(&mut self) -> Vec<Option<PanelOut>> {
+        self.started = false;
+        let ready = std::mem::take(&mut self.ready);
+        let outs = ready.iter().enumerate().map(|(piece, &shown)| self.out(piece, shown)).collect();
+        self.ready = vec![false; ready.len()];
+        outs
+    }
+
+    /// `out` of piece `piece`'s panel went out. Whether the piece changed between shown and gone
+    /// (worth a log line).
+    pub fn went_out(&mut self, piece: usize, out: PanelOut) -> bool {
+        if piece >= self.published_shown.len() {
+            self.published_shown.resize(piece + 1, false);
+        }
+        let shown = out == PanelOut::Shown;
+        std::mem::replace(&mut self.published_shown[piece], shown) != shown
+    }
 }

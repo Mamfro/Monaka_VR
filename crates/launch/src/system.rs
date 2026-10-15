@@ -4,14 +4,17 @@
 use crate::text;
 use std::path::{Path, PathBuf};
 use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessCommandLineInformation};
-use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE, UNICODE_STRING};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT, STILL_ACTIVE, UNICODE_STRING};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
 use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW};
 use windows::Win32::System::Threading::{GetExitCodeProcess, IsWow64Process, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
 use windows::Win32::UI::Shell::{FOLDERID_Documents, KF_FLAG_DEFAULT, SHGetKnownFolderPath, ShellExecuteW};
-use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use windows::core::{HSTRING, PCWSTR, w};
+use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_MENU};
+use windows::Win32::UI::WindowsAndMessaging::{
+    BringWindowToTop, EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow,
+};
+use windows::core::{BOOL, HSTRING, PCWSTR, w};
 
 /// A running process.
 #[derive(Clone, Debug)]
@@ -95,6 +98,69 @@ pub fn alive(pid: u32) -> bool {
     }
 }
 
+/// The biggest visible top-level window of process `pid`: a game's own window.
+fn main_window(pid: u32) -> Option<HWND> {
+    struct Search {
+        pid: u32,
+        best: Option<(HWND, i64)>,
+    }
+    unsafe extern "system" fn visit(window: HWND, data: LPARAM) -> BOOL {
+        // SAFETY: `data` is the search below, alive for the enumeration.
+        let search = unsafe { &mut *(data.0 as *mut Search) };
+        let mut owner = 0;
+        let mut rect = RECT::default();
+        // SAFETY: plain queries on a window handed to us.
+        unsafe {
+            GetWindowThreadProcessId(window, Some(&mut owner));
+            if owner == search.pid && IsWindowVisible(window).as_bool() && GetWindowRect(window, &mut rect).is_ok() {
+                let area = i64::from(rect.right - rect.left) * i64::from(rect.bottom - rect.top);
+                if search.best.is_none_or(|(_, a)| area > a) {
+                    search.best = Some((window, area));
+                }
+            }
+        }
+        BOOL(1)
+    }
+    let mut search = Search { pid, best: None };
+    // SAFETY: the callback only touches `search` during the call.
+    let _ = unsafe { EnumWindows(Some(visit), LPARAM(&mut search as *mut Search as isize)) };
+    search.best.map(|(window, _)| window)
+}
+
+/// Whether a window of process `pid` has the keyboard (is the foreground window).
+pub fn in_front(pid: u32) -> bool {
+    let mut owner = 0;
+    // SAFETY: plain queries.
+    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut owner)) };
+    owner == pid
+}
+
+/// Brings process `pid`'s main window to the front, so the game has the keyboard and does not
+/// pause as a window in the background. Whether it is in front now.
+pub fn focus(pid: u32) -> bool {
+    if in_front(pid) {
+        return true;
+    }
+    let Some(window) = main_window(pid) else { return false };
+    // SAFETY: a window of the game's, and input events of our own.
+    unsafe {
+        if IsIconic(window).as_bool() {
+            let _ = ShowWindow(window, SW_RESTORE);
+        }
+        if !SetForegroundWindow(window).as_bool() {
+            // A process may take the front only right after input: an Alt tap first.
+            let alt = |up: bool| INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_MENU, dwFlags: if up { KEYEVENTF_KEYUP } else { Default::default() }, ..Default::default() } },
+            };
+            SendInput(&[alt(false), alt(true)], size_of::<INPUT>() as i32);
+            let _ = BringWindowToTop(window);
+            let _ = SetForegroundWindow(window);
+        }
+    }
+    in_front(pid)
+}
+
 /// The command line process `pid` was started with, when it can be read.
 pub fn command_line(pid: u32) -> Option<String> {
     // The information is a UNICODE_STRING followed by its text; a command line is at most 32767
@@ -130,10 +196,10 @@ pub fn documents() -> Option<PathBuf> {
     }
 }
 
-/// Whether a VR session is already running: a viewer (Rust or C++), from this launcher or a
-/// PowerShell one. A second session would stop the first one's producer and fight its viewer.
+/// Whether a VR session is already running: a viewer, from this launcher or a PowerShell one. A
+/// second session would stop the first one's producer and fight its viewer.
 pub fn viewer_running() -> bool {
-    !processes_named(&["monaka_viewer.exe", "dlvr_xr_preview.exe"]).is_empty()
+    !processes_named(&["monaka_viewer.exe"]).is_empty()
 }
 
 /// Whether SteamVR is running (its `vrserver`).
@@ -233,27 +299,4 @@ pub fn launch_steam_game(app: u32) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reads_a_command_line() {
-        let own = command_line(std::process::id()).expect("our own command line");
-        let exe = std::env::current_exe().unwrap();
-        let stem = exe.file_stem().unwrap().to_string_lossy().to_ascii_lowercase();
-        assert!(own.to_ascii_lowercase().contains(&stem), "{own}");
-        assert_eq!(command_line(u32::MAX - 3), None, "no such process");
-    }
-
-    #[test]
-    fn finds_documents() {
-        assert!(documents().is_some_and(|d| d.is_absolute()));
-    }
-
-    #[test]
-    fn reads_the_windows_build() {
-        let build = windows_build();
-        let number = build.split("build ").nth(1).and_then(|b| b.split('.').next()).and_then(|b| b.parse::<u32>().ok());
-        assert!(number.is_some_and(|n| n >= 10_240), "{build}");
-    }
-}
+mod tests;

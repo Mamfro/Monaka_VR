@@ -1,5 +1,5 @@
 //! Each eye's depth to the headset, as a ready-made component ([`depth_layer`]): the pairs carry
-//! each eye's depth (`crate::pairs12::PairPublisher12::publish_with_depth`), and the viewer gives it
+//! each eye's depth (`crate::pairs::d3d12::PairPublisher12::publish_with_depth`), and the viewer gives it
 //! to the headset's runtime as a depth layer, so its own reprojection of a late frame corrects the
 //! head moving as well as turning.
 //!
@@ -9,11 +9,14 @@
 //! depth of each frame it publishes itself ([`frame_depth`]); a game publishing its own pairs takes
 //! both eyes' ([`pair_depth`]); frame warping and per-eye frame generation send their own. Menus
 //! and other flat frames go without.
+//!
+//! A D3D11 game ([`crate::providers::FrameInputs11`]) has [`depth_layer11`]: the same feature,
+//! option and switch; its frame warping sends each warped pair's depth (`crate::afw::d3d11`).
 
 use crate::afw::Rendered;
-use crate::alternate12::FrameDepth;
-use crate::pairs12::{EyeDepth12, PairDepth};
-use crate::providers::FrameInputs;
+use crate::alternate::d3d12::FrameDepth;
+use crate::pairs::d3d12::{EyeDepth12, PairDepth};
+use crate::providers::{FrameInputs, FrameInputs11};
 use monaka_core::feature::Feature;
 pub use monaka_core::manifest::HEADSET_DEPTH;
 use monaka_core::protocol::DepthParams;
@@ -29,22 +32,40 @@ static UNITS_PER_METRE: AtomicU32 = AtomicU32::new(0);
 /// The depth component for game `G`: the feature, the option, the switch. The game adds what it
 /// works on top of (`needs`) by struct update.
 pub const fn depth_layer<G: FrameInputs>() -> Component<G> {
+    Component { install: install::<G>, ..depth_layer_shape() }
+}
+
+/// [`depth_layer`] for a D3D11 game `G`.
+pub const fn depth_layer11<G: FrameInputs11>() -> Component<G> {
+    Component { install: install11::<G>, ..depth_layer_shape() }
+}
+
+/// The feature, the option and the switch, both APIs alike.
+const fn depth_layer_shape<G: monaka_producer::game::Game>() -> Component<G> {
     Component {
         name: "depth to headset",
         features: &[Feature::DepthLayer],
         options: &[HEADSET_DEPTH],
         switch: Some(Switch::new("headset_depth", true, "the headset gets colour only")),
-        install: install::<G>,
         release,
         ..Component::NONE
     }
 }
 
 fn install<G: FrameInputs>(_: &mut Start<'_, G>) -> Result<(), Lack> {
-    UNITS_PER_METRE.store(G::UNITS_PER_METRE.to_bits(), Release);
     inputs::want(Motion::None, None);
-    ON.store(true, Release);
+    turn_on(G::UNITS_PER_METRE);
     Ok(())
+}
+
+fn install11<G: FrameInputs11>(_: &mut Start<'_, G>) -> Result<(), Lack> {
+    turn_on(G::UNITS_PER_METRE);
+    Ok(())
+}
+
+fn turn_on(units_per_metre: f32) {
+    UNITS_PER_METRE.store(units_per_metre.to_bits(), Release);
+    ON.store(true, Release);
 }
 
 fn release() {
@@ -56,7 +77,8 @@ pub fn on() -> bool {
     ON.load(Acquire)
 }
 
-fn units_per_metre() -> f32 {
+/// The game's world units in a metre, as its depth component was given them.
+pub(crate) fn units_per_metre() -> f32 {
     f32::from_bits(UNITS_PER_METRE.load(Acquire))
 }
 
@@ -94,28 +116,4 @@ pub fn pair_depth(eye: usize) -> Option<PairDepth> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use monaka_framegen::inputs::Rendering;
-    use monaka_streamline::{Constants, constants as at};
-
-    #[test]
-    fn the_games_projection_gives_the_near_plane_in_metres() {
-        // DLSS's view to clip (row vectors): reverse-Z infinite, near 0.05, the camera looking down -z.
-        let mut bytes = vec![0u8; at::BYTES];
-        let mut put = |offset: usize, values: &[f32]| {
-            for (i, v) in values.iter().enumerate() {
-                bytes[offset + 4 * i..offset + 4 * i + 4].copy_from_slice(&v.to_le_bytes());
-            }
-        };
-        put(at::CAMERA_VIEW_TO_CLIP, &[1.036, 0.0, 0.0, 0.0, 0.0, 1.84, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.05, 0.0]);
-        put(at::UP, &[0.0, 1.0, 0.0]);
-        put(at::RIGHT, &[1.0, 0.0, 0.0]);
-        put(at::FORWARD, &[0.0, 0.0, -1.0]);
-        put(at::NEAR, &[0.05]);
-        UNITS_PER_METRE.store(1.0f32.to_bits(), Release);
-        let inputs = EyeInputs { rendering: Constants::read(bytes.as_ptr()).as_ref().map(Rendering::from_constants), ..EyeInputs::default() };
-        assert_eq!(params(&inputs), Some(DepthParams::new(0.05, f32::INFINITY, true)));
-        assert_eq!(params(&EyeInputs::default()), None, "no camera");
-    }
-}
+mod tests;

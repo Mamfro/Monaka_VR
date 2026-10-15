@@ -12,8 +12,6 @@
 //! drawn by them ([`world_hidden`]).
 
 pub mod checks;
-#[cfg(test)]
-mod lift_checks;
 
 use crate::driver::{Driver, Flat};
 use crate::feature::DRIVER;

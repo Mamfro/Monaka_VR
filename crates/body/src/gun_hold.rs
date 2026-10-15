@@ -127,5 +127,3 @@ pub fn reach_for(shoulder: Vec3, from: Vec3, to: Vec3, [least, most]: [f32; 2]) 
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod lift_checks;

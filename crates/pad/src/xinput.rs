@@ -59,37 +59,38 @@ pub(super) struct ExportHooks {
     detours: (GetStateFn, GetStateFn, GetCapabilitiesFn),
 }
 
-macro_rules! export_hooks {
-    ($name:ident, $state:ident, $state_ex:ident, $capabilities:ident) => {
-        static $state: Original<GetStateFn> = Original::new();
-        static $state_ex: Original<GetStateFn> = Original::new();
-        static $capabilities: Original<GetCapabilitiesFn> = Original::new();
-        const $name: ExportHooks = {
-            unsafe extern "system" fn state(user: u32, state: *mut XInputState) -> u32 {
-                // SAFETY: the game's own call, forwarded with its arguments.
-                unsafe { read(&$state, user, state) }
-            }
-            unsafe extern "system" fn state_ex(user: u32, state: *mut XInputState) -> u32 {
-                // SAFETY: as above.
-                unsafe { read(&$state_ex, user, state) }
-            }
-            unsafe extern "system" fn capabilities(user: u32, flags: u32, out: *mut XInputCapabilities) -> u32 {
-                // SAFETY: as above.
-                unsafe { describe(&$capabilities, user, flags, out) }
-            }
-            ExportHooks { state: &$state, state_ex: &$state_ex, capabilities: &$capabilities, detours: (state, state_ex, capabilities) }
-        };
-    };
+/// How many places can be hooked.
+const SET_COUNT: usize = 6;
+
+/// Each set's originals, by its number.
+static STATE: [Original<GetStateFn>; SET_COUNT] = [const { Original::new() }; SET_COUNT];
+static STATE_EX: [Original<GetStateFn>; SET_COUNT] = [const { Original::new() }; SET_COUNT];
+static CAPABILITIES: [Original<GetCapabilitiesFn>; SET_COUNT] = [const { Original::new() }; SET_COUNT];
+
+/// Set `N`'s detour for `XInputGetState`.
+unsafe extern "system" fn state<const N: usize>(user: u32, state: *mut XInputState) -> u32 {
+    // SAFETY: the game's own call, forwarded with its arguments.
+    unsafe { read(&STATE[N], user, state) }
 }
 
-export_hooks!(SET_1, STATE_1, STATE_EX_1, CAPABILITIES_1);
-export_hooks!(SET_2, STATE_2, STATE_EX_2, CAPABILITIES_2);
-export_hooks!(SET_3, STATE_3, STATE_EX_3, CAPABILITIES_3);
-export_hooks!(SET_4, STATE_4, STATE_EX_4, CAPABILITIES_4);
-export_hooks!(SET_5, STATE_5, STATE_EX_5, CAPABILITIES_5);
-export_hooks!(SET_6, STATE_6, STATE_EX_6, CAPABILITIES_6);
+/// Set `N`'s detour for `XInputGetStateEx`.
+unsafe extern "system" fn state_ex<const N: usize>(user: u32, state: *mut XInputState) -> u32 {
+    // SAFETY: as above.
+    unsafe { read(&STATE_EX[N], user, state) }
+}
+
+/// Set `N`'s detour for `XInputGetCapabilities`.
+unsafe extern "system" fn capabilities<const N: usize>(user: u32, flags: u32, out: *mut XInputCapabilities) -> u32 {
+    // SAFETY: as above.
+    unsafe { describe(&CAPABILITIES[N], user, flags, out) }
+}
+
+const fn set<const N: usize>() -> ExportHooks {
+    ExportHooks { state: &STATE[N], state_ex: &STATE_EX[N], capabilities: &CAPABILITIES[N], detours: (state::<N>, state_ex::<N>, capabilities::<N>) }
+}
+
 /// One set per hooked place; more places than sets are logged and left alone.
-pub(super) const SETS: [ExportHooks; 6] = [SET_1, SET_2, SET_3, SET_4, SET_5, SET_6];
+pub(super) const SETS: [ExportHooks; SET_COUNT] = [set::<0>(), set::<1>(), set::<2>(), set::<3>(), set::<4>(), set::<5>()];
 /// The XInput DLLs whose code is hooked when loaded (system copies, by full path: a game folder may
 /// hold a proxy of the same name).
 pub(super) const XINPUT_DLLS: [&str; 3] = ["XInput1_4.dll", "XInput1_3.dll", "XInput9_1_0.dll"];
@@ -262,10 +263,10 @@ thread_local! {
 /// # Safety
 /// `original` is the hooked read the game called, with the game's arguments.
 unsafe fn read(original: &Original<GetStateFn>, user: u32, state: *mut XInputState) -> u32 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     let outer = !READING.with(|r| r.replace(true));
     // SAFETY: forwards the game's own call.
-    let result = unsafe { original.get()(user, state) };
+    let result = unsafe { original.get(&flight)(user, state) };
     if outer {
         READING.with(|r| r.set(false));
     }
@@ -346,9 +347,9 @@ unsafe fn read(original: &Original<GetStateFn>, user: u32, state: *mut XInputSta
 /// # Safety
 /// `original` is the hooked capabilities call the game made, with the game's arguments.
 unsafe fn describe(original: &Original<GetCapabilitiesFn>, user: u32, flags: u32, capabilities: *mut XInputCapabilities) -> u32 {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     // SAFETY: forwards the game's own call.
-    let result = unsafe { original.get()(user, flags, capabilities) };
+    let result = unsafe { original.get(&flight)(user, flags, capabilities) };
     if user != 0 || capabilities.is_null() {
         return result;
     }

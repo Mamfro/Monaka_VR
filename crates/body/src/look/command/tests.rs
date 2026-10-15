@@ -67,3 +67,23 @@ fn a_camera_that_turns_by_the_angles_keeps_the_share_as_it_was() {
     // A cutscene's camera: the share goes out.
     assert_eq!(run(|| false), (Some(reshare(240.0, 215.0, held, Share::default())), Share::default()));
 }
+
+#[test]
+fn a_menu_leaving_the_camera_alone_keeps_the_share_and_reports_it_baked() {
+    let _serial = crate::look::tests::serial();
+    let held = Share { yaw: 30f32.to_radians(), pitch: 5f32.to_radians() };
+    *GAME.locked() = Some(GameFns { camera_taken: || false, head: || Some(HeadPose::synthetic(5.0, 0.0, HeadPose::SYNTHETIC_FOV, 0.064)), holds: || true });
+    PAUSE_HOLD.store(false, Relaxed);
+    AIMING.store(true, Relaxed);
+    *STATE.locked() = State { held, commands: 0, aimed: 0, last_command: None, holding_after_pause: 0, pauses: 0 };
+    // The head has turned elsewhere, but the angles keep the share the camera has.
+    let angles = built(240.0, 215.0);
+    let baked = baked();
+    AIMING.store(false, Relaxed);
+    HOLDING.store(false, Release);
+    *GAME.locked() = None;
+    let kept = std::mem::take(&mut STATE.locked().held);
+    assert_eq!((angles, kept), (Some((240.0, 215.0)), held));
+    // The eye site turns that share back out of the camera, so the head looks around.
+    assert_eq!(baked, Some(held));
+}

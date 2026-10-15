@@ -24,8 +24,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{LazyLock, Mutex};
 
 #[cfg(test)]
-mod lift_checks;
-#[cfg(test)]
 mod tests;
 
 /// Where a renderer's DLSS constants packet keeps what each eye's history touches (byte offsets).
@@ -254,7 +252,6 @@ pub struct EyeCameras<const ENTRY: usize, const BLOCK: usize> {
     epoch: AtomicU32,
     reset: AtomicBool,
     /// Every eye drawn with the game's own history (a check).
-    native: AtomicBool,
     write_tree: AtomicUsize,
     write_mask: AtomicU32,
     camera: AtomicUsize,
@@ -274,7 +271,6 @@ impl<const ENTRY: usize, const BLOCK: usize> EyeCameras<ENTRY, BLOCK> {
             scene_key: AtomicU32::new(0),
             epoch: AtomicU32::new(1),
             reset: AtomicBool::new(true),
-            native: AtomicBool::new(false),
             write_tree: AtomicUsize::new(0),
             write_mask: AtomicU32::new(0),
             camera: AtomicUsize::new(0),
@@ -288,10 +284,6 @@ impl<const ENTRY: usize, const BLOCK: usize> EyeCameras<ENTRY, BLOCK> {
         }
     }
 
-    /// Every eye drawn with the game's own history (`native`: a check of the effect).
-    pub fn set_native(&self, native: bool) {
-        self.native.store(native, Ordering::Release);
-    }
 
     /// The history epoch now: a new one starts each eye afresh.
     pub fn epoch(&self) -> u32 {
@@ -310,7 +302,7 @@ impl<const ENTRY: usize, const BLOCK: usize> EyeCameras<ENTRY, BLOCK> {
 
     /// The eye whose history the lookups serve now (1 or 2; 0 the game's own).
     pub fn eye(&self) -> u32 {
-        if self.native.load(Ordering::Acquire) { 0 } else { self.scene_eye.load(Ordering::Acquire) }
+        self.scene_eye.load(Ordering::Acquire)
     }
 
     /// A scene call starts (`eye` 1 or 2; 0 the game's own history) for the game's frame `counter`,

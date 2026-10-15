@@ -48,11 +48,11 @@ pub(super) unsafe fn hook(hooks: &mut Hooks, queue: &ID3D12CommandQueue, device:
 pub(super) static VIEWS: Mutex<BTreeMap<usize, (u32, u32)>> = Mutex::new(BTreeMap::new());
 
 unsafe extern "system" fn create_view(device: *mut c_void, resource: *mut c_void, desc: *const D3D12_RENDER_TARGET_VIEW_DESC, handle: D3D12_CPU_DESCRIPTOR_HANDLE) {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     CALLS[C_VIEWS].fetch_add(1, Relaxed);
     // SAFETY: the game's view description (or null), for the duration of its call.
     let size = view_size(resource, unsafe { desc.as_ref() });
-    log_first!(1, "foveation: first CreateRenderTargetView, on device {:#x}: a view of {size:?} at {:#x}", device as usize, handle.ptr);
+    log_first(1, format_args!("foveation: first CreateRenderTargetView, on device {:#x}: a view of {size:?} at {:#x}", device as usize, handle.ptr));
     {
         let mut views = VIEWS.locked();
         match size {
@@ -61,7 +61,7 @@ unsafe extern "system" fn create_view(device: *mut c_void, resource: *mut c_void
         };
     }
     // SAFETY: the original, with the game's arguments.
-    unsafe { CREATE_VIEW.get()(device, resource, desc, handle) }
+    unsafe { CREATE_VIEW.get(&flight)(device, resource, desc, handle) }
 }
 
 /// The size of a view of `resource` (a 2D texture) as `desc` describes it (its mip level).
@@ -123,7 +123,7 @@ pub(super) fn bound_targets(count: u32, handles: *const D3D12_CPU_DESCRIPTOR_HAN
 /// [`crate::lists12`]'s: inside the game's call on its list, being recorded on this thread.
 unsafe fn set_targets(list: *mut c_void, count: u32, handles: *const D3D12_CPU_DESCRIPTOR_HANDLE, single: BOOL, _: *const D3D12_CPU_DESCRIPTOR_HANDLE) {
     CALLS[C_TARGETS].fetch_add(1, Relaxed);
-    log_first!(1, "foveation: first OMSetRenderTargets, on list {:#x}: targets {:?} (scene {:?})", list as usize, bound_targets(count, handles, single), scene());
+    log_first(1, format_args!("foveation: first OMSetRenderTargets, on list {:#x}: targets {:?} (scene {:?})", list as usize, bound_targets(count, handles, single), scene()));
     if engaged() {
         let targets = bound_targets(count, handles, single);
         // SAFETY: the game's list, being recorded on this thread, outside a render pass.
@@ -142,7 +142,7 @@ pub(super) fn pass_targets(count: u32, targets: *const D3D12_RENDER_PASS_RENDER_
 /// As [`set_targets`].
 unsafe fn begin_pass(list: *mut c_void, count: u32, targets: *const D3D12_RENDER_PASS_RENDER_TARGET_DESC) {
     CALLS[C_PASSES].fetch_add(1, Relaxed);
-    log_first!(1, "foveation: first BeginRenderPass, on list {:#x}: targets {:?} (scene {:?})", list as usize, pass_targets(count, targets), scene());
+    log_first(1, format_args!("foveation: first BeginRenderPass, on list {:#x}: targets {:?} (scene {:?})", list as usize, pass_targets(count, targets), scene()));
     if engaged() {
         let bound = pass_targets(count, targets);
         // SAFETY: the game's list, being recorded on this thread; the pass has not begun yet.
@@ -159,7 +159,7 @@ pub(super) fn first_viewport(count: u32, viewports: *const D3D12_VIEWPORT) -> Op
 /// As [`set_targets`].
 unsafe fn set_viewports(list: *mut c_void, count: u32, viewports: *const D3D12_VIEWPORT) {
     CALLS[C_VIEWPORTS].fetch_add(1, Relaxed);
-    log_first!(1, "foveation: first RSSetViewports, on list {:#x}: {count} viewports, the first {:?} (scene {:?})", list as usize, first_viewport(count, viewports), scene());
+    log_first(1, format_args!("foveation: first RSSetViewports, on list {:#x}: {count} viewports, the first {:?} (scene {:?})", list as usize, first_viewport(count, viewports), scene()));
     if engaged() {
         let first = first_viewport(count, viewports);
         if let Some([_, _, w, h]) = first {
@@ -176,7 +176,7 @@ unsafe fn set_viewports(list: *mut c_void, count: u32, viewports: *const D3D12_V
 /// As [`set_targets`].
 unsafe fn reset_list(list: *mut c_void) {
     CALLS[C_RESETS].fetch_add(1, Relaxed);
-    log_first!(1, "foveation: first Reset, of list {:#x} (scene {:?})", list as usize, scene());
+    log_first(1, format_args!("foveation: first Reset, of list {:#x} (scene {:?})", list as usize, scene()));
     if let Some(gone) = LISTS.locked().remove(&(list as usize))
         && gone.bound.is_some()
     {
@@ -301,11 +301,11 @@ impl Recording {
         let native = unsafe { imports::native_list(self.game) };
         let cast = match &native {
             Some(native) => {
-                log_first!(1, "foveation: VRS recorded on the native list {:#x} behind the game's {game:#x}", native.as_raw() as usize);
+                log_first(1, format_args!("foveation: VRS recorded on the native list {:#x} behind the game's {game:#x}", native.as_raw() as usize));
                 native.cast::<ID3D12GraphicsCommandList5>()
             }
             None => {
-                log_first!(1, "foveation: VRS recorded on the game's list {game:#x} itself (no native list behind it)");
+                log_first(1, format_args!("foveation: VRS recorded on the game's list {game:#x} itself (no native list behind it)"));
                 // SAFETY: as above, borrowed for this call.
                 let list = unsafe { ID3D12GraphicsCommandList::from_raw_borrowed(&self.game) }?;
                 list.cast::<ID3D12GraphicsCommandList5>()
@@ -314,7 +314,7 @@ impl Recording {
         match cast {
             Ok(list) => Some(list),
             Err(e) => {
-                log_first!(1, "foveation: no VRS on the game's list {game:#x}: no ID3D12GraphicsCommandList5 ({e})");
+                log_first(1, format_args!("foveation: no VRS on the game's list {game:#x}: no ID3D12GraphicsCommandList5 ({e})"));
                 None
             }
         }

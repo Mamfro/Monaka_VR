@@ -5,7 +5,7 @@
 //! (all but the freeze) are remembered between runs in `%APPDATA%\monaka\viewer-debug.txt`.
 
 use crate::debug_menu::{Buzz, HeadsetMenu};
-use crate::debug_panels::HeadsetPanels;
+use crate::debug_panels::{self, HeadsetPanels};
 use crate::recorder::Recorder;
 use monaka_channel::debug::{DebugChannel, Source};
 use monaka_channel::debug_image::ImageReader;
@@ -25,7 +25,8 @@ use monaka_overlay::lines::LinePass;
 use monaka_overlay::quad::QuadPass;
 use monaka_overlay::menu::{Command, DepthNear, Settings, Status, View};
 use monaka_overlay::egui;
-use monaka_overlay::panels::{self, Content, PanelId};
+use monaka_overlay::console_view::ConsoleNav;
+use monaka_overlay::panels::{self, Content, HeadsetFocus, PanelId};
 use monaka_overlay::views::{self, ViewPass};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -83,6 +84,10 @@ pub struct DebugViews<'s> {
     menu: HeadsetMenu<'s>,
     /// The panels switched on in the menu, as the headset shows them.
     panels: HeadsetPanels<'s>,
+    /// What the pad drives in the headset, in the row of the menu and the panels (0: the menu),
+    /// and where the console panel is.
+    focus: usize,
+    console: ConsoleNav,
     said_at: u64,
     /// The pair whose primitives `eyes` holds.
     read: Option<u64>,
@@ -134,6 +139,8 @@ impl<'s> DebugViews<'s> {
             asked: None,
             menu: HeadsetMenu::new(format),
             panels: HeadsetPanels::new(format),
+            focus: 0,
+            console: ConsoleNav::default(),
             said_at: 0,
             read: None,
             eyes: [Vec::new(), Vec::new()],
@@ -207,7 +214,22 @@ impl<'s> DebugViews<'s> {
         // Read even while closed: the first opening with a game page goes to it.
         let status = self.status();
         let before = self.settings;
-        let mut asked = self.menu.pad(pad, head, now, &mut self.settings, &status);
+        let was_open = self.menu.open();
+        let mut asked = self.menu.pad(pad, head, now, &mut self.settings, &status, self.focus == 0);
+        // Opened again: the pad drives the menu; LB / RB step through the row.
+        let row = 1 + self.settings.panels.iter().count();
+        if self.menu.open() && !was_open {
+            self.focus = 0;
+        }
+        self.focus = (self.focus as i32 + asked.focus_step).rem_euclid(row as i32) as usize;
+        if self.focus.checked_sub(1).and_then(|n| self.settings.panels.iter().nth(n)) == Some(PanelId::Console) {
+            for press in asked.panel_presses.drain(..) {
+                if let Some(command) = self.console.press(press) {
+                    self.asked = Some(panels::Asked::Console(command));
+                }
+            }
+            self.console.scroll(asked.scroll);
+        }
         let capture = self.act(before, asked.command, now);
         if capture {
             asked.buzzes.extend([monaka_core::protocol::LEFT_HAND, monaka_core::protocol::RIGHT_HAND].map(|hand| (hand, 0.6, 0.15)));
@@ -231,7 +253,7 @@ impl<'s> DebugViews<'s> {
             .fixed_size(MENU_POINTS)
             .default_pos([12.0, 12.0])
             .show(ctx, |ui| {
-                if let Some(click) = monaka_overlay::menu::panel::layout(ui, menu, settings, &status, true) {
+                if let Some(click) = monaka_overlay::menu::panel::layout(ui, menu, settings, &status, true, false) {
                     command = menu.click(click, settings, &status);
                 }
             });
@@ -298,14 +320,25 @@ impl<'s> DebugViews<'s> {
     /// Hands the menu's panel to the headset when it changed, while it is open, and the panels
     /// switched on (`content`: what they show).
     pub fn show_in_headset(&mut self, session: &'s Session<'_>, device: &ID3D11Device, context: &ID3D11DeviceContext, content: &Content<'_>, now: Instant) {
-        self.panels.follow(self.settings.panels, &self.menu.place());
-        self.panels.show(session, device, context, content, now);
-        if !self.menu.open() {
+        // The menu and the panels in a row, the one the pad drives where the menu opened.
+        let ids: Vec<PanelId> = self.settings.panels.iter().collect();
+        let open = self.menu.open();
+        let focus = if open { self.focus.min(ids.len()) } else { 0 };
+        let anchor = self.menu.place();
+        let sizes: Vec<[f32; 2]> = std::iter::once(anchor.size).chain(ids.iter().map(|id| debug_panels::size(*id))).collect();
+        let places = debug_panels::strip(&anchor, &sizes, focus);
+        self.menu.set_shown(places[0]);
+        self.panels.follow(self.settings.panels, &places[1..], open);
+        // Outlined while the pad drives it, beside others.
+        let driven = if open && !ids.is_empty() { Some(focus) } else { None };
+        let console = self.console;
+        self.panels.show(session, device, context, content, now, |id| HeadsetFocus { active: driven.is_some_and(|f| f > 0 && ids[f - 1] == id), console });
+        if !open {
             return;
         }
         let status = self.status();
         let settings = self.settings;
-        self.menu.show(session, device, context, &settings, &status);
+        self.menu.show(session, device, context, &settings, &status, driven == Some(0));
     }
 
     /// The menu's layer while it is open, and the panels'.

@@ -16,6 +16,7 @@ monaka_core = { path = "crates/core" }
 monaka_channel = { path = "crates/channel" }
 monaka_openxr = { path = "crates/openxr" }
 monaka_overlay = { path = "crates/overlay" }
+monaka_ffx = { path = "crates/ffx" }
 monaka_framegen = { path = "crates/framegen" }
 monaka_fsr11 = { path = "crates/fsr11" }
 monaka_gl = { path = "crates/gl" }

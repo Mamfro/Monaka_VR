@@ -18,6 +18,7 @@ use monaka_hook::module::Module;
 use monaka_hook::{Hooks, InFlight, Original};
 use monaka_producer::{Rejection, log, log_first};
 use std::ffi::{CStr, CString, c_char, c_void};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 static CREATE_DEVICE: Original<CreateDeviceFn> = Original::new();
@@ -102,11 +103,30 @@ pub type PresentHandler = unsafe extern "system" fn(VkQueue, VkSwapchainKHR, u32
 /// This copy's view of the process's record.
 static RECORD: Mutex<Option<SharedBlock<Record>>> = Mutex::new(None);
 
+/// The driver's present and swapchain creation behind this copy's own (set where this copy hands
+/// its own out, so they are there before the game can call them). The game keeps the functions of
+/// the copy that gave them, so each copy's are the ones its own detours need.
+static REAL_PRESENT: AtomicUsize = AtomicUsize::new(0);
+static REAL_CREATE_SWAPCHAIN: AtomicUsize = AtomicUsize::new(0);
+/// The present handler last read from the record: used when the record's lock is busy, so a present
+/// never waits on it.
+static LAST_HANDLER: AtomicU64 = AtomicU64::new(0);
+
+/// How long a hook waits for the record's lock: briefly on rare calls (device, image and swapchain
+/// creation), never on a present.
+const RECORD_WAIT_MS: u32 = 200;
+
 /// Runs `work` on the record under its lock (none: no record, or another layout).
 fn with_record<R>(work: impl FnOnce(&mut Record) -> R) -> Option<R> {
-    let mut guard = RECORD.locked();
+    with_record_within(RECORD_WAIT_MS, work)
+}
+
+/// [`with_record`], waiting at most `wait_ms` for the lock (0: not at all, this copy's own lock
+/// included).
+fn with_record_within<R>(wait_ms: u32, work: impl FnOnce(&mut Record) -> R) -> Option<R> {
+    let mut guard = if wait_ms == 0 { RECORD.try_lock().ok()? } else { RECORD.locked() };
     let block = guard.as_mut()?;
-    let mut record = match block.lock(200) {
+    let mut record = match block.lock(wait_ms) {
         Lock::Held(record) | Lock::Abandoned(record) => record,
         Lock::Busy => return None,
     };
@@ -272,7 +292,7 @@ fn luid(physical: VkPhysicalDevice) -> Option<[u8; 8]> {
 
 /// `vkCreateDevice`: the game's device, with the sharing extensions it lacks added.
 unsafe extern "system" fn create_device(physical: VkPhysicalDevice, info: *const VkDeviceCreateInfo, allocator: *const c_void, out: *mut VkDevice) -> VkResult {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     // SAFETY: the game's own create info, read as the API lays it out.
     let (asked, count) = unsafe { ((*info).ppEnabledExtensionNames, (*info).enabledExtensionCount as usize) };
     let mut names: Vec<*const c_char> = (0..count).map(|i| unsafe { *asked.add(i) }).collect();
@@ -284,7 +304,7 @@ unsafe extern "system" fn create_device(physical: VkPhysicalDevice, info: *const
     ours.enabledExtensionCount = names.len() as u32;
     ours.ppEnabledExtensionNames = names.as_ptr();
     // SAFETY: the original, with the game's arguments and our list (alive across the call).
-    let result = unsafe { CREATE_DEVICE.get()(physical, &ours, allocator, out) };
+    let result = unsafe { CREATE_DEVICE.get(&flight)(physical, &ours, allocator, out) };
     if result != VK_SUCCESS || out.is_null() {
         log!("vkCreateDevice failed ({result})");
         return result;
@@ -298,7 +318,7 @@ unsafe extern "system" fn create_device(physical: VkPhysicalDevice, info: *const
         r.physical = physical as u64;
         r.luid = luid.unwrap_or_default();
         r.luid_valid = u32::from(luid.is_some());
-        r.get_device_proc_addr = GET_DEVICE_PROC_ADDR.get() as usize as u64;
+        r.get_device_proc_addr = GET_DEVICE_PROC_ADDR.get(&flight) as usize as u64;
         r.device_state = if all_there { 1 } else { 2 };
     });
     if all_there {
@@ -311,9 +331,9 @@ unsafe extern "system" fn create_device(physical: VkPhysicalDevice, info: *const
 
 /// `vkGetDeviceQueue`: the queue, its family noted.
 unsafe extern "system" fn get_device_queue(device: VkDevice, family: u32, index: u32, out: *mut VkQueue) {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     // SAFETY: the original, with the game's arguments.
-    unsafe { GET_DEVICE_QUEUE.get()(device, family, index, out) };
+    unsafe { GET_DEVICE_QUEUE.get(&flight)(device, family, index, out) };
     if out.is_null() {
         return;
     }
@@ -330,7 +350,7 @@ unsafe extern "system" fn get_device_queue(device: VkDevice, family: u32, index:
 
 /// `vkCreateImage`: a depth image also a copy's source, and noted with its format and size.
 unsafe extern "system" fn create_image(device: VkDevice, info: *const VkImageCreateInfo, allocator: *const c_void, out: *mut VkImage) -> VkResult {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     // SAFETY: a copy of the game's create info.
     let mut ours: VkImageCreateInfo = unsafe { std::ptr::read(info) };
     let depth = ours.usage & IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT != 0;
@@ -338,7 +358,7 @@ unsafe extern "system" fn create_image(device: VkDevice, info: *const VkImageCre
         ours.usage |= IMAGE_USAGE_TRANSFER_SRC;
     }
     // SAFETY: the original, with the game's arguments and our usage.
-    let result = unsafe { CREATE_IMAGE.get()(device, &ours, allocator, out) };
+    let result = unsafe { CREATE_IMAGE.get(&flight)(device, &ours, allocator, out) };
     if depth && result == VK_SUCCESS && !out.is_null() {
         // SAFETY: the image the call just made.
         let image = unsafe { *out };
@@ -352,38 +372,47 @@ unsafe extern "system" fn create_image(device: VkDevice, info: *const VkImageCre
             r.depths[r.depth_count as usize] = entry;
             r.depth_count += 1;
         });
-        log_first!(16, "Vulkan depth image {image:#x}: {}x{} format {}", ours.extent[0], ours.extent[1], ours.format);
+        log_first(16, format_args!("Vulkan depth image {image:#x}: {}x{} format {}", ours.extent[0], ours.extent[1], ours.format));
     }
     result
 }
 
 /// `vkGetDeviceProcAddr`: our present and swapchain creation in place of the driver's.
 unsafe extern "system" fn get_device_proc_addr(device: VkDevice, name: *const c_char) -> usize {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     // SAFETY: the original, with the game's arguments.
-    let real = unsafe { GET_DEVICE_PROC_ADDR.get()(device, name) };
+    let real = unsafe { GET_DEVICE_PROC_ADDR.get(&flight)(device, name) };
     if real == 0 || name.is_null() {
         return real;
     }
     // SAFETY: the game's name, a C string.
     let name = unsafe { CStr::from_ptr(name) };
     if name == c"vkQueuePresentKHR" {
+        REAL_PRESENT.store(real, Ordering::Release);
         with_record(|r| r.real_present = real as u64);
         return queue_present as QueuePresentFn as usize;
     }
     if name == c"vkCreateSwapchainKHR" {
+        REAL_CREATE_SWAPCHAIN.store(real, Ordering::Release);
         with_record(|r| r.real_create_swapchain = real as u64);
         return create_swapchain as CreateSwapchainFn as usize;
     }
     real
 }
 
+/// The driver's function behind one of ours: the one this copy saw, else the loader's export
+/// (which dispatches to the driver), so a detour always has a real function to forward to.
+fn real_or_loader(real: &AtomicUsize, name: &CStr) -> Option<usize> {
+    Some(real.load(Ordering::Acquire)).filter(|&f| f != 0).or_else(|| loader_export(name))
+}
+
 /// `vkCreateSwapchainKHR`: its images also a copy's source; the images noted.
 unsafe extern "system" fn create_swapchain(device: VkDevice, info: *const VkSwapchainCreateInfoKHR, allocator: *const c_void, out: *mut VkSwapchainKHR) -> VkResult {
     let _flight = InFlight::enter();
-    let Some(real) = with_record(|r| r.real_create_swapchain).filter(|&f| f != 0) else { return -3 };
-    // SAFETY: the driver's swapchain creation (the record keeps it).
-    let real: CreateSwapchainFn = unsafe { std::mem::transmute(real as usize) };
+    // VK_ERROR_INITIALIZATION_FAILED only when not even the loader has the function.
+    let Some(real) = real_or_loader(&REAL_CREATE_SWAPCHAIN, c"vkCreateSwapchainKHR") else { return -3 };
+    // SAFETY: the driver's swapchain creation (or the loader's, which dispatches to it).
+    let real: CreateSwapchainFn = unsafe { std::mem::transmute(real) };
     // SAFETY: a copy of the game's create info.
     let mut ours: VkSwapchainCreateInfoKHR = unsafe { std::ptr::read(info) };
     ours.imageUsage |= IMAGE_USAGE_TRANSFER_SRC;
@@ -437,10 +466,19 @@ fn swapchain_images(device: VkDevice, swapchain: VkSwapchainKHR) -> Vec<VkImage>
 }
 
 /// `vkQueuePresentKHR` (the game keeps the first copy's): the frame handed to the newest running
-/// copy's handler first (on the game's queue, its thread).
+/// copy's handler first (on the game's queue, its thread). It never waits on the record: with the
+/// lock busy, the handler last read stands in.
 unsafe extern "system" fn queue_present(queue: VkQueue, info: *const VkPresentInfoKHR) -> VkResult {
     let _flight = InFlight::enter();
-    let Some((real, handler)) = with_record(|r| (r.real_present, r.handler)) else { return -3 };
+    // VK_ERROR_INITIALIZATION_FAILED only when not even the loader has the function.
+    let Some(real) = real_or_loader(&REAL_PRESENT, c"vkQueuePresentKHR") else { return -3 };
+    let handler = match with_record_within(0, |r| r.handler) {
+        Some(handler) => {
+            LAST_HANDLER.store(handler, Ordering::Relaxed);
+            handler
+        }
+        None => LAST_HANDLER.load(Ordering::Relaxed),
+    };
     // SAFETY: the game's present info, read as the API lays it out.
     if handler != 0
         && let Some((swapchain, index)) = unsafe { first_image(info) }
@@ -449,8 +487,8 @@ unsafe extern "system" fn queue_present(queue: VkQueue, info: *const VkPresentIn
         // own queue, swapchain and image.
         unsafe { std::mem::transmute::<usize, PresentHandler>(handler as usize)(queue, swapchain, index) };
     }
-    // SAFETY: the driver's present (the record keeps it), with the game's arguments.
-    unsafe { std::mem::transmute::<usize, QueuePresentFn>(real as usize)(queue, info) }
+    // SAFETY: the driver's present (or the loader's, which dispatches to it), with the game's arguments.
+    unsafe { std::mem::transmute::<usize, QueuePresentFn>(real)(queue, info) }
 }
 
 /// The present's first swapchain and image index.
@@ -466,13 +504,4 @@ unsafe fn first_image(info: *const VkPresentInfoKHR) -> Option<(VkSwapchainKHR, 
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_record_fits_a_page_or_two_and_keeps_its_layout() {
-        assert_eq!(size_of::<Chain>(), 88);
-        assert_eq!(size_of::<DepthImage>(), 24);
-        assert!(size_of::<Record>() < 8192, "{}", size_of::<Record>());
-    }
-}
+mod tests;

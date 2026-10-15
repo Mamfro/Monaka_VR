@@ -193,6 +193,7 @@ fn now() -> u64 {
 /// Adds a probe at `spec.address`; its id. An address whose first instructions cannot be moved
 /// (the hook engine's decoder) is refused.
 pub fn add(spec: Spec) -> Result<usize, String> {
+    let flight = crate::InFlight::enter();
     if spec.snapshot.is_some_and(|s| s.length > SNAPSHOT_MAX) {
         return Err(format!("a snapshot is at most {SNAPSHOT_MAX} bytes"));
     }
@@ -214,7 +215,7 @@ pub fn add(spec: Spec) -> Result<usize, String> {
         let detour: Entry = std::mem::transmute::<usize, Entry>(stub);
         hooks.inline_decoded(&ORIGINALS[id], &spec.name, spec.address, detour).map_err(|e| e.to_string())?;
     }
-    TRAMPOLINES[id].store(ORIGINALS[id].get() as usize, Release);
+    TRAMPOLINES[id].store(ORIGINALS[id].get(&flight) as usize, Release);
     if let Ok(mut only) = SPECS_ONLY[id].lock() {
         *only = spec.only;
     }

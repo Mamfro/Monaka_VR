@@ -28,7 +28,7 @@ pub mod pairs;
 use crate::afw::Rendered;
 use crate::driver::Driver;
 use crate::feature::Presents;
-use crate::pairs12::{EyeDepth12, PairDepth, PairPublisher12, Step};
+use crate::pairs::d3d12::{EyeDepth12, PairDepth, PairPublisher12, Step};
 use crate::providers::FrameInputs;
 use monaka_channel::ChannelName;
 use monaka_channel::d3d12::{self, Recorder};

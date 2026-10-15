@@ -1,106 +1,62 @@
 //! The debug menu in the headset ([`monaka_overlay::menu`]): opened and closed by holding Select
 //! (Back) for half a second. A short press still reaches the game, as a tap when it is let go;
 //! Select with Start is left to the capture chord. While open the menu takes the pad (the game
-//! gets it idle) and floats where it opened, a metre ahead. Its Tools tab saves a capture with the
-//! debug drawing (and the menu) on it.
+//! gets it idle) and floats where it opened, a metre ahead, in a row with the panels switched on
+//! ([`crate::debug_panels`]): LB / RB pick the one the pad drives, the stick or the D-pad and A
+//! drive it (the menu's own presses go to the menu), the right stick scrolls a panel's log, LT / RT
+//! change the menu's tab and B closes it. Its Tools tab saves a capture with the debug drawing
+//! (and the menu) on it.
 
 use crate::debug_panels::Place;
-use monaka_channel::d3d;
-use monaka_core::math::{self, Quat, Vec3};
+use crate::menu_quad::{self, MenuQuad};
+use monaka_core::math::{Quat, Vec3};
+use monaka_core::hold::HoldToggle;
 use monaka_core::pad::{Gamepad, button};
 use monaka_core::protocol::{LEFT_HAND, RIGHT_HAND};
-use monaka_openxr::{Extent2Df, Layer, Posef, Quaternionf, Session, Space, Swapchain, Vector3f};
+use monaka_openxr::{Extent2Df, Layer, Posef, Session, Space};
 use monaka_overlay::menu::panel::{PIXELS, Panel};
 use monaka_overlay::quad::Rectangle;
 use monaka_overlay::menu::{Command, Menu, Press, Settings, Status, StickRepeat};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 
-/// How long a button is held before it acts.
-const HOLD: Duration = Duration::from_millis(500);
-/// How long a short press let go is shown to the game.
-const TAP: Duration = Duration::from_millis(80);
-/// Where the panel floats when it opens: this far ahead of the head, this far below the eyes, this
-/// wide (metres).
-const DISTANCE: f32 = 1.0;
-const BELOW_EYES: f32 = 0.1;
+/// The panel's width (metres).
 const WIDTH: f32 = 0.7;
-const MENU_BUTTONS: u16 = button::BACK | button::START;
 /// A trigger past this (of 255) is pressed.
 const TRIGGER: u8 = 160;
 
 /// A buzz: the hand, its strength (0..1) and length (seconds).
 pub type Buzz = (usize, f32, f32);
 
-/// What one read of the pad asked for.
+/// What one read of the pad asked for: of the menu, and of the panel the pad drives when it is
+/// not the menu (its presses, the steps through the row, the lines scrolled up).
 #[derive(Default)]
 pub struct Asked {
     pub command: Option<Command>,
     pub buzzes: Vec<Buzz>,
+    pub panel_presses: Vec<Press>,
+    pub focus_step: i32,
+    pub scroll: i32,
 }
 
-/// A button that does something of Monaka's when held, and reaches the game as a tap otherwise.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct LongPress {
-    bit: u16,
-    /// Held since then, and whether it acted (or was taken by the capture chord) in this hold.
-    since: Option<(Instant, bool)>,
-    /// A short press let go, shown to the game until then.
-    tap_until: Option<Instant>,
-}
-
-impl LongPress {
-    pub(crate) const fn new(bit: u16) -> Self {
-        Self { bit, since: None, tap_until: None }
-    }
-
-    /// Takes the button out of `pad` while it may be a long press; true once when it has been
-    /// held long enough. A short press is put back as a tap when let go.
-    pub(crate) fn step(&mut self, pad: &mut Gamepad, now: Instant) -> bool {
-        let mut fired = false;
-        if pad.buttons & self.bit != 0 {
-            let (since, acted) = *self.since.get_or_insert((now, false));
-            if !acted && now.duration_since(since) >= HOLD {
-                self.since = Some((since, true));
-                fired = true;
-            }
-            pad.buttons &= !self.bit;
-        } else if let Some((_, acted)) = self.since.take()
-            && !acted
-        {
-            self.tap_until = Some(now + TAP);
-        }
-        if let Some(until) = self.tap_until {
-            if now < until {
-                pad.buttons |= self.bit;
-            } else {
-                self.tap_until = None;
-            }
-        }
-        fired
-    }
-
-    /// The button is part of another chord this hold: it does nothing of its own until let go.
-    pub(crate) fn yield_to_chord(&mut self, now: Instant) {
-        self.since = Some((self.since.map_or(now, |(since, _)| since), true));
-        self.tap_until = None;
-    }
-}
+/// Lines a log scrolls each push of the right stick.
+const SCROLL_LINES: i32 = 3;
 
 pub struct HeadsetMenu<'s> {
     menu: Menu,
     stick: StickRepeat,
+    /// The right stick, scrolling a panel's log.
+    scroll_stick: StickRepeat,
+    /// Where it floats in the row now (none: where it opened).
+    shown_at: Option<Place>,
     started: Instant,
-    select: LongPress,
+    select: HoldToggle,
     /// Buttons and triggers held at the last read, for presses.
     held: u16,
     triggers: [bool; 2],
     panel: Panel,
-    format: DXGI_FORMAT,
-    swapchain: Option<Swapchain<'s>>,
-    failed: bool,
-    anchor: Posef,
+    quad: MenuQuad<'s>,
 }
 
 impl<'s> HeadsetMenu<'s> {
@@ -108,15 +64,14 @@ impl<'s> HeadsetMenu<'s> {
         Self {
             menu: Menu::default(),
             stick: StickRepeat::default(),
+            scroll_stick: StickRepeat::default(),
+            shown_at: None,
             started: Instant::now(),
-            select: LongPress::new(button::BACK),
+            select: HoldToggle::new(button::BACK),
             held: 0,
             triggers: [false; 2],
             panel: Panel::new(format),
-            format,
-            swapchain: None,
-            failed: false,
-            anchor: pose([0.0, 0.0, 0.0, 1.0], [0.0, 0.0, -DISTANCE]),
+            quad: MenuQuad::new("Debug menu", format, PIXELS),
         }
     }
 
@@ -126,26 +81,21 @@ impl<'s> HeadsetMenu<'s> {
 
     /// The pad as the controllers hold it, before anything else reads it: Select held opens or
     /// closes the menu; while the menu is open it reads the pad and leaves the game an idle one.
-    /// `head`: where the head is, to place the panel.
-    pub fn pad(&mut self, pad: &mut Gamepad, head: Option<(Quat, Vec3)>, now: Instant, settings: &mut Settings, status: &Status) -> Asked {
+    /// `head`: where the head is, to place the panel; `drives_menu`: the pad drives the menu (else a
+    /// panel beside it: the presses are handed back).
+    pub fn pad(&mut self, pad: &mut Gamepad, head: Option<(Quat, Vec3)>, now: Instant, settings: &mut Settings, status: &Status, drives_menu: bool) -> Asked {
         let mut asked = Asked::default();
-        if pad.buttons & MENU_BUTTONS == MENU_BUTTONS {
-            // With Start: the capture chord's, as they come.
-            self.select.yield_to_chord(now);
-        } else {
-            if self.select.step(pad, now) {
-                self.menu.open = !self.menu.open;
-                if self.menu.open {
-                    self.menu.opened(status);
-                }
-                if self.menu.open
-                    && let Some((orientation, position)) = head
-                {
-                    let (facing, ahead) = math::ahead_of(orientation, position, DISTANCE);
-                    self.anchor = pose(facing, [ahead[0], ahead[1] - BELOW_EYES, ahead[2]]);
-                }
-                asked.buzzes.extend([LEFT_HAND, RIGHT_HAND].map(|hand| (hand, 0.5, 0.08)));
+        // With Start: the capture chord's, as they come.
+        if self.select.toggled(pad, now) {
+            self.menu.open = !self.menu.open;
+            if self.menu.open {
+                self.menu.opened(status);
             }
+            if self.menu.open && head.is_some() {
+                self.quad.open_at(head);
+                self.shown_at = None;
+            }
+            asked.buzzes.extend(menu_quad::TOGGLED);
         }
         if !self.menu.open {
             self.held = pad.buttons;
@@ -158,61 +108,69 @@ impl<'s> HeadsetMenu<'s> {
         self.triggers = triggers;
         let seconds = now.duration_since(self.started).as_secs_f64();
         let mut presses = Vec::new();
-        presses.extend(self.stick.step(f32::from(pad.thumb_lx) / 32767.0, f32::from(pad.thumb_ly) / 32767.0, seconds));
+        presses.extend(self.stick.step_pad(pad, seconds));
         presses.extend([(pressed & button::A != 0, Press::Switch), (pressed & button::B != 0, Press::Close), (pulled[0], Press::PreviousTab), (pulled[1], Press::NextTab)].into_iter().filter(|(on, _)| *on).map(|(_, p)| p));
         for press in presses {
-            asked.command = asked.command.or(self.menu.press(press, settings, status));
-            asked.buzzes.push((RIGHT_HAND, if press == Press::Switch { 0.4 } else { 0.15 }, 0.03));
+            // Closing and the tabs are always the menu's.
+            if drives_menu || matches!(press, Press::Close | Press::PreviousTab | Press::NextTab) {
+                asked.command = asked.command.or(self.menu.press(press, settings, status));
+            } else {
+                asked.panel_presses.push(press);
+            }
+            asked.buzzes.push(menu_quad::pressed(press == Press::Switch));
+        }
+        for (bit, step) in [(button::LEFT_SHOULDER, -1), (button::RIGHT_SHOULDER, 1)] {
+            if pressed & bit != 0 {
+                asked.focus_step += step;
+                asked.buzzes.push((if step < 0 { LEFT_HAND } else { RIGHT_HAND }, 0.25, 0.03));
+            }
+        }
+        match self.scroll_stick.step(0.0, f32::from(pad.thumb_ry) / 32767.0, seconds) {
+            Some(Press::Up) => asked.scroll += SCROLL_LINES,
+            Some(Press::Down) => asked.scroll -= SCROLL_LINES,
+            _ => {}
         }
         *pad = Gamepad::default();
         asked
     }
 
-    /// Draws the panel when it shows something new and hands it to the headset.
-    pub fn show(&mut self, session: &'s Session<'_>, device: &ID3D11Device, context: &ID3D11DeviceContext, settings: &Settings, status: &Status) {
-        if !self.menu.open || self.failed {
+    /// Draws the panel when it shows something new (`outlined`: the pad drives it, beside other
+    /// panels) and hands it to the headset.
+    pub fn show(&mut self, session: &'s Session<'_>, device: &ID3D11Device, context: &ID3D11DeviceContext, settings: &Settings, status: &Status, outlined: bool) {
+        if !self.menu.open {
             return;
         }
-        if self.swapchain.is_none() {
-            match session.create_swapchain(self.format.0 as i64, PIXELS[0], PIXELS[1]) {
-                Ok(swapchain) => {
-                    self.swapchain = Some(swapchain);
-                    self.panel.forget();
-                }
-                Err(e) => return self.fail(format!("no swapchain for it ({e})")),
+        let (panel, menu) = (&mut self.panel, &self.menu);
+        self.quad.show(session, context, |fresh| {
+            if fresh {
+                panel.forget();
             }
-        }
-        let image = match self.panel.draw(device, context, &self.menu, settings, status) {
-            Ok(Some(image)) => image.clone(),
-            Ok(None) => return,
-            Err(e) => return self.fail(e),
-        };
-        if let Some(swapchain) = &self.swapchain
-            && let Err(e) = swapchain.fill(|target| {
-                d3d::copy_texture(context, target, &image);
-                d3d::flush(context);
-            })
-        {
-            self.fail(format!("its image could not be shown ({e})"));
-        }
+            panel.draw(device, context, menu, settings, status, outlined).map(|image| image.cloned())
+        });
     }
 
     /// The panel's image and where it floats (tracking space), while it is shown.
     pub fn shown(&self) -> Option<(&ID3D11Texture2D, Rectangle)> {
-        if !self.menu.open || self.failed || self.swapchain.is_none() {
+        if !self.menu.open || self.quad.swapchain().is_none() {
             return None;
         }
-        let q = self.anchor.orientation;
-        let p = self.anchor.position;
-        let size = [WIDTH, WIDTH * PIXELS[1] as f32 / PIXELS[0] as f32];
-        self.panel.image().map(|image| (image, Rectangle { orientation: [q.x, q.y, q.z, q.w], position: [p.x, p.y, p.z], size }))
+        let at = self.shown_place();
+        self.panel.image().map(|image| (image, Rectangle { orientation: at.orientation, position: at.centre, size: at.size }))
     }
 
-    /// Where the panel floats (where it last opened), for the panels placed beside it.
+    /// Where it floats in the row now ([`crate::debug_panels::strip`]).
+    pub fn set_shown(&mut self, place: Place) {
+        self.shown_at = Some(place);
+    }
+
+    fn shown_place(&self) -> Place {
+        self.shown_at.unwrap_or_else(|| self.place())
+    }
+
+    /// Where the panel opened, for the row of panels beside it.
     pub fn place(&self) -> Place {
-        let q = self.anchor.orientation;
-        let p = self.anchor.position;
-        Place { orientation: [q.x, q.y, q.z, q.w], centre: [p.x, p.y, p.z], size: [WIDTH, WIDTH * PIXELS[1] as f32 / PIXELS[0] as f32] }
+        let anchor = self.quad.anchor;
+        Place { orientation: anchor.orientation.xyzw(), centre: anchor.position.xyz(), size: [WIDTH, WIDTH * PIXELS[1] as f32 / PIXELS[0] as f32] }
     }
 
     /// The menu's model, for the 2D window, which shows it with a pointer.
@@ -222,21 +180,10 @@ impl<'s> HeadsetMenu<'s> {
 
     /// The panel's layer, while open.
     pub fn layer<'a>(&'a self, space: &'a Space<'a>) -> Option<Layer<'a>> {
-        let swapchain = self.swapchain.as_ref().filter(|_| self.menu.open && !self.failed)?;
-        let height = WIDTH * PIXELS[1] as f32 / PIXELS[0] as f32;
-        Some(Layer::Overlay { space, swapchain, pose: self.anchor, size: Extent2Df { width: WIDTH, height } })
+        let swapchain = self.quad.swapchain().filter(|_| self.menu.open)?;
+        let at = self.shown_place();
+        Some(Layer::Overlay { space, swapchain, pose: Posef::new(at.orientation, at.centre), size: Extent2Df { width: at.size[0], height: at.size[1] } })
     }
-
-    fn fail(&mut self, why: String) {
-        println!("Debug menu: {why}; the menu is off this run");
-        self.failed = true;
-    }
-}
-
-pub(crate) fn pose(orientation: Quat, position: Vec3) -> Posef {
-    let [x, y, z, w] = orientation;
-    let [px, py, pz] = position;
-    Posef { orientation: Quaternionf { x, y, z, w }, position: Vector3f { x: px, y: py, z: pz } }
 }
 
 #[cfg(test)]

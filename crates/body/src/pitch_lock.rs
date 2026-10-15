@@ -16,8 +16,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 #[cfg(test)]
-mod lift_checks;
-#[cfg(test)]
 mod tests;
 
 /// The pitch lock's option: on by default (the stick turns only; the head alone pitches).

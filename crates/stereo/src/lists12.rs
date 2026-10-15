@@ -185,18 +185,19 @@ pub fn hooked() -> bool {
 /// `list` is the game's live list, being recorded on this thread; the arguments are
 /// `OMSetRenderTargets`'.
 pub unsafe fn bind_targets(list: *mut c_void, count: u32, targets: *const D3D12_CPU_DESCRIPTOR_HANDLE, single: BOOL, depth: *const D3D12_CPU_DESCRIPTOR_HANDLE) -> bool {
+    let flight = monaka_hook::InFlight::enter();
     if !hooked() || !SET_TARGETS.is_set() {
         return false;
     }
     // SAFETY: the original, with the caller's arguments.
-    unsafe { SET_TARGETS.get()(list, count, targets, single, depth) };
+    unsafe { SET_TARGETS.get(&flight)(list, count, targets, single, depth) };
     true
 }
 
 /// Hooks the first list the game queue executes (every list of its class shares its code), then
 /// calls the subscribers.
 unsafe extern "system" fn execute(queue: *mut c_void, count: u32, lists: *const *mut c_void) {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     if !TRIED.load(Relaxed) && count > 0 && !lists.is_null() && subscribers().next().is_some() {
         let list = mem::read::<usize>(lists as usize).unwrap_or(0);
         if list != 0 && !TRIED.swap(true, Relaxed) {
@@ -212,7 +213,7 @@ unsafe extern "system" fn execute(queue: *mut c_void, count: u32, lists: *const 
         }
     }
     // SAFETY: forwards the game's own call.
-    unsafe { EXECUTE.get()(queue, count, lists) }
+    unsafe { EXECUTE.get(&flight)(queue, count, lists) }
 }
 
 /// # Safety
@@ -282,7 +283,7 @@ unsafe fn method<F: Copy>(hooks: &mut Hooks, hooked: &mut Vec<String>, original:
 }
 
 unsafe extern "system" fn set_targets(list: *mut c_void, count: u32, targets: *const D3D12_CPU_DESCRIPTOR_HANDLE, single: BOOL, depth: *const D3D12_CPU_DESCRIPTOR_HANDLE) {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     for subscriber in subscribers() {
         if let Some(watch) = subscriber.targets {
             // SAFETY: the game's call on its list, with its arguments.
@@ -290,11 +291,11 @@ unsafe extern "system" fn set_targets(list: *mut c_void, count: u32, targets: *c
         }
     }
     // SAFETY: forwards the game's own call.
-    unsafe { SET_TARGETS.get()(list, count, targets, single, depth) }
+    unsafe { SET_TARGETS.get(&flight)(list, count, targets, single, depth) }
 }
 
 unsafe extern "system" fn set_viewports(list: *mut c_void, count: u32, viewports: *const D3D12_VIEWPORT) {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     for subscriber in subscribers() {
         if let Some(watch) = subscriber.viewports {
             // SAFETY: the game's call on its list, with its arguments.
@@ -302,11 +303,11 @@ unsafe extern "system" fn set_viewports(list: *mut c_void, count: u32, viewports
         }
     }
     // SAFETY: forwards the game's own call.
-    unsafe { VIEWPORTS.get()(list, count, viewports) }
+    unsafe { VIEWPORTS.get(&flight)(list, count, viewports) }
 }
 
 unsafe extern "system" fn reset(list: *mut c_void, allocator: *mut c_void, pipeline: *mut c_void) -> HRESULT {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     for subscriber in subscribers() {
         if let Some(watch) = subscriber.reset {
             // SAFETY: the game's call on its list.
@@ -314,7 +315,7 @@ unsafe extern "system" fn reset(list: *mut c_void, allocator: *mut c_void, pipel
         }
     }
     // SAFETY: forwards the game's own call.
-    unsafe { RESET.get()(list, allocator, pipeline) }
+    unsafe { RESET.get(&flight)(list, allocator, pipeline) }
 }
 
 unsafe extern "system" fn begin_pass(
@@ -324,7 +325,7 @@ unsafe extern "system" fn begin_pass(
     depth: *const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC,
     flags: D3D12_RENDER_PASS_FLAGS,
 ) {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     for subscriber in subscribers() {
         if let Some(watch) = subscriber.begin_pass {
             // SAFETY: the game's call on its list, with its arguments; the pass has not begun yet.
@@ -332,7 +333,7 @@ unsafe extern "system" fn begin_pass(
         }
     }
     // SAFETY: forwards the game's own call.
-    unsafe { BEGIN_PASS.get()(list, count, targets, depth, flags) }
+    unsafe { BEGIN_PASS.get(&flight)(list, count, targets, depth, flags) }
 }
 
 /// A draw: the subscribers in turn, the game's own made by one of them or after them.
@@ -352,19 +353,19 @@ unsafe fn drawn(list: *mut c_void, count: u32, draw: &dyn Fn()) {
 }
 
 unsafe extern "system" fn draw_instanced(list: *mut c_void, vertices: u32, instances: u32, first_vertex: u32, first_instance: u32) {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     // SAFETY: the game's own call, on its list.
-    unsafe { drawn(list, vertices, &|| DRAW_INSTANCED.get()(list, vertices, instances, first_vertex, first_instance)) }
+    unsafe { drawn(list, vertices, &|| DRAW_INSTANCED.get(&flight)(list, vertices, instances, first_vertex, first_instance)) }
 }
 
 unsafe extern "system" fn draw_indexed_instanced(list: *mut c_void, indices: u32, instances: u32, first_index: u32, base_vertex: i32, first_instance: u32) {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     // SAFETY: as above.
-    unsafe { drawn(list, indices, &|| DRAW_INDEXED_INSTANCED.get()(list, indices, instances, first_index, base_vertex, first_instance)) }
+    unsafe { drawn(list, indices, &|| DRAW_INDEXED_INSTANCED.get(&flight)(list, indices, instances, first_index, base_vertex, first_instance)) }
 }
 
 unsafe extern "system" fn begin_event(list: *mut c_void, metadata: u32, data: *const c_void, size: u32) {
-    let _flight = InFlight::enter();
+    let flight = InFlight::enter();
     for subscriber in subscribers() {
         if let Some(watch) = subscriber.event {
             // SAFETY: the game's call on its list.
@@ -372,37 +373,8 @@ unsafe extern "system" fn begin_event(list: *mut c_void, metadata: u32, data: *c
         }
     }
     // SAFETY: forwards the game's own call.
-    unsafe { BEGIN_EVENT.get()(list, metadata, data, size) }
+    unsafe { BEGIN_EVENT.get(&flight)(list, metadata, data, size) }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_slots_are_d3d12s() {
-        assert_eq!(slot(offset_of!(ID3D12CommandQueue_Vtbl, ExecuteCommandLists)), 10);
-        assert_eq!(slot(offset_of!(ID3D12GraphicsCommandList_Vtbl, DrawInstanced)), 12);
-        assert_eq!(slot(offset_of!(ID3D12GraphicsCommandList_Vtbl, DrawIndexedInstanced)), 13);
-        assert_eq!(slot(offset_of!(ID3D12GraphicsCommandList_Vtbl, OMSetRenderTargets)), 46);
-        assert_eq!(slot(offset_of!(ID3D12GraphicsCommandList_Vtbl, BeginEvent)), 57);
-    }
-
-    static FIRST: Subscriber = Subscriber { name: "first", ..Subscriber::NONE };
-    static SECOND: Subscriber = Subscriber { name: "second", ..Subscriber::NONE };
-
-    #[test]
-    fn a_subscriber_leaves_once_and_the_others_stay_in_order() {
-        for subscriber in [&FIRST, &SECOND] {
-            let free = SUBSCRIBED.iter().find(|p| p.load(Acquire).is_null()).expect("a free place");
-            free.store(pointer(subscriber), Release);
-        }
-        assert_eq!(subscribers().map(|s| s.name).collect::<Vec<_>>(), ["first", "second"]);
-        leave(&FIRST, 0);
-        leave(&FIRST, 0);
-        assert_eq!(subscribers().map(|s| s.name).collect::<Vec<_>>(), ["second"]);
-        leave(&SECOND, 0);
-        assert_eq!(subscribers().count(), 0);
-        assert!(!hooked());
-    }
-}
+mod tests;

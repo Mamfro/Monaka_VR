@@ -9,10 +9,12 @@
 #![forbid(unsafe_code)]
 
 use monaka_core::options::Options;
-pub use monaka_core::{manifest, pack};
+pub use monaka_core::{manifest, pack, status};
+use monaka_core::status::{State, code};
 use monaka_core::protocol::ChannelName;
 use monaka_hook::module::Module;
 use monaka_hook::{Hooks, InFlight};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -27,30 +29,6 @@ pub mod research;
 pub mod ledger;
 pub mod log;
 pub mod situation;
-
-/// Win32 codes the loader understands.
-pub mod code {
-    pub const SUCCESS: u32 = 0;
-    pub const NOT_READY: u32 = 21;
-    pub const NOT_SUPPORTED: u32 = 50;
-    pub const OPEN_FAILED: u32 = 110;
-    pub const ALREADY_EXISTS: u32 = 183;
-    pub const WAIT_TIMEOUT: u32 = 258;
-    pub const REVISION_MISMATCH: u32 = 1306;
-}
-
-/// `MonakaStatus` values; the loader stops an older copy that reports [`State::Running`].
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum State {
-    New = 0,
-    Starting = 1,
-    Running = 2,
-    Stopped = 3,
-    Rejected = 4,
-    ShutdownFailed = 5,
-    Stopping = 6,
-}
 
 /// Why a start was refused: a Win32 code for the loader and a reason for the log.
 #[derive(Debug)]
@@ -340,15 +318,22 @@ macro_rules! log {
     ($($arg:tt)*) => { $crate::log(format_args!($($arg)*)) };
 }
 
-/// `log_first!(limit, "...", args)`: logs only the first `limit` times this site runs.
-#[macro_export]
-macro_rules! log_first {
-    ($limit:expr, $($arg:tt)*) => {{
-        static N: ::std::sync::atomic::AtomicU32 = ::std::sync::atomic::AtomicU32::new(0);
-        if N.fetch_add(1, ::std::sync::atomic::Ordering::Relaxed) < $limit {
-            $crate::log!($($arg)*);
-        }
-    }};
+/// Logs `args` (`format_args!`) only the first `limit` times this call runs: each place in the
+/// code that calls it counts on its own.
+#[track_caller]
+pub fn log_first(limit: u32, args: fmt::Arguments<'_>) {
+    /// The calls so far, by the place they are made from (file, line, column).
+    static SITES: Mutex<BTreeMap<(&'static str, u32, u32), u32>> = Mutex::new(BTreeMap::new());
+    let at = std::panic::Location::caller();
+    let first = {
+        let mut sites = SITES.locked();
+        let count = sites.entry((at.file(), at.line(), at.column())).or_insert(0);
+        *count = count.saturating_add(1);
+        *count <= limit
+    };
+    if first {
+        log(args);
+    }
 }
 
 /// Each counter's rate per second since the last call: `now` are the counters' values, `last`
@@ -453,7 +438,7 @@ pub fn require_build(name: &str, sha256: &str) -> Result<Module, Rejection> {
         log!("{mismatch}; running anyway (other_builds): each hook still checks the code it patches, plain offsets are unchecked");
         return Ok(module);
     }
-    Err(Rejection::revision(format!("{mismatch} (\"Allow other game versions\" on the Engine tab runs it anyway, at your own risk)")))
+    Err(Rejection::revision(format!("{mismatch} (\"Allow other game versions\" on the Game tab runs it anyway, at your own risk)")))
 }
 
 /// The game module for a producer that finds everything it needs in the code itself (rather than
@@ -488,16 +473,4 @@ pub fn require_host(executables: &str) -> Result<(), Rejection> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_unknown_build_runs_only_when_allowed() {
-        let wrong = "0000000000000000000000000000000000000000000000000000000000000000";
-        let Err(refused) = require_build("kernel32.dll", wrong) else { panic!("a wrong hash passed") };
-        assert!(refused.reason.contains("Allow other game versions"), "{}", refused.reason);
-        allow_other_builds(true);
-        assert!(require_build("kernel32.dll", wrong).is_ok());
-        allow_other_builds(false);
-    }
-}
+mod tests;

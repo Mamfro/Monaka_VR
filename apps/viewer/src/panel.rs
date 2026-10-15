@@ -1,28 +1,23 @@
-//! HUD pieces the game publishes on their own (`<channel>-panel-<piece>`, texture channels of
-//! either transport, premultiplied RGBA: the minimap, the quests, the weapon widget, health, the
-//! quick item, a second gun's ammo in the left hand), shown on the hands: each a quad in its
-//! controller's grip space, so the runtime moves it with the hand at the headset's own rate, on the
-//! back of the hand or above the palm. A channel appears only when the producer has that piece
-//! (Dying Light 1 and 2 with the dynamic HUD, Wolfenstein with the in-world HUD); until then it is
-//! looked for now and then.
+//! HUD pieces the game publishes on their own (`<channel>-panel-<piece>`, premultiplied RGBA),
+//! shown on the hands: each a quad in its controller's grip space, so the runtime moves it with
+//! the hand at the headset's own rate, on the back of the hand or above the palm. The producer
+//! declares its pieces and where each goes ([`monaka_core::panels`]); the declaration and each
+//! piece's channel are looked for now and then until they appear.
 
 use monaka_channel::d3d::{self, create_texture, simple_texture_desc};
-use monaka_channel::reader::{self, AnyReader};
+use monaka_channel::panels::PanelsChannel;
+use monaka_channel::reader::{self, FenceReader};
 use monaka_channel::ChannelName;
-use monaka_core::math::{Quat, Vec3, rotate};
+use monaka_core::panels::{Place, Side};
+use monaka_core::math::{Quat, Vec3, add, conjugate, from_axes, multiply, rotate, sub};
 use monaka_core::protocol::{HandPose, HeadPose};
 use monaka_core::protocol::{RIGHT_HAND, dxgi_format};
-use monaka_openxr::{Extent2Df, Layer, Session, Space, Swapchain};
+use monaka_openxr::{Extent2Df, Layer, Posef, Session, Space, Swapchain};
 use windows::Win32::Graphics::Direct3D11::{D3D11_BIND_SHADER_RESOURCE, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 
 /// Frames between looks for the channel while it is not there.
 const LOOK_EVERY: u64 = 90;
-/// The panels' widths on the hand, in metres: the minimap, the weapon widget and health about a
-/// hand's, the quests (a wide list of text) beside the minimap, the quick item (one icon) smaller.
-pub const HAND_WIDTH: f32 = 0.08;
-pub const QUESTS_WIDTH: f32 = 0.20;
-pub const ICON_WIDTH: f32 = 0.05;
 /// A panel is at least this tall (a wide strip, Dying Light 2's compass, grows wider for it) and
 /// at most this wide.
 const LEAST_HEIGHT: f32 = 0.035;
@@ -34,48 +29,77 @@ const GAP: f32 = 0.005;
 /// head's up across the hand (too short there to say), its top goes toward the knuckles.
 const SHORTEST_UP: f32 = 0.15;
 
-/// Which side of a hand a panel lies on. In a grip space -Z runs along the pointing finger and +Y
-/// toward the thumb, and +X leaves the hand through the back of the right hand but the palm of
-/// the left (OpenXR's grip pose: both point right).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Side {
-    /// On the back of the hand, a little out from the handle.
-    BackOfHand,
-    /// Just above the palm (the fingers curl round the handle there).
-    Palm,
+/// The way a panel on `side` faces along `hand`'s grip x axis (`LEFT_HAND` or `RIGHT_HAND`). In a
+/// grip space -Z runs along the pointing finger and +Y toward the thumb, and +X leaves the hand
+/// through the back of the right hand but the palm of the left (OpenXR's grip pose: both point
+/// right).
+fn facing(side: Side, hand: usize) -> f32 {
+    let back = if hand == RIGHT_HAND { 1.0 } else { -1.0 };
+    match side {
+        Side::BackOfHand => back,
+        Side::Palm => -back,
+    }
 }
 
-impl Side {
-    /// The way the panel faces along the grip's x axis on `hand` (`LEFT_HAND` or `RIGHT_HAND`).
-    fn facing(self, hand: usize) -> f32 {
-        let back = if hand == RIGHT_HAND { 1.0 } else { -1.0 };
-        match self {
-            Side::BackOfHand => back,
-            Side::Palm => -back,
+/// Where a panel on `side` sits in `hand`'s grip space (metres): a little out from the handle on
+/// the back of the hand, just above the palm (the fingers curl round the handle there).
+fn offset(side: Side, hand: usize) -> [f32; 3] {
+    let out = facing(side, hand);
+    match side {
+        Side::BackOfHand => [0.055 * out, 0.0, 0.01],
+        Side::Palm => [0.04 * out, 0.0, 0.0],
+    }
+}
+
+/// The hand panels of the pieces the producer declared, made when the declaration appears.
+pub struct HandPanels<'s> {
+    channel: ChannelName,
+    format: u32,
+    declared: Option<PanelsChannel>,
+    panels: Vec<HandPanel<'s>>,
+    frames: u64,
+}
+
+impl<'s> HandPanels<'s> {
+    /// The panels of game channel `channel`, declared in `declared`, shown in swapchains of `format`
+    /// (the eyes' own).
+    pub fn new(channel: &ChannelName, format: u32, declared: Option<PanelsChannel>) -> Self {
+        Self { channel: channel.clone(), format, declared, panels: Vec::new(), frames: 0 }
+    }
+
+    /// Once per frame: the declared pieces made into panels (looked for until they appear), and
+    /// each panel updated.
+    pub fn update(&mut self, session: &'s Session<'_>, device: &ID3D11Device, context: &ID3D11DeviceContext) {
+        self.frames += 1;
+        if self.panels.is_empty()
+            && self.frames % LOOK_EVERY == 1
+            && let Some(declared) = self.declared.as_mut()
+        {
+            self.panels = declared.pieces().into_iter().map(|(piece, place)| HandPanel::new(&self.channel, self.format, piece, place)).collect();
+        }
+        for panel in &mut self.panels {
+            panel.update(session, device, context);
         }
     }
 
-    /// Where it sits in `hand`'s grip space (metres).
-    fn offset(self, hand: usize) -> [f32; 3] {
-        let out = self.facing(hand);
-        match self {
-            Side::BackOfHand => [0.055 * out, 0.0, 0.01],
-            Side::Palm => [0.04 * out, 0.0, 0.0],
-        }
+    /// Each panel on its hand ([`HandPanel::layer`]), a panel beside another placed by the main
+    /// panel of its hand and side (the first there not beside one).
+    pub fn layers<'a>(&'a self, local: &'a Space<'a>, grips: &[HandPose; 2], head: Option<&HeadPose>, nearest: f32) -> impl Iterator<Item = Layer<'a>> + 'a {
+        let grips = *grips;
+        let head = head.copied();
+        self.panels.iter().filter_map(move |panel| {
+            let main = self.panels.iter().find(|p| !p.place.beside && p.place.hand == panel.place.hand && p.place.side == panel.place.side);
+            panel.layer(local, &grips, head.as_ref(), nearest, main.map_or(0.0, |m| m.shown_size().0))
+        })
     }
 }
 
 pub struct HandPanel<'s> {
-    piece: &'static str,
-    hand: usize,
-    side: Side,
-    width: f32,
-    /// A panel left of the hand's main panel on the same side (the quests beside the minimap):
-    /// its right edge at that one's left, their tops level.
-    beside: bool,
+    piece: String,
+    place: Place,
     name: Option<ChannelName>,
     format: u32,
-    reader: Option<AnyReader>,
+    reader: Option<FenceReader>,
     textures: Option<[ID3D11Texture2D; 2]>,
     swapchain: Option<Swapchain<'s>>,
     size: (u32, u32),
@@ -84,13 +108,13 @@ pub struct HandPanel<'s> {
 }
 
 impl<'s> HandPanel<'s> {
-    /// The piece `piece` of the game channel `channel` on `side` of `hand`, shown in
-    /// swapchains of `format` (the eyes' own).
-    pub fn new(channel: &ChannelName, format: u32, piece: &'static str, hand: usize, side: Side, width: f32, beside: bool) -> Self {
+    /// The piece `piece` of the game channel `channel` at `place`, shown in swapchains of `format`
+    /// (the eyes' own).
+    pub fn new(channel: &ChannelName, format: u32, piece: String, place: Place) -> Self {
         // The channel's texels are RGBA8 and are copied as they are.
         let rgba = matches!(format, dxgi_format::R8G8B8A8_UNORM | dxgi_format::R8G8B8A8_UNORM_SRGB);
-        let name = channel.panel(piece).filter(|_| rgba);
-        Self { piece, hand, side, width, beside, name, format, reader: None, textures: None, swapchain: None, size: (0, 0), seen: 0, frames: 0 }
+        let name = channel.panel(&piece).filter(|_| rgba);
+        Self { piece, place, name, format, reader: None, textures: None, swapchain: None, size: (0, 0), seen: 0, frames: 0 }
     }
 
     /// Once per frame: opens the channel when it appears and takes a new panel into the swapchain.
@@ -101,9 +125,8 @@ impl<'s> HandPanel<'s> {
                 return;
             }
             let Some(name) = &self.name else { return };
-            // The producer's transport: keyed (D3D11 games) or fence (D3D12 games).
-            let Some(description) = reader::describe_any(name) else { return };
-            let Ok(reader) = AnyReader::open(name, device, description.fence) else { return };
+            let Some(Ok(description)) = reader::describe_any(name) else { return };
+            let Ok(reader) = FenceReader::open(name, device) else { return };
             let size = (description.width, description.height);
             // The staging textures in the channel's own format (the reader wants an exact match;
             // the eyes' format, sRGB or not, is of the same family, so the copy into the
@@ -113,7 +136,7 @@ impl<'s> HandPanel<'s> {
             let (Ok(a), Ok(b)) = (create_texture(device, &desc), create_texture(device, &desc)) else { return };
             match session.create_swapchain(self.format as i64, size.0, size.1) {
                 Ok(swapchain) => {
-                    println!("HUD panel {} on the {} hand, {:?} ({}x{})", self.piece, if self.hand == RIGHT_HAND { "right" } else { "left" }, self.side, size.0, size.1);
+                    println!("HUD panel {} on the {} hand, {:?} ({}x{})", self.piece, if self.place.hand == RIGHT_HAND { "right" } else { "left" }, self.place.side, size.0, size.1);
                     self.reader = Some(reader);
                     self.textures = Some([a, b]);
                     self.swapchain = Some(swapchain);
@@ -149,7 +172,7 @@ impl<'s> HandPanel<'s> {
     /// The panel on its hand, once one has arrived; `grips` (by hand) and `head` are the grips'
     /// and the head's poses in `local`, this frame.
     pub fn layer<'a>(&'a self, local: &'a Space<'a>, grips: &[HandPose; 2], head: Option<&HeadPose>, nearest: f32, main_width: f32) -> Option<Layer<'a>> {
-        let grip = &grips[self.hand];
+        let grip = &grips[self.place.hand];
         if grip.valid == 0 {
             return None;
         }
@@ -159,9 +182,9 @@ impl<'s> HandPanel<'s> {
             Some(head) => rotate(conjugate(grip.orientation), rotate(head.orientation, [0.0, 1.0, 0.0])),
             None => [0.0, 0.0, -1.0],
         };
-        let orientation = facing_up(head_up, self.side.facing(self.hand));
-        let mut position = self.side.offset(self.hand);
-        if self.beside {
+        let orientation = facing_up(head_up, facing(self.place.side, self.place.hand));
+        let mut position = offset(self.place.side, self.place.hand);
+        if self.place.beside {
             // Moved in the panels' own plane, so the two turn together.
             let other = main_width;
             let shift = rotate(orientation, [-(other * 0.5 + GAP + width * 0.5), other * 0.5 - height * 0.5, 0.0]);
@@ -183,7 +206,7 @@ impl<'s> HandPanel<'s> {
                 position = add(head.position, [line[0] * scale, line[1] * scale, line[2] * scale]);
             }
         }
-        Some(Layer::Overlay { space: local, swapchain, pose: crate::pose(orientation, position), size: Extent2Df { width: width * scale, height: height * scale } })
+        Some(Layer::Overlay { space: local, swapchain, pose: Posef::new(orientation, position), size: Extent2Df { width: width * scale, height: height * scale } })
     }
 }
 
@@ -192,7 +215,7 @@ impl HandPanel<'_> {
     /// [`LEAST_HEIGHT`] tall, [`WIDEST`] at most.
     pub fn shown_size(&self) -> (f32, f32) {
         let aspect = self.size.0 as f32 / self.size.1.max(1) as f32;
-        let width = if self.size.0 == 0 { self.width } else { self.width.max(LEAST_HEIGHT * aspect).min(WIDEST) };
+        let width = if self.size.0 == 0 { self.place.width } else { self.place.width.max(LEAST_HEIGHT * aspect).min(WIDEST) };
         (width, width / aspect.max(0.01))
     }
 }
@@ -209,104 +232,5 @@ fn facing_up(head_up: Vec3, facing: f32) -> Quat {
     from_axes(right, up, [facing, 0.0, 0.0])
 }
 
-fn conjugate([x, y, z, w]: Quat) -> Quat {
-    [-x, -y, -z, w]
-}
-
-/// `a * b`: the rotation applying `b` first, then `a` (Hamilton product).
-fn multiply(a: Quat, b: Quat) -> Quat {
-    [
-        a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
-        a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
-        a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
-        a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2],
-    ]
-}
-
-fn add(a: Vec3, b: Vec3) -> Vec3 {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn sub(a: Vec3, b: Vec3) -> Vec3 {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-/// The rotation taking x, y and z to the orthonormal axes `x`, `y`, `z` (right-handed).
-fn from_axes(x: Vec3, y: Vec3, z: Vec3) -> Quat {
-    // Rows of the matrix whose columns are the axes.
-    let m = [[x[0], y[0], z[0]], [x[1], y[1], z[1]], [x[2], y[2], z[2]]];
-    let trace = m[0][0] + m[1][1] + m[2][2];
-    if trace > 0.0 {
-        let s = (trace + 1.0).sqrt() * 2.0;
-        [(m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s, 0.25 * s]
-    } else if m[0][0] > m[1][1] && m[0][0] > m[2][2] {
-        let s = (1.0 + m[0][0] - m[1][1] - m[2][2]).sqrt() * 2.0;
-        [0.25 * s, (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s, (m[2][1] - m[1][2]) / s]
-    } else if m[1][1] > m[2][2] {
-        let s = (1.0 + m[1][1] - m[0][0] - m[2][2]).sqrt() * 2.0;
-        [(m[0][1] + m[1][0]) / s, 0.25 * s, (m[1][2] + m[2][1]) / s, (m[0][2] - m[2][0]) / s]
-    } else {
-        let s = (1.0 + m[2][2] - m[0][0] - m[1][1]).sqrt() * 2.0;
-        [(m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, 0.25 * s, (m[1][0] - m[0][1]) / s]
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use monaka_core::math::rotate;
-
-    fn close(a: [f32; 3], b: [f32; 3]) -> bool {
-        a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
-    }
-
-    #[test]
-    fn the_panel_lies_on_the_back_of_the_right_hand_top_toward_the_head_up() {
-        // The head's up along the knuckles: the top goes there, the right toward the little finger.
-        let q = facing_up([0.3, 0.0, -0.9], 1.0);
-        assert!(close(rotate(q, [0.0, 0.0, 1.0]), [1.0, 0.0, 0.0]), "faces out of the back of the hand");
-        assert!(close(rotate(q, [0.0, 1.0, 0.0]), [0.0, 0.0, -1.0]), "its top toward the knuckles");
-        assert!(close(rotate(q, [1.0, 0.0, 0.0]), [0.0, -1.0, 0.0]), "its right toward the little finger");
-        // Thumb up (the head's up toward the thumb): the top goes there, the right toward the fingers.
-        let q = facing_up([0.0, 2.0, 0.0], 1.0);
-        assert!(close(rotate(q, [0.0, 1.0, 0.0]), [0.0, 1.0, 0.0]));
-        assert!(close(rotate(q, [1.0, 0.0, 0.0]), [0.0, 0.0, -1.0]));
-        assert!(close(rotate(q, [0.0, 0.0, 1.0]), [1.0, 0.0, 0.0]));
-        // The head's up straight out of the back of the hand: toward the knuckles.
-        assert!(close(rotate(facing_up([1.0, 0.05, 0.0], 1.0), [0.0, 1.0, 0.0]), [0.0, 0.0, -1.0]));
-    }
-
-    #[test]
-    fn the_left_hand_mirrors_its_sides() {
-        use monaka_core::protocol::LEFT_HAND;
-        assert_eq!(Side::BackOfHand.facing(LEFT_HAND), -1.0, "the left grip's -X leaves the back of the hand");
-        assert_eq!(Side::Palm.facing(LEFT_HAND), 1.0);
-        assert!(Side::BackOfHand.offset(LEFT_HAND)[0] < 0.0 && Side::Palm.offset(LEFT_HAND)[0] > 0.0);
-        // On the back of the left hand, knuckles up: the right side toward the thumb (+Y), unmirrored.
-        let q = facing_up([0.0, 0.0, -1.0], Side::BackOfHand.facing(LEFT_HAND));
-        assert!(close(rotate(q, [0.0, 0.0, 1.0]), [-1.0, 0.0, 0.0]));
-        assert!(close(rotate(q, [1.0, 0.0, 0.0]), [0.0, 1.0, 0.0]));
-    }
-
-    #[test]
-    fn the_palm_panel_faces_out_of_the_palm_unmirrored() {
-        // Palm turned to the eyes, fingers up: the top toward the fingers, the right toward the thumb.
-        let q = facing_up([0.0, 0.0, -1.0], -1.0);
-        assert!(close(rotate(q, [0.0, 0.0, 1.0]), [-1.0, 0.0, 0.0]), "faces out of the palm");
-        assert!(close(rotate(q, [0.0, 1.0, 0.0]), [0.0, 0.0, -1.0]), "its top toward the fingers");
-        assert!(close(rotate(q, [1.0, 0.0, 0.0]), [0.0, 1.0, 0.0]), "its right toward the thumb");
-    }
-
-    #[test]
-    fn axes_round_trip_through_a_quaternion() {
-        for (x, y, z) in [
-            ([0.0, -1.0, 0.0], [0.0, 0.0, -1.0], [1.0, 0.0, 0.0]),
-            ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
-            ([0.0, 0.0, -1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]),
-            ([-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]),
-        ] {
-            let q = from_axes(x, y, z);
-            assert!(close(rotate(q, [1.0, 0.0, 0.0]), x) && close(rotate(q, [0.0, 1.0, 0.0]), y) && close(rotate(q, [0.0, 0.0, 1.0]), z), "{x:?} {y:?} {z:?}");
-        }
-    }
-}
+mod tests;

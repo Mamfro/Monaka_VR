@@ -2,9 +2,9 @@
 //! that is not along the palm (a bow held at an angle in it), the viewer reads it. Either side may
 //! create it. Every access waits at most a couple of milliseconds; a miss is not an error.
 
-use crate::shared::{Create, SharedBlock};
-use crate::{ChannelName, Error, Result};
-use monaka_core::protocol::{ReticleAim, ReticleBlock};
+use crate::shared::SharedBlock;
+use crate::{ChannelName, Result};
+use monaka_core::protocol::{Block, ReticleAim, ReticleBlock, Versioned};
 
 const WAIT_MS: u32 = 2;
 
@@ -14,17 +14,8 @@ pub struct ReticleChannel {
 
 impl ReticleChannel {
     pub fn open(channel: &ChannelName) -> Result<Self> {
-        let mut block = SharedBlock::<ReticleBlock>::create(&channel.reticles(), &channel.reticles_lock(), Create::OrOpen)?;
-        {
-            let mut record = block.lock(WAIT_MS).tolerant().ok_or(Error::Busy)?;
-            if record.is_blank() {
-                *record = ReticleBlock::fresh();
-            }
-            if !record.is_compatible() {
-                return Err(Error::Incompatible("reticle block magic or version"));
-            }
-        }
-        Ok(Self { block })
+        let (name, lock) = channel.block(Block::Reticles);
+        Ok(Self { block: SharedBlock::<ReticleBlock>::open_versioned(&name, &lock, WAIT_MS)? })
     }
 
     /// Hand `hand`'s reticle along `direction` in its palm's frame, or back on the palm (`None`).
@@ -49,19 +40,4 @@ impl ReticleChannel {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_reticle_travels_and_goes_stale() {
-        let name = ChannelName::new(format!(r"Local\monaka-test-reticles-{}", std::process::id())).unwrap();
-        let mut producer = ReticleChannel::open(&name).unwrap();
-        let mut viewer = ReticleChannel::open(&name).unwrap();
-        assert_eq!(viewer.read(0, 1000), None);
-        assert!(producer.write(0, Some([0.0, 0.3, -0.95])));
-        assert_eq!(viewer.read(0, 1000), Some([0.0, 0.3, -0.95]));
-        assert_eq!(viewer.read(1, 1000), None);
-        assert!(producer.write(0, None));
-        assert_eq!(viewer.read(0, 1000), None);
-    }
-}
+mod tests;

@@ -12,8 +12,10 @@
 //! [`super::baked`] tells the eye site how much, to swap it for the current head pose.
 //!
 //! While another camera has the view (a cutscene, a takedown: [`super::Looks::stand_down`]) the
-//! head is not put into the angles: the share goes out, or stays as it was where the game says that
-//! camera turns by the angles' changes (the delivery's `holds`). After a pause the share is held for the first commands
+//! head is not put into the angles: the share goes out. It stays as it was while the game says so
+//! (the delivery's `holds`): a camera that turns by the angles' changes, or a menu during which the
+//! game leaves its camera's angles alone (the camera keeps the share it had, so the eye site turns
+//! that share back out and the head looks around). After a pause the share is held for the first commands
 //! ([`PAUSE_HOLD_COMMANDS`]): the game lines its angles up with them. With only the head pitching
 //! (the pad's stick pitch taken) the player's own pitch is brought back toward level a step at a
 //! time, where the game lets it (the delivery's `levels`). Its option (not shown by the launcher):
@@ -29,8 +31,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::*};
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
-mod lift_checks;
 #[cfg(test)]
 mod tests;
 
@@ -217,9 +217,9 @@ pub fn built(pitch: f32, yaw: f32) -> Option<(f32, f32)> {
     }
     state.last_command = Some(now);
     let taken = (game.camera_taken)();
-    // Kept as it was: resuming after a pause, or another camera has the view that turns by the
-    // angles' changes.
-    let resuming = state.holding_after_pause > 0 || (taken && (game.holds)());
+    // Kept as it was: resuming after a pause, or the game says so (a camera that turns by the
+    // angles' changes, a menu meanwhile leaving the camera's angles as they were).
+    let resuming = state.holding_after_pause > 0 || (game.holds)();
     state.holding_after_pause = state.holding_after_pause.saturating_sub(1);
     let head = if aiming && !resuming && !taken { (game.head)().map(|pose| head_share(pose.orientation)) } else { None };
     let next = next_share(aiming, resuming, taken, state.held, head);

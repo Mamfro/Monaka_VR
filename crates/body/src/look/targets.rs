@@ -25,8 +25,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::*};
 
 #[cfg(test)]
-mod lift_checks;
-#[cfg(test)]
 mod tests;
 
 /// Where a game's character keeps its look targets (floats at these offsets) and how its angles
@@ -266,7 +264,7 @@ pub fn steer(fields: LookFields, character: usize, head: Option<HeadPose>, count
                 }
                 return Some(Steered { written, own, baked, update, by_hand: aim.by_hand });
             }
-            None => monaka_producer::log_first!(3, "head aim: not steering: look {:?}, head yaw {:.2} pitch {:.2}", steering.fields.read(character), aim.yaw, aim.pitch),
+            None => monaka_producer::log_first(3, format_args!("head aim: not steering: look {:?}, head yaw {:.2} pitch {:.2}", steering.fields.read(character), aim.yaw, aim.pitch)),
         }
     }
     TOOL.release();

@@ -1,5 +1,6 @@
 use super::*;
 use monaka_core::debug_draw::{Categories, Category};
+use std::time::Duration;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM;
 
 fn pad_with(buttons: u16) -> Gamepad {
@@ -11,7 +12,7 @@ fn step(menu: &mut HeadsetMenu<'_>, buttons: u16, start: Instant, ms: u64) -> (G
     let (mut settings, status) = (Settings::default(), Status::default());
     let mut pad = pad_with(buttons);
     let head = Some(([0.0, 0.0, 0.0, 1.0], [0.0, 1.6, 0.0]));
-    let asked = menu.pad(&mut pad, head, start + Duration::from_millis(ms), &mut settings, &status);
+    let asked = menu.pad(&mut pad, head, start + Duration::from_millis(ms), &mut settings, &status, true);
     (pad, asked)
 }
 
@@ -63,14 +64,36 @@ fn an_open_menu_moves_switches_and_closes() {
     let mut settings = Settings::default();
     let status = Status { offered: Categories(u64::MAX), ..Status::default() };
     let now = Instant::now();
-    menu.pad(&mut Gamepad { thumb_ly: -30000, ..Gamepad::default() }, None, now, &mut settings, &status);
-    menu.pad(&mut Gamepad::default(), None, now + Duration::from_millis(50), &mut settings, &status);
-    menu.pad(&mut pad_with(button::A), None, now + Duration::from_millis(100), &mut settings, &status);
+    menu.pad(&mut Gamepad { thumb_ly: -30000, ..Gamepad::default() }, None, now, &mut settings, &status, true);
+    menu.pad(&mut Gamepad::default(), None, now + Duration::from_millis(50), &mut settings, &status, true);
+    menu.pad(&mut pad_with(button::A), None, now + Duration::from_millis(100), &mut settings, &status, true);
     assert!(settings.wanted.has(Category::Skeleton), "down one line, then A");
-    menu.pad(&mut pad_with(button::A), None, now + Duration::from_millis(150), &mut settings, &status);
+    menu.pad(&mut pad_with(button::A), None, now + Duration::from_millis(150), &mut settings, &status, true);
     assert!(settings.wanted.has(Category::Skeleton), "A held: one press");
-    menu.pad(&mut Gamepad { right_trigger: 255, ..Gamepad::default() }, None, now + Duration::from_millis(200), &mut settings, &status);
+    menu.pad(&mut Gamepad { right_trigger: 255, ..Gamepad::default() }, None, now + Duration::from_millis(200), &mut settings, &status, true);
     assert_eq!(menu.menu.tab, 1);
-    menu.pad(&mut pad_with(button::B), None, now + Duration::from_millis(250), &mut settings, &status);
+    menu.pad(&mut pad_with(button::B), None, now + Duration::from_millis(250), &mut settings, &status, true);
     assert!(!menu.open());
+}
+
+#[test]
+fn lb_rb_step_the_row_and_a_panel_driven_gets_the_presses() {
+    let mut menu = HeadsetMenu::new(DXGI_FORMAT_R8G8B8A8_UNORM);
+    let (mut settings, status) = (Settings::default(), Status::default());
+    let now = Instant::now();
+    menu.menu.open = true;
+    let asked = menu.pad(&mut pad_with(button::RIGHT_SHOULDER), None, now, &mut settings, &status, true);
+    assert_eq!(asked.focus_step, 1);
+    let asked = menu.pad(&mut pad_with(button::RIGHT_SHOULDER), None, now + Duration::from_millis(50), &mut settings, &status, true);
+    assert_eq!(asked.focus_step, 0, "held: no new step");
+    let asked = menu.pad(&mut pad_with(button::RIGHT_SHOULDER | button::LEFT_SHOULDER), None, now + Duration::from_millis(75), &mut settings, &status, true);
+    assert_eq!(asked.focus_step, -1, "LB: back a step");
+    menu.pad(&mut Gamepad::default(), None, now + Duration::from_millis(100), &mut settings, &status, false);
+    // A panel driven: the D-pad and A go to it, B still closes the menu.
+    let asked = menu.pad(&mut pad_with(button::DPAD_DOWN | button::A), None, now + Duration::from_millis(150), &mut settings, &status, false);
+    assert_eq!(asked.panel_presses, vec![Press::Down, Press::Switch]);
+    let asked = menu.pad(&mut Gamepad { thumb_ry: 30000, ..Gamepad::default() }, None, now + Duration::from_millis(200), &mut settings, &status, false);
+    assert_eq!(asked.scroll, SCROLL_LINES, "the right stick scrolls up");
+    menu.pad(&mut pad_with(button::B), None, now + Duration::from_millis(250), &mut settings, &status, false);
+    assert!(!menu.open(), "B closes whatever the pad drives");
 }

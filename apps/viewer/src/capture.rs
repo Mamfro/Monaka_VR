@@ -40,6 +40,23 @@ pub struct Capture {
     lines: Vec<String>,
 }
 
+/// Asks `capture` (none without a folder) for a capture of the next pairs, saying why when it
+/// cannot start. Whether it started.
+pub fn start(capture: Option<&mut Capture>) -> bool {
+    match capture.map(Capture::start) {
+        Some(started) => {
+            if !started {
+                println!("Capture: the last one is still being saved");
+            }
+            started
+        }
+        None => {
+            println!("Capture: no folder to save to (--captures)");
+            false
+        }
+    }
+}
+
 impl Capture {
     /// Captures go into `folder` (made when the first is asked for).
     pub fn new(folder: PathBuf) -> Self {

@@ -252,6 +252,4 @@ pub trait Throws: Game {
 }
 
 #[cfg(test)]
-mod lift_checks;
-#[cfg(test)]
 mod tests;

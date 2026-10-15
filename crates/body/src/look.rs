@@ -69,9 +69,10 @@ pub enum Delivery<G: Game> {
     /// command is built ([`command::built`]); `head`: the head pose now; `levels`: whether the
     /// player's own pitch may be kept level while only the head pitches it, asked as steering
     /// starts (a game that levels only with its own pad on says whether it is). Another camera has
-    /// the view while [`Looks::stand_down`] says so; `holds`: whether, meanwhile, the share stays
-    /// in the angles as it was (a camera that turns by the angles' changes, a mounted gun, would
-    /// take the share going out as a turn), else it goes out.
+    /// the view while [`Looks::stand_down`] says so, and the share then goes out; `holds`: whether
+    /// the share stays in the angles as it was now (a camera that turns by the angles' changes, a
+    /// mounted gun, would take the share going out as a turn; a menu during which the game leaves
+    /// its camera's angles alone keeps the share they had).
     Command { head: fn() -> Option<HeadPose>, levels: fn() -> bool, holds: fn() -> bool },
     /// The head's turn sent as mouse counts, the game kept on its pad where it says how
     /// ([`mouse::on_build`] at each view build).

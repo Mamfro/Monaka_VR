@@ -282,6 +282,27 @@ pub fn plausible_object(address: usize, methods: usize) -> bool {
         && (0..methods).all(|i| mem::read::<usize>(table + size_of::<usize>() * i).is_some_and(|method| Module::containing(method).is_some()))
 }
 
+/// An object in game memory as it was seen: its address and its vtable then (none for one without a
+/// plausible vtable), so a value saved from it is written back only while it is still that object
+/// and not another at the same address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Seen {
+    pub address: usize,
+    vtable: Option<usize>,
+}
+
+impl Seen {
+    /// The object at `address` as it is now.
+    pub fn now(address: usize) -> Self {
+        Self { address, vtable: plausible_object(address, 1).then(|| mem::read::<usize>(address)).flatten() }
+    }
+
+    /// Whether it is still the object seen: its vtable unchanged (one without a vtable is taken to be).
+    pub fn still_there(&self) -> bool {
+        self.vtable.is_none_or(|v| mem::read::<usize>(self.address) == Some(v))
+    }
+}
+
 /// File name of the process's executable.
 pub fn host_name() -> String {
     let mut buffer = vec![0u16; 32768];
@@ -292,28 +313,4 @@ pub fn host_name() -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn finds_system_modules() {
-        let kernel = Module::find("kernel32.dll").expect("kernel32 is loaded");
-        let export = kernel.export("GetTickCount64").expect("exported");
-        assert!(kernel.contains(export) || Module::containing(export).is_some());
-        assert_eq!(Module::containing(kernel.base() + 0x1000), Some(kernel));
-        assert!(kernel.file_sha256().is_some_and(|h| h.len() == 64));
-        assert!(Module::find("no-such-module.dll").is_none());
-        assert!(!host_name().is_empty());
-        // The code scanner reads x64 images only (it needs their function table).
-        if cfg!(not(target_arch = "x86_64")) {
-            return;
-        }
-        // SAFETY: kernel32 stays loaded for the whole process.
-        let code = unsafe { kernel.code() }.expect("kernel32's sections are readable");
-        let file = std::fs::read(kernel.path().unwrap()).unwrap();
-        let on_disk = Code::from_file(&file).unwrap();
-        assert_eq!(code.chunk_count(), on_disk.chunk_count(), "the loaded image lists the same functions as the file");
-        let (first, _, _) = code.all_pieces().next().unwrap();
-        assert_eq!(code.function(first), Some(first));
-    }
-}
+mod tests;

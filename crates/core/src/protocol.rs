@@ -1,8 +1,7 @@
 //! Records exchanged through named shared memory between the game producers and the viewer.
 //!
-//! These layouts are a contract between producers and the viewer, which are built apart (and
-//! were first shared with C++ producers): field order, sizes and offsets must match MSVC x64
-//! exactly, and the tests at the bottom pin them. Changing a record means bumping its version on
+//! These layouts are a contract between producers and the viewer, which are built apart: field
+//! order, sizes and offsets are `repr(C)` under MSVC x64, and the tests at the bottom pin them. Changing a record means bumping its version on
 //! both sides.
 //!
 //! One channel name (for example `Local\monaka-<run>`) owns a family of named objects; see
@@ -121,17 +120,22 @@ impl PoseBlock {
         }
     }
 
-    /// A block nobody has initialised yet (shared memory starts zeroed).
-    pub fn is_blank(&self) -> bool {
-        self.magic == 0
-    }
-
-    pub fn is_compatible(&self) -> bool {
-        self.magic == POSE_MAGIC && self.version == POSE_VERSION
-    }
-
     pub fn pair_slot(sequence: u64) -> usize {
         (sequence % POSE_PAIR_SLOTS as u64) as usize
+    }
+}
+
+impl Versioned for PoseBlock {
+    const MAGIC: u32 = POSE_MAGIC;
+    const VERSION: u32 = POSE_VERSION;
+    const WHAT: &'static str = "head pose block";
+
+    fn stamp(&self) -> Stamp {
+        Stamp { magic: self.magic, version: self.version }
+    }
+
+    fn start(&mut self) {
+        *self = Self::fresh();
     }
 }
 
@@ -206,13 +210,19 @@ impl ReticleBlock {
     pub fn fresh() -> Self {
         Self { magic: RETICLES_MAGIC, version: RETICLES_VERSION, aims: [ReticleAim::default(); 2] }
     }
+}
 
-    pub fn is_blank(&self) -> bool {
-        self.magic == 0
+impl Versioned for ReticleBlock {
+    const MAGIC: u32 = RETICLES_MAGIC;
+    const VERSION: u32 = RETICLES_VERSION;
+    const WHAT: &'static str = "reticle block";
+
+    fn stamp(&self) -> Stamp {
+        Stamp { magic: self.magic, version: self.version }
     }
 
-    pub fn is_compatible(&self) -> bool {
-        self.magic == RETICLES_MAGIC && self.version == RETICLES_VERSION
+    fn start(&mut self) {
+        *self = Self::fresh();
     }
 }
 
@@ -243,20 +253,25 @@ impl FingerBlock {
     pub fn fresh() -> Self {
         Self { magic: FINGERS_MAGIC, version: FINGERS_VERSION, hands: [FingerPose::default(); 2] }
     }
+}
 
-    pub fn is_blank(&self) -> bool {
-        self.magic == 0
+impl Versioned for FingerBlock {
+    const MAGIC: u32 = FINGERS_MAGIC;
+    const VERSION: u32 = FINGERS_VERSION;
+    const WHAT: &'static str = "finger block";
+
+    fn stamp(&self) -> Stamp {
+        Stamp { magic: self.magic, version: self.version }
     }
 
-    pub fn is_compatible(&self) -> bool {
-        self.magic == FINGERS_MAGIC && self.version == FINGERS_VERSION
+    fn start(&mut self) {
+        *self = Self::fresh();
     }
 }
 
-/// The hand block beside a stereo channel (Rust only; the C++ producers never open it). The
-/// viewer writes both hands every frame it can locate them: the aim poses in `hands`, the grip
-/// poses in `grips` (version 2), and the controllers' buttons, triggers and sticks as one
-/// gamepad in `pad` (version 3).
+/// The hand block beside a stereo channel. The viewer writes both hands every frame it can locate
+/// them: the aim poses in `hands`, the grip poses in `grips` (version 2), and the controllers'
+/// buttons, triggers and sticks as one gamepad in `pad` (version 3).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HandBlock {
@@ -281,40 +296,80 @@ impl HandBlock {
     pub fn fresh() -> Self {
         Self { magic: HANDS_MAGIC, version: HANDS_VERSION, hands: [HandPose::default(); 2], grips: [HandPose::default(); 2], pad: PadState::default() }
     }
+}
 
-    pub fn is_blank(&self) -> bool {
-        self.magic == 0
+impl Versioned for HandBlock {
+    const MAGIC: u32 = HANDS_MAGIC;
+    const VERSION: u32 = HANDS_VERSION;
+    const WHAT: &'static str = "hand block";
+
+    fn stamp(&self) -> Stamp {
+        Stamp { magic: self.magic, version: self.version }
     }
 
-    pub fn is_compatible(&self) -> bool {
-        self.magic == HANDS_MAGIC && self.version == HANDS_VERSION
+    fn start(&mut self) {
+        *self = Self::fresh();
     }
 }
 
-pub const KEYED_MAGIC: u32 = 0x4756_4c44;
-pub const KEYED_VERSION: u32 = 1;
-/// Keyed-mutex key meaning "the writer may fill the pair".
-pub const KEY_FREE: u64 = 0;
-/// Keyed-mutex key meaning "an unread pair is waiting".
-pub const KEY_UNREAD: u64 = 1;
-
-/// Header of the D3D11 keyed-mutex stereo channel (one D3D11 producer, one D3D11 reader). The
-/// two eye textures are named NT handles beside it.
+/// The first eight bytes of every channel header and block: which record it is and which layout.
+/// Read alone, it tells a record of another layout from no record at all, whatever that layout's
+/// size.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct KeyedHeader {
+pub struct Stamp {
     pub magic: u32,
     pub version: u32,
-    pub width: u32,
-    pub height: u32,
-    pub adapter: Luid,
-    pub sequence: u64,
-    pub tick: u64,
 }
 
-impl KeyedHeader {
-    pub fn is_valid(&self) -> bool {
-        self.magic == KEYED_MAGIC && self.version == KEYED_VERSION && dimensions_ok(self.width, self.height)
+/// A shared-memory record that starts with its [`Stamp`]: which record it is and which layout.
+pub trait Versioned: Copy {
+    const MAGIC: u32;
+    const VERSION: u32;
+    /// What it is, for a version mismatch ("finger block").
+    const WHAT: &'static str;
+
+    /// Its stamp as written.
+    fn stamp(&self) -> Stamp;
+
+    /// Makes a blank record (all zeros, as a new mapping is) a fresh one, in place.
+    fn start(&mut self);
+
+    /// All zeros: nobody has written it yet.
+    fn is_blank(&self) -> bool {
+        self.stamp().magic == 0
+    }
+
+    /// Written in this protocol's layout.
+    fn is_compatible(&self) -> bool {
+        self.stamp() == Stamp { magic: Self::MAGIC, version: Self::VERSION }
+    }
+}
+
+/// A record whose kind this side knows but whose layout it does not: the game pack and this
+/// Monaka were built against different protocol versions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mismatch {
+    pub what: &'static str,
+    pub found: u32,
+    pub expected: u32,
+}
+
+impl Mismatch {
+    /// The mismatch `stamp` shows for a record of `magic` at `version`, if it is that record at
+    /// another version (no record, or another kind of record, is no mismatch).
+    pub fn of(stamp: Stamp, what: &'static str, magic: u32, version: u32) -> Option<Self> {
+        (stamp.magic == magic && stamp.version != version).then_some(Self { what, found: stamp.version, expected: version })
+    }
+}
+
+impl core::fmt::Display for Mismatch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "the game's {} is version {}, this Monaka reads version {}: the game pack was built for a different Monaka (update the pack or Monaka)",
+            self.what, self.found, self.expected
+        )
     }
 }
 
@@ -383,7 +438,7 @@ pub struct FenceDepth {
     pub slots: [DepthSlot; FENCE_SLOTS],
 }
 
-/// Header of the D3D12-to-D3D11 fence stereo channel: [`FENCE_SLOTS`] slots of paired eye textures
+/// Header of the fence stereo channel (a D3D12 or D3D11 producer, a D3D11 reader): [`FENCE_SLOTS`] slots of paired eye textures
 /// and two shared fences. Handle values are valid in the producer process; the reader duplicates
 /// them.
 #[repr(C)]
@@ -427,10 +482,13 @@ pub fn dimensions_ok(width: u32, height: u32) -> bool {
 
 /// `DXGI_FORMAT` values the channels use, so this crate needs no Windows bindings.
 pub mod dxgi_format {
+    pub const R10G10B10A2_TYPELESS: u32 = 23;
     pub const R10G10B10A2_UNORM: u32 = 24;
+    pub const R8G8B8A8_TYPELESS: u32 = 27;
     pub const R8G8B8A8_UNORM: u32 = 28;
     pub const R8G8B8A8_UNORM_SRGB: u32 = 29;
     pub const B8G8R8A8_UNORM: u32 = 87;
+    pub const B8G8R8A8_TYPELESS: u32 = 90;
     pub const B8G8R8A8_UNORM_SRGB: u32 = 91;
     pub const R32G8X24_TYPELESS: u32 = 19;
     pub const D32_FLOAT_S8X24_UINT: u32 = 20;
@@ -444,10 +502,22 @@ pub mod dxgi_format {
     pub const R16_UNORM: u32 = 56;
 }
 
-/// Formats a D3D12 producer may publish through the fence channel (the game's back buffer format).
+/// Formats a producer may publish through the fence channel (the game's back buffer format).
 pub fn fence_format_ok(format: u32) -> bool {
     use dxgi_format::*;
     matches!(format, R8G8B8A8_UNORM | B8G8R8A8_UNORM | R10G10B10A2_UNORM)
+}
+
+/// The fence channel format that carries images of `format`: its family's plain UNORM member, so
+/// typeless and sRGB images are copied in as stored. `None`: a family the channel does not carry.
+pub fn fence_format_of(format: u32) -> Option<u32> {
+    use dxgi_format::*;
+    match format {
+        R8G8B8A8_TYPELESS | R8G8B8A8_UNORM | R8G8B8A8_UNORM_SRGB => Some(R8G8B8A8_UNORM),
+        B8G8R8A8_TYPELESS | B8G8R8A8_UNORM | B8G8R8A8_UNORM_SRGB => Some(B8G8R8A8_UNORM),
+        R10G10B10A2_TYPELESS | R10G10B10A2_UNORM => Some(R10G10B10A2_UNORM),
+        _ => None,
+    }
 }
 
 /// The typeless format of the fence channel's depth textures for a game depth texture of `format`:
@@ -500,52 +570,6 @@ impl ChannelName {
         Self::new(format!("{}-panel-{piece}", self.0))
     }
 
-    /// Named NT handle of one eye texture (keyed-mutex channel).
-    pub fn eye_texture(&self, eye: usize) -> String {
-        format!("{}-{}", self.0, if eye == 0 { "left" } else { "right" })
-    }
-
-    pub fn pose(&self) -> String {
-        format!("{}-pose", self.0)
-    }
-
-    pub fn pose_lock(&self) -> String {
-        format!("{}-pose-lock", self.0)
-    }
-
-    pub fn hands(&self) -> String {
-        format!("{}-hands", self.0)
-    }
-
-    pub fn hands_lock(&self) -> String {
-        format!("{}-hands-lock", self.0)
-    }
-
-    pub fn fingers(&self) -> String {
-        format!("{}-fingers", self.0)
-    }
-
-    pub fn fingers_lock(&self) -> String {
-        format!("{}-fingers-lock", self.0)
-    }
-
-    pub fn reticles(&self) -> String {
-        format!("{}-reticles", self.0)
-    }
-
-    pub fn reticles_lock(&self) -> String {
-        format!("{}-reticles-lock", self.0)
-    }
-
-    /// The debug block ([`crate::debug_draw::DebugBlock`]).
-    pub fn debug(&self) -> String {
-        format!("{}-debug", self.0)
-    }
-
-    pub fn debug_lock(&self) -> String {
-        format!("{}-debug-lock", self.0)
-    }
-
     /// The game's depth shared for the debug views ([`crate::debug_draw::DebugDepth`]).
     pub fn debug_depth(&self) -> String {
         format!("{}-debug-depth", self.0)
@@ -556,189 +580,48 @@ impl ChannelName {
         format!("{}-debug-target", self.0)
     }
 
+    /// Block `block`'s mapping (`<channel>-<block>`) and the mutex guarding it (`...-lock`).
+    pub fn block(&self, block: Block) -> (String, String) {
+        let name = format!("{}-{}", self.0, block.suffix());
+        let lock = format!("{name}-lock");
+        (name, lock)
+    }
+}
+
+/// A channel's shared-memory blocks besides its stereo header, each beside the channel's name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Block {
+    /// Head poses in, rendered-pair poses out ([`PoseBlock`]).
+    Pose,
+    Hands,
+    Fingers,
+    Reticles,
+    /// The debug block ([`crate::debug_draw::DebugBlock`]).
+    Debug,
     /// The game page ([`crate::page::PageBlock`]).
-    pub fn page(&self) -> String {
-        format!("{}-page", self.0)
-    }
-
-    pub fn page_lock(&self) -> String {
-        format!("{}-page-lock", self.0)
-    }
-
-    pub fn console(&self) -> String {
-        format!("{}-console", self.0)
-    }
-
-    pub fn console_lock(&self) -> String {
-        format!("{}-console-lock", self.0)
-    }
-
+    Page,
+    Console,
     /// The viewer's own console (the 2D window's command line), beside the producer's.
-    pub fn view_console(&self) -> String {
-        format!("{}-view-console", self.0)
-    }
+    ViewConsole,
+    /// The HUD pieces the producer puts on the hands ([`crate::panels::PanelsBlock`]).
+    Panels,
+}
 
-    pub fn view_console_lock(&self) -> String {
-        format!("{}-view-console-lock", self.0)
+impl Block {
+    const fn suffix(self) -> &'static str {
+        match self {
+            Block::Pose => "pose",
+            Block::Hands => "hands",
+            Block::Fingers => "fingers",
+            Block::Reticles => "reticles",
+            Block::Debug => "debug",
+            Block::Page => "page",
+            Block::Console => "console",
+            Block::ViewConsole => "view-console",
+            Block::Panels => "panels",
+        }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use core::mem::{align_of, offset_of, size_of};
-
-    // The C++ headers' sizes and offsets under MSVC x64 (sizeof/offsetof).
-    #[test]
-    fn eye_gaze_matches_cpp() {
-        assert_eq!(size_of::<EyeGaze>(), 48);
-        assert_eq!(align_of::<EyeGaze>(), 8);
-        assert_eq!(offset_of!(EyeGaze, sample_time), 24);
-        assert_eq!(offset_of!(EyeGaze, received_tick), 32);
-        assert_eq!(offset_of!(EyeGaze, valid), 40);
-    }
-
-    #[test]
-    fn head_pose_matches_cpp() {
-        assert_eq!(size_of::<HeadPose>(), 120);
-        assert_eq!(offset_of!(HeadPose, ipd), 28);
-        assert_eq!(offset_of!(HeadPose, fov), 32);
-        assert_eq!(offset_of!(HeadPose, valid), 64);
-        assert_eq!(offset_of!(HeadPose, gaze), 72);
-        assert_eq!(size_of::<RenderedPair>(), 248);
-        assert_eq!(offset_of!(RenderedPair, eyes), 8);
-    }
-
-    #[test]
-    fn pose_block_matches_cpp() {
-        assert_eq!(size_of::<PoseBlock>(), 4096);
-        assert_eq!(offset_of!(PoseBlock, head), 8);
-        assert_eq!(offset_of!(PoseBlock, pairs), 128);
-    }
-
-    #[test]
-    fn synthetic_pose_and_ipd() {
-        let fov = [[-0.9, 0.8, 0.8, -0.9]; 2];
-        let pose = HeadPose::synthetic(30.0, 0.0, fov, 0.064);
-        assert!((crate::math::yaw(pose.orientation) - 30f32.to_radians()).abs() < 1e-5);
-        let (yaw, pitch) = crate::camera::head_yaw_pitch(HeadPose::synthetic(30.0, 20.0, fov, 0.064).orientation);
-        assert!((yaw - 30f32.to_radians()).abs() < 1e-5 && (pitch - 20f32.to_radians()).abs() < 1e-5);
-        assert_eq!(pose.ipd_or(0.07), 0.064);
-        assert_eq!(HeadPose { ipd: 0.2, ..pose }.ipd_or(0.07), 0.07);
-        assert_eq!(HeadPose { valid: 0, ..pose }.ipd_or(0.07), 0.07);
-    }
-
-    #[test]
-    fn finger_block_layout() {
-        assert_eq!(size_of::<FingerPose>(), 96);
-        assert_eq!(offset_of!(FingerPose, fingers), 16);
-        assert_eq!(size_of::<FingerBlock>(), 200);
-        assert_eq!(offset_of!(FingerBlock, hands), 8);
-        assert!(FingerBlock::fresh().is_compatible() && !FingerBlock::fresh().is_blank());
-    }
-
-    #[test]
-    fn hand_block_layout() {
-        assert_eq!(size_of::<HandPose>(), 40);
-        assert_eq!(offset_of!(HandPose, received_tick), 32);
-        assert_eq!(size_of::<HandBlock>(), 192);
-        assert_eq!(offset_of!(HandBlock, hands), 8);
-        assert_eq!(offset_of!(HandBlock, grips), 88);
-        assert_eq!(offset_of!(HandBlock, pad), 168);
-        assert_eq!(size_of::<PadState>(), 24);
-        assert!(HandBlock::fresh().is_compatible() && !HandBlock::fresh().is_blank());
-    }
-
-    #[test]
-    fn keyed_header_matches_cpp() {
-        assert_eq!(size_of::<KeyedHeader>(), 40);
-        assert_eq!(offset_of!(KeyedHeader, adapter), 16);
-        assert_eq!(offset_of!(KeyedHeader, sequence), 24);
-        assert_eq!(offset_of!(KeyedHeader, tick), 32);
-    }
-
-    /// Version 3's layout: version 2's 240 bytes, then the depth part (version 1, the C++
-    /// producer's, was 128 bytes with three slots; older channels are refused by the version check).
-    #[test]
-    fn fence_header_layout() {
-        assert_eq!(size_of::<FenceHeader>(), 616);
-        assert_eq!(offset_of!(FenceHeader, adapter), 24);
-        assert_eq!(offset_of!(FenceHeader, textures), 32);
-        assert_eq!(offset_of!(FenceHeader, produced), 112);
-        assert_eq!(offset_of!(FenceHeader, consumed), 120);
-        assert_eq!(offset_of!(FenceHeader, sequence), 128);
-        assert_eq!(offset_of!(FenceHeader, tick), 136);
-        assert_eq!(offset_of!(FenceHeader, latest_slot), 144);
-        assert_eq!(offset_of!(FenceHeader, reader_slot), 148);
-        assert_eq!(offset_of!(FenceHeader, reader_claim), 152);
-        assert_eq!(offset_of!(FenceHeader, slot_sequences), 160);
-        assert_eq!(offset_of!(FenceHeader, slot_ticks), 200);
-        assert_eq!(offset_of!(FenceHeader, depth), 240);
-        assert_eq!(size_of::<FenceDepth>(), 376);
-        assert_eq!(offset_of!(FenceDepth, textures), 16);
-        assert_eq!(offset_of!(FenceDepth, slots), 96);
-        assert_eq!(size_of::<DepthSlot>(), 56);
-        assert_eq!(offset_of!(DepthSlot, params), 8);
-        assert_eq!(offset_of!(DepthSlot, rects), 24);
-        assert_eq!(size_of::<DepthParams>(), 16);
-        assert_eq!(offset_of!(DepthParams, reversed), 8);
-    }
-
-    #[test]
-    fn depth_params_give_the_distances_at_0_and_1() {
-        let standard = DepthParams::new(0.1, 1000.0, false);
-        assert!(standard.is_valid());
-        assert_eq!(standard.distances_at_0_and_1(), (0.1, 1000.0));
-        // Reversed depth is 1 at the near plane: the far plane is at 0, even when infinite.
-        let reversed = DepthParams::new(0.05, f32::INFINITY, true);
-        assert!(reversed.is_valid());
-        assert_eq!(reversed.distances_at_0_and_1(), (f32::INFINITY, 0.05));
-        assert!(!DepthParams::new(0.0, 100.0, false).is_valid(), "no near plane");
-        assert!(!DepthParams::new(10.0, 1.0, false).is_valid(), "far before near");
-        assert!(!DepthParams::new(f32::NAN, 100.0, false).is_valid());
-        assert!(!DepthParams::default().is_valid(), "zeroed shared memory is no depth");
-    }
-
-    #[test]
-    fn depth_slot_formats() {
-        use dxgi_format::*;
-        for format in [D32_FLOAT, R32_TYPELESS, R32_FLOAT, D32_FLOAT_S8X24_UINT, R32G8X24_TYPELESS, R32_FLOAT_X8X24_TYPELESS] {
-            assert_eq!(depth_slot_format(format), Some(R32_TYPELESS), "{format}");
-        }
-        for format in [D16_UNORM, R16_TYPELESS, R16_UNORM] {
-            assert_eq!(depth_slot_format(format), Some(R16_TYPELESS), "{format}");
-        }
-        assert_eq!(depth_slot_format(D24_UNORM_S8_UINT), None);
-        assert_eq!(depth_slot_format(R8G8B8A8_UNORM), None);
-    }
-
-    #[test]
-    fn channel_names() {
-        let name = ChannelName::new(r"Local\monaka-1").unwrap();
-        assert_eq!(name.header_lock(), r"Local\monaka-1-lock");
-        assert_eq!(name.reader_lease(), r"Local\monaka-1-reader");
-        assert_eq!(name.eye_texture(0), r"Local\monaka-1-left");
-        assert_eq!(name.eye_texture(1), r"Local\monaka-1-right");
-        assert_eq!(name.pose(), r"Local\monaka-1-pose");
-        assert_eq!(name.pose_lock(), r"Local\monaka-1-pose-lock");
-        assert_eq!(name.hands(), r"Local\monaka-1-hands");
-        assert_eq!(name.hands_lock(), r"Local\monaka-1-hands-lock");
-        assert_eq!(name.debug(), r"Local\monaka-1-debug");
-        assert_eq!(name.debug_lock(), r"Local\monaka-1-debug-lock");
-        assert!(ChannelName::new("").is_none());
-        assert!(ChannelName::new("x".repeat(201)).is_none());
-    }
-
-    #[test]
-    fn pose_ring_wraps_by_sequence() {
-        assert_eq!(PoseBlock::pair_slot(17), 1);
-        assert_eq!(PoseBlock::pair_slot(16), 0);
-        assert!(PoseBlock::fresh().is_compatible());
-    }
-
-    #[test]
-    fn fence_formats() {
-        assert!(fence_format_ok(dxgi_format::R10G10B10A2_UNORM));
-        assert!(!fence_format_ok(dxgi_format::R8G8B8A8_UNORM_SRGB));
-    }
-}
+mod tests;

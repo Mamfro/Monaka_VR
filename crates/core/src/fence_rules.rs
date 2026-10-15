@@ -33,51 +33,31 @@ pub fn reader_take(header: &FenceHeader, seen: u64, produced_completed: u64) -> 
         .max_by_key(|&(_, sequence)| sequence)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::protocol::NO_SLOT;
+/// A submitted pair's entry in the header: which slot holds the newest pair, and its sequence and
+/// tick. The reader takes pairs by their slot marks alone, so a commit may land a publish late (the
+/// producer never waits for the header lock on the game's thread); until it lands, the previous
+/// newest pair stays protected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Commit {
+    pub slot: u32,
+    pub sequence: u64,
+    pub tick: u64,
+}
 
-    /// No pair yet: no slot is the newest or being read.
-    fn empty_header() -> FenceHeader {
-        FenceHeader { latest_slot: NO_SLOT, reader_slot: NO_SLOT, ..FenceHeader::default() }
-    }
-
-    /// A header whose slots hold these pairs, the newest being `latest`.
-    fn holding(sequences: [u64; FENCE_SLOTS]) -> FenceHeader {
-        let latest = (0..FENCE_SLOTS).max_by_key(|&s| sequences[s]).unwrap();
-        FenceHeader { slot_sequences: sequences, sequence: sequences[latest], latest_slot: latest as u32, ..empty_header() }
-    }
-
-    #[test]
-    fn first_pair_goes_to_slot_zero() {
-        assert_eq!(choose_slot(&empty_header(), 0), Some(0));
-        assert_eq!(reader_take(&empty_header(), 0, 0), None);
-    }
-
-    #[test]
-    fn the_oldest_pair_is_overwritten_never_the_newest() {
-        let h = holding([5, 6, 7, 3, 4]);
-        assert_eq!(choose_slot(&h, 0), Some(3));
-        let h = holding([5, 9, 7, 8, 6]);
-        assert_eq!(choose_slot(&h, 0), Some(0));
-    }
-
-    #[test]
-    fn skips_the_slot_being_read() {
-        let mut h = holding([5, 6, 7, 3, 4]);
-        (h.reader_slot, h.reader_claim) = (3, 3);
-        assert_eq!(choose_slot(&h, 2), Some(4));
-        // Once the reader's copy has completed, its slot is free again.
-        assert_eq!(choose_slot(&h, 3), Some(3));
-    }
-
-    #[test]
-    fn the_reader_takes_the_newest_finished_pair() {
-        // Pairs 8 and 9 are still being copied; 7 is the newest finished one.
-        let h = holding([5, 9, 7, 8, 6]);
-        assert_eq!(reader_take(&h, 4, 7), Some((2, 7)));
-        assert_eq!(reader_take(&h, 7, 7), None, "nothing newer than what was shown");
-        assert_eq!(reader_take(&h, 7, 9), Some((1, 9)));
+/// Writes `commit` into the header, unless a newer pair is committed already.
+pub fn commit(header: &mut FenceHeader, commit: Commit) {
+    if commit.sequence > header.sequence {
+        (header.latest_slot, header.sequence, header.tick) = (commit.slot, commit.sequence, commit.tick);
     }
 }
+
+/// Empties `slot` after its copy failed to be submitted: the reader never takes it (its mark no
+/// longer names a pair, whatever the slot holds now) and the producer writes it next.
+pub fn unmark(header: &mut FenceHeader, slot: u32) {
+    header.slot_sequences[slot as usize] = 0;
+    header.slot_ticks[slot as usize] = 0;
+    header.depth.slots[slot as usize] = Default::default();
+}
+
+#[cfg(test)]
+mod tests;

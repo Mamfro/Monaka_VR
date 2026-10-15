@@ -3,12 +3,13 @@
 //!
 //! A producer is a DLL named `monaka_NAME.dll` or `monaka_NAME-VERSION.dll`; it names the game
 //! executable it belongs to in its exported `MONAKA_HOST` (see `monaka_producer::producer!`; several,
-//! `;`-separated, for one engine's games), so a new game needs nothing here. The C++ producers,
-//! which do not export it, are known by name. Before a start, any other producer copy still running in
-//! the game is stopped, so two versions never hook at once. A copy is never unloaded: it stays
-//! loaded and inert after its stop.
+//! `;`-separated, for one engine's games), so a new game needs nothing here, and the pack contract it
+//! speaks in `MONAKA_CONTRACT`; a DLL without either is refused. Before a start, any other producer
+//! copy still running in the game is stopped (it answers `MonakaStatus`), so two versions never hook
+//! at once. A copy is never unloaded: it stays loaded and inert after its stop.
 
 use monaka_core::pe::{self, Image};
+use monaka_core::status::{State, code};
 use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
@@ -27,38 +28,47 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, s, w};
 
-/// The C++ producers, which do not export `MONAKA_HOST`.
-const LEGACY_HOSTS: [(&str, &str); 2] = [("dlvr_diag", "DyingLightGame.exe"), ("dlvr_dl2", "DyingLightGame_x64_rwdi.exe")];
-
-/// The producer name of a DLL file name (`monaka_NAME` of `monaka_NAME[-VERSION].dll`, or the C++
-/// producers' `dlvr_NAME`), if it is one.
+/// The producer name of a DLL file name (`monaka_NAME` of `monaka_NAME[-VERSION].dll`), if it is one.
 fn producer_name(file_name: &str) -> Option<String> {
     let lower = file_name.to_ascii_lowercase();
     let stem = lower.strip_suffix(".dll")?;
     let (name, version) = stem.split_once('-').unwrap_or((stem, ""));
-    let named = name.strip_prefix("monaka_").or_else(|| name.strip_prefix("dlvr_")).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    let named = name.strip_prefix("monaka_").is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
     let versioned = !stem.contains('-') || (!version.is_empty() && version.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
     (named && versioned).then(|| name.to_owned())
 }
 
-/// The game executable a producer DLL belongs to: its `MONAKA_HOST`, or a legacy name. A producer
-/// of a pack contract this Monaka does not run (`MONAKA_CONTRACT`: another major version, or a
-/// newer minor one) is refused: its options, channels or entry points may not be what it speaks.
+/// The game executable a producer DLL belongs to (its `MONAKA_HOST`). A DLL that does not say which
+/// pack contract it speaks (`MONAKA_CONTRACT`), or speaks one this Monaka does not run (another
+/// major version, or a newer minor one), is refused: its options, channels or entry points may not
+/// be what this Monaka expects.
 fn producer_host(file_name: &str, bytes: &[u8]) -> Result<String, Failure> {
-    let name = producer_name(file_name).ok_or("expected a producer DLL named monaka_NAME[-VERSION].dll")?;
-    if let Some(packed) = pe::file_export_u32(bytes, "MONAKA_CONTRACT").map_err(|e| format!("{file_name}: {e}"))? {
-        let contract = monaka_core::pack::Contract::from_packed(packed);
-        monaka_core::pack::CONTRACT.runs(contract).map_err(|why| format!("{file_name} cannot run: {why}"))?;
-    }
-    if let Some(host) = pe::file_export_text(bytes, "MONAKA_HOST").map_err(|e| format!("{file_name}: {e}"))? {
-        return Ok(host);
-    }
-    LEGACY_HOSTS
-        .iter()
-        .find(|(legacy, _)| *legacy == name)
-        .map(|(_, host)| (*host).to_owned())
+    producer_name(file_name).ok_or("expected a producer DLL named monaka_NAME[-VERSION].dll")?;
+    let packed = pe::file_export_u32(bytes, "MONAKA_CONTRACT")
+        .map_err(|e| format!("{file_name}: {e}"))?
+        .ok_or_else(|| format!("{file_name} is not a game pack for this Monaka (it has no MONAKA_CONTRACT export)"))?;
+    let contract = monaka_core::pack::Contract::from_packed(packed);
+    monaka_core::pack::CONTRACT.runs(contract).map_err(|why| format!("{file_name} cannot run: {why}"))?;
+    pe::file_export_text(bytes, "MONAKA_HOST")
+        .map_err(|e| format!("{file_name}: {e}"))?
         .ok_or_else(|| format!("{file_name} does not name its game (no MONAKA_HOST export)"))
 }
+
+/// What to do with another producer copy loaded in the game, from its `MonakaStatus`: stop it
+/// (running), leave it (never started, stopped or refused), or attach nothing (anything else: it
+/// is between states, failed its shutdown, or answers a value this Monaka does not know).
+fn must_stop(name: &str, status: u32) -> Result<bool, Failure> {
+    match State::from_u32(status) {
+        Some(State::Running) => Ok(true),
+        Some(State::New | State::Stopped | State::Rejected) => Ok(false),
+        Some(state) => Err(format!("the producer {name} already in the game is {state:?}; nothing new attached (restart the game)")),
+        None => Err(format!("the producer {name} already in the game reports an unknown state {status}; nothing new attached (restart the game)")),
+    }
+}
+
+/// How often a module list is asked for before giving up: Toolhelp fails now and then while the
+/// game is loading or unloading modules.
+const SNAPSHOT_TRIES: u32 = 5;
 
 type Failure = String;
 
@@ -83,12 +93,23 @@ struct RemoteModule {
     size: u32,
 }
 
+fn snapshot(pid: u32) -> Result<Handle, Failure> {
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        // SAFETY: a Toolhelp snapshot this function hands over to its owner.
+        match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid) } {
+            Ok(handle) => return Ok(Handle(handle)),
+            Err(e) if tries >= SNAPSHOT_TRIES => return Err(format!("cannot enumerate modules: {e}")),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    }
+}
+
 fn modules(pid: u32) -> Result<Vec<RemoteModule>, Failure> {
+    let snapshot = snapshot(pid)?;
     // SAFETY: Toolhelp enumeration into a local entry.
     unsafe {
-        let snapshot = Handle(
-            CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid).map_err(|e| format!("cannot enumerate modules: {e}"))?,
-        );
         let mut entry = MODULEENTRY32W { dwSize: size_of::<MODULEENTRY32W>() as u32, ..Default::default() };
         let mut found = Vec::new();
         let mut more = Module32FirstW(snapshot.0, &mut entry).is_ok();
@@ -166,20 +187,22 @@ fn stop_others(process: &Handle, pid: u32, notes: &mut Vec<String>) -> Result<()
             continue;
         }
         let status = loaded_export(process, &module, "MonakaStatus")?;
-        if status.is_none() && loaded_export(process, &module, "MonakaStop")?.is_none() {
-            continue; // named like one, but not a producer
-        }
-        if let Some(rva) = status {
-            match call(process, module.base + rva as usize, 0)? {
-                0 | 3 | 4 => continue,
-                2 => {}
-                _ => return Err("an older producer is transitioning or failed its shutdown; nothing new attached".into()),
+        let stop = loaded_export(process, &module, "MonakaStop")?;
+        let (status, stop) = match (status, stop) {
+            (None, None) => continue, // named like one, but not a producer
+            (Some(status), Some(stop)) => (status, stop),
+            _ => {
+                return Err(format!(
+                    "the producer {} already in the game cannot be stopped safely (it does not answer MonakaStatus and MonakaStop); nothing new attached (restart the game)",
+                    module.name
+                ));
             }
+        };
+        if !must_stop(&module.name, call(process, module.base + status as usize, 0)?)? {
+            continue;
         }
-        let stop = loaded_export(process, &module, "MonakaStop")?.ok_or("a loaded producer has no MonakaStop")?;
         let result = call(process, module.base + stop as usize, 0)?;
-        // A producer without MonakaStatus answers NOT_READY when it was not running.
-        if result != 0 && (status.is_some() || result != 21) {
+        if result != code::SUCCESS {
             return Err(format!("could not stop the previous producer {} (code {result}); nothing new attached", module.name));
         }
         notes.push(format!("Previous producer inactive: {}", module.name));
@@ -309,7 +332,9 @@ fn run(start: bool, pid: u32, dll: &Path, notes: &mut Vec<String>) -> Result<u32
         inject(&process, pid, &path, wow64)?;
         module = find_module(pid, &file_name)?;
     }
-    let module = module.ok_or("the DLL did not load")?;
+    // LoadLibraryW's thread exit code holds only the low half of a 64-bit module handle, so the
+    // module list is what tells whether the load worked.
+    let module = module.ok_or_else(|| format!("the game could not load {file_name}: a DLL it needs may be missing, or the game refused it"))?;
     call(&process, module.base + rva as usize, 0)
 }
 
@@ -335,27 +360,4 @@ pub fn stop(pid: u32, dll: &Path) -> Result<Outcome, String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn producers_are_recognised_by_name() {
-        assert_eq!(producer_name("monaka_dl1.dll").as_deref(), Some("monaka_dl1"));
-        assert_eq!(producer_name("MONAKA_DL1-20261005T1-ab12.dll").as_deref(), Some("monaka_dl1"));
-        assert_eq!(producer_name("monaka_some_game-v_1.dll").as_deref(), Some("monaka_some_game"));
-        assert_eq!(producer_name("monaka_dl1-.dll"), None);
-        assert_eq!(producer_name("monaka_dl1-a.b.dll"), None);
-        assert_eq!(producer_name("monaka_.dll"), None);
-        assert_eq!(producer_name("dlvr_diag.dll").as_deref(), Some("dlvr_diag"), "a C++ producer");
-        assert_eq!(producer_name("other.dll"), None);
-    }
-
-    #[test]
-    fn legacy_producers_need_no_export() {
-        let not_pe = b"MZ but not really a PE";
-        assert!(producer_host("dlvr_diag-x.dll", not_pe).is_err(), "an unreadable file is refused");
-        let kernel = std::fs::read(r"C:\Windows\System32\kernelbase.dll").unwrap();
-        assert_eq!(producer_host("dlvr_dl2-x.dll", &kernel).unwrap(), "DyingLightGame_x64_rwdi.exe");
-        assert!(producer_host("monaka_new_game.dll", &kernel).is_err(), "a new producer must export MONAKA_HOST");
-    }
-}
+mod tests;

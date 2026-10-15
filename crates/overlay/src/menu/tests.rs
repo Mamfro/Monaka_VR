@@ -97,6 +97,19 @@ fn the_stick_presses_once_then_repeats_while_held() {
     assert_eq!(stick.step(0.8, 0.0, 0.72), Some(Press::Right), "another direction presses at once");
 }
 
+#[test]
+fn the_d_pad_presses_as_the_stick_pushed_all_the_way() {
+    use monaka_core::pad::{Gamepad, button};
+    let mut stick = StickRepeat::default();
+    let pad = |buttons: u16| Gamepad { buttons, ..Gamepad::default() };
+    assert_eq!(stick.step_pad(&pad(button::DPAD_DOWN), 0.0), Some(Press::Down));
+    assert_eq!(stick.step_pad(&pad(button::DPAD_DOWN), 0.2), None, "held: repeats as the stick does");
+    assert_eq!(stick.step_pad(&pad(button::DPAD_DOWN), 0.41), Some(Press::Down));
+    assert_eq!(stick.step_pad(&pad(0), 0.5), None, "let go");
+    assert_eq!(stick.step_pad(&pad(button::DPAD_LEFT), 0.6), Some(Press::Left));
+    assert_eq!(stick.step_pad(&Gamepad { thumb_ly: 30000, ..Gamepad::default() }, 0.7), Some(Press::Up), "the stick still works");
+}
+
 fn with_page() -> Status {
     use monaka_core::page::Row;
     let rows = [Row::heading("Camera"), Row::button(10, "Use", "VP +64"), Row::text("Eye", "(1, 2, 3)"), Row::button(11, "Turn test", "")];

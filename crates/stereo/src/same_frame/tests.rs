@@ -51,12 +51,11 @@ fn a_frame_holding_both_eyes_shows_the_pose_it_was_built_from() {
 #[test]
 fn the_left_eyes_present_stays_off_the_monitor_and_lone_frames_go_flat() {
     use d3d11::{Shown, shown};
-    assert_eq!(shown(true, Some(0), true, true), Shown::Hidden);
-    assert_eq!(shown(true, Some(0), false, true), Shown::AsIs, "the game shows its left eye too");
-    assert_eq!(shown(false, Some(0), true, false), Shown::AsIs, "another swapchain's present");
-    assert_eq!(shown(true, Some(1), true, false), Shown::AsIs, "the right eye shows");
-    assert_eq!(shown(false, None, true, false), Shown::Flat);
-    assert_eq!(shown(false, None, true, true), Shown::AsIs, "between pairs");
+    assert_eq!(shown(true, Some(0), true), Shown::Hidden);
+    assert_eq!(shown(false, Some(0), false), Shown::AsIs, "another swapchain's present");
+    assert_eq!(shown(true, Some(1), false), Shown::AsIs, "the right eye shows");
+    assert_eq!(shown(false, None, false), Shown::Flat);
+    assert_eq!(shown(false, None, true), Shown::AsIs, "between pairs");
 }
 
 #[test]

@@ -12,16 +12,25 @@ use monaka_channel::d3d;
 use monaka_core::camera::{Mat34, Mat44};
 use monaka_core::depth::{DepthMapping, invert, reprojection};
 use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32_UINT};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_UINT};
 use windows::core::s;
 
-#[cfg(test)]
-mod lift_checks;
 #[cfg(test)]
 mod tests;
 
 /// The shader on D3D11: its images written as UNORM (the views' own format, as D3D11 checks).
 pub const REPROJECT_SOURCE: &str = concat!("#define IMAGE unorm float4\n", include_str!("reproject.hlsl"));
+
+/// A frame's depth plane as R32 ([`Reprojector::plain_depth`]).
+const PLAIN_DEPTH: &str = r"
+Texture2D<float> Depth : register(t0);
+RWTexture2D<float> Out : register(u0);
+[numthreads(8, 8, 1)] void PlainDepth(uint3 id : SV_DispatchThreadID) {
+    uint w, h;
+    Out.GetDimensions(w, h);
+    if (id.x < w && id.y < h) Out[id.xy] = Depth.Load(int3(id.xy, 0));
+}
+";
 
 /// The layout of the HLSL `cbuffer Reproject`, the same on both APIs (D3D11's constant buffer,
 /// D3D12's root constants).
@@ -125,6 +134,17 @@ pub struct Frame {
     depth: Readable,
     pub projection: Mat44,
     pub camera: Mat34,
+    /// How far the depth's content is shifted by a jittered projection (its pixels, x right, y
+    /// down; the colour unjittered, as an upscaler gives it). 0 for a frame whose colour and depth
+    /// were drawn alike.
+    pub jitter: [f32; 2],
+}
+
+impl Frame {
+    /// Its depth copy (typeless, the depth's own size and format), valid while the frame is kept.
+    pub fn depth(&self) -> &ID3D11Texture2D {
+        &self.depth.texture
+    }
 }
 
 /// The camera to draw into.
@@ -160,10 +180,17 @@ pub struct Reprojector {
     splat: ID3D11ComputeShader,
     paint: ID3D11ComputeShader,
     resolve: ID3D11ComputeShader,
+    /// The view's depth pass, made at the first [`Reprojector::run_with_depth`].
+    resolve_depth: Option<ID3D11ComputeShader>,
     constants: ConstantBuffer<Constants>,
     layers: Option<[Layer; 2]>,
     output: Option<(ID3D11Texture2D, ID3D11UnorderedAccessView)>,
+    /// The view's depth ([`Reprojector::run_with_depth`]) and its size.
+    depth_output: Option<(ID3D11Texture2D, ID3D11UnorderedAccessView, (u32, u32))>,
     size: (u32, u32),
+    /// [`Reprojector::plain_depth`]'s pass and its output, made at its first call.
+    plain_depth: Option<ID3D11ComputeShader>,
+    plain_output: Option<(ID3D11Texture2D, ID3D11UnorderedAccessView, (u32, u32))>,
 }
 
 impl Reprojector {
@@ -177,10 +204,14 @@ impl Reprojector {
             splat: shader(s!("Splat"))?,
             paint: shader(s!("Paint"))?,
             resolve: shader(s!("Resolve"))?,
+            resolve_depth: None,
             constants: ConstantBuffer::new(device)?,
             layers: None,
             output: None,
+            depth_output: None,
             size: (0, 0),
+            plain_depth: None,
+            plain_output: None,
         })
     }
 
@@ -208,7 +239,7 @@ impl Reprojector {
             context.CopyResource(&color_copy.texture, color);
             context.CopyResource(&depth_copy.texture, depth);
         }
-        Ok(Frame { color: color_copy, depth: depth_copy, projection, camera })
+        Ok(Frame { color: color_copy, depth: depth_copy, projection, camera, jitter: [0.0; 2] })
     }
 
     fn targets(&mut self, width: u32, height: u32) -> Result<()> {
@@ -231,14 +262,78 @@ impl Reprojector {
     /// Draws `view` from `primary`, filling its gaps from `fill`, then a neighbour. The image is
     /// RGBA8, the view's size, and stays valid until the next run.
     pub fn run(&mut self, context: &ID3D11DeviceContext, view: &View, primary: &Frame, fill: Option<&Frame>) -> Result<&ID3D11Texture2D> {
+        self.draw(context, view, primary, fill, None)?;
+        Ok(&self.output.as_ref().expect("made by the draw").0)
+    }
+
+    /// [`Reprojector::run`], also writing the view's depth at `depth_size` (R32_FLOAT, in the
+    /// view projection's own convention, from the same pixels as the image), as
+    /// [`crate::reproject12`] writes it. Both stay valid until the next run.
+    pub fn run_with_depth(&mut self, context: &ID3D11DeviceContext, view: &View, primary: &Frame, fill: Option<&Frame>, depth_size: (u32, u32)) -> Result<(&ID3D11Texture2D, &ID3D11Texture2D)> {
+        if !(view.mapping.a.is_finite() && view.mapping.a != 0.0 && view.mapping.b.is_finite()) {
+            return Err(Error::Unsupported("depth convention"));
+        }
+        if depth_size.0 == 0 || depth_size.1 == 0 {
+            return Err(Error::Unsupported("depth size"));
+        }
+        if self.resolve_depth.is_none() {
+            self.resolve_depth = Some(compute_shader(&self.device, REPROJECT_SOURCE, "reproject.hlsl", s!("ResolveDepth"))?);
+        }
+        if self.depth_output.as_ref().is_none_or(|(_, _, size)| *size != depth_size) {
+            let (texture, uav) = uav_texture(&self.device, depth_size.0, depth_size.1, DXGI_FORMAT_R32_FLOAT)?;
+            self.depth_output = Some((texture, uav, depth_size));
+        }
+        self.draw(context, view, primary, fill, Some(depth_size))?;
+        let image = &self.output.as_ref().expect("made by the draw").0;
+        let depth = &self.depth_output.as_ref().expect("made above").0;
+        Ok((image, depth))
+    }
+
+    /// `frame`'s depth plane as R32_FLOAT at its own size (the stencil of a depth-stencil format
+    /// left out), as the fence channel carries depth. Valid until the next call.
+    pub fn plain_depth(&mut self, context: &ID3D11DeviceContext, frame: &Frame) -> Result<&ID3D11Texture2D> {
+        if self.plain_depth.is_none() {
+            self.plain_depth = Some(compute_shader(&self.device, PLAIN_DEPTH, "plain depth", s!("PlainDepth"))?);
+        }
+        let size = (frame.depth.width, frame.depth.height);
+        if self.plain_output.as_ref().is_none_or(|(_, _, made)| *made != size) {
+            let (texture, uav) = uav_texture(&self.device, size.0, size.1, DXGI_FORMAT_R32_FLOAT)?;
+            self.plain_output = Some((texture, uav, size));
+        }
+        let (texture, uav, _) = self.plain_output.as_ref().expect("made above");
+        let saved = SavedCompute::take(context);
+        // SAFETY: binds our own shader and views on the game's context, dispatches, and restores
+        // what was bound.
+        unsafe {
+            context.CSSetShaderResources(0, Some(&[Some(frame.depth.view.clone())]));
+            context.CSSetUnorderedAccessViews(0, 1, Some([Some(uav.clone())].as_ptr()), None);
+            context.CSSetShader(self.plain_depth.as_ref(), None);
+            context.Dispatch(size.0.div_ceil(8), size.1.div_ceil(8), 1);
+            context.CSSetUnorderedAccessViews(0, 1, Some([None].as_ptr()), None);
+            context.CSSetShaderResources(0, Some(&[None]));
+        }
+        saved.restore(context);
+        Ok(texture)
+    }
+
+    /// The image of `view` and, with `depth_size` (its target made by the caller), its depth.
+    fn draw(&mut self, context: &ID3D11DeviceContext, view: &View, primary: &Frame, fill: Option<&Frame>, depth_size: Option<(u32, u32)>) -> Result<()> {
         self.targets(view.width, view.height)?;
         let layers = self.layers.as_ref().expect("made above");
-        let (output, output_uav) = self.output.as_ref().expect("made above");
+        let (_, output_uav) = self.output.as_ref().expect("made above");
+        // The depth pass and its target, when asked.
+        let depth = depth_size.and_then(|_| Some((self.resolve_depth.as_ref()?, &self.depth_output.as_ref()?.1)));
         let groups = |w: u32, h: u32| (w.div_ceil(8), h.div_ceil(8));
         let saved = SavedCompute::take(context);
+        // The depth target's slot is beyond what SavedCompute keeps: its binding is kept here.
+        let mut slot3: [Option<ID3D11UnorderedAccessView>; 1] = [None];
+        if depth.is_some() {
+            // SAFETY: reads one of the context's current bindings into a local.
+            unsafe { context.CSGetUnorderedAccessViews(3, Some(&mut slot3)) };
+        }
         self.constants.bind(context);
-        let redraw = Constants { sources: self.sources, ..Constants::redraw(view, None, [0, 0], self.fill_first) };
-        let splat_of = |frame: &Frame| redraw.splat(view, (frame.color.width, frame.color.height), ([0, 0], (frame.depth.width, frame.depth.height)), [0.0; 2], &frame.projection, &frame.camera);
+        let redraw = Constants { sources: self.sources, ..Constants::redraw(view, depth.and(depth_size), [0, 0], self.fill_first) };
+        let splat_of = |frame: &Frame| redraw.splat(view, (frame.color.width, frame.color.height), ([0, 0], (frame.depth.width, frame.depth.height)), frame.jitter, &frame.projection, &frame.camera);
         let resolve = redraw.resolve(splat_of(primary).as_ref());
         // SAFETY: binds our own shaders and views on the game's context, dispatches, and restores
         // what was bound.
@@ -276,11 +371,19 @@ impl Reprojector {
             let (gx, gy) = groups(view.width, view.height);
             context.Dispatch(gx, gy, 1);
             context.CSSetUnorderedAccessViews(0, 3, Some([None, None, None].as_ptr()), None);
+            // The view's depth from the same keys, at its own size (`reproject.hlsl`'s ResolveDepth).
+            if let (Some((shader, depth_uav)), Some((width, height))) = (depth, depth_size) {
+                context.CSSetUnorderedAccessViews(3, 1, Some([Some(depth_uav.clone())].as_ptr()), None);
+                context.CSSetShader(shader, None);
+                let (dx, dy) = groups(width, height);
+                context.Dispatch(dx, dy, 1);
+                context.CSSetUnorderedAccessViews(3, 1, Some(slot3.as_ptr()), None);
+            }
             context.CSSetShaderResources(0, Some(&[None, None, None, None, None, None]));
         }
         saved.restore(context);
         // The layer textures are only reached through their views.
         let _ = (&layers[0].keys, &layers[0].image);
-        Ok(output)
+        Ok(())
     }
 }

@@ -1,5 +1,5 @@
 use super::*;
-use monaka_channel::d3d::{create_device, create_texture_with, read_pixel};
+use monaka_channel::d3d::{create_device, create_texture_with, read_image, read_pixel};
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_R32_FLOAT};
 
 fn texture(device: &ID3D11Device, w: u32, h: u32, format: DXGI_FORMAT, bytes: &[u8]) -> ID3D11Texture2D {
@@ -8,7 +8,7 @@ fn texture(device: &ID3D11Device, w: u32, h: u32, format: DXGI_FORMAT, bytes: &[
 
 #[test]
 fn shaders_compile() {
-    for entry in [s!("Clear"), s!("Splat"), s!("Paint"), s!("Resolve")] {
+    for entry in [s!("Clear"), s!("Splat"), s!("Paint"), s!("Resolve"), s!("ResolveDepth")] {
         crate::compile(REPROJECT_SOURCE, "reproject.hlsl", entry).unwrap();
     }
 }
@@ -260,4 +260,77 @@ fn the_cameras_far_from_the_origin_land_where_they_do_near_it() {
         (0..w).map(|x| read_pixel(&device, &context, &image, x, 3).unwrap()).collect::<Vec<_>>()
     };
     assert_eq!(at(4000.0), at(0.0));
+}
+
+#[test]
+fn the_warped_eye_gets_its_own_depth_beside_its_image() {
+    // A box 0.5 m away in front of a wall 2 m away, warped into an eye 0.1 m to the right: the box
+    // lands 6.4 pixels left (columns 17..29), the wall 1.6. The warped eye's depth says the same at
+    // any size: the box's depth where the box landed, the wall's elsewhere (the gap right of the box
+    // takes the wall behind it), and the image is the one `run` draws.
+    let (device, context, _) = create_device(None).unwrap();
+    let mut reprojector = Reprojector::new(&device).unwrap();
+    let (w, h) = (64u32, 8u32);
+    let (n, f) = (0.1f32, 100.0f32);
+    let mut projection = [0.0f32; 16];
+    (projection[0], projection[5], projection[10], projection[11], projection[14]) = (1.0, 1.0, f / (n - f), n * f / (n - f), -1.0);
+    let at = |distance: f32| -projection[10] + projection[11] / distance;
+    let (box_columns, wall, near) = (24..36u32, [255u8, 0, 0, 255], [0u8, 0, 255, 255]);
+    let depth: Vec<u8> = (0..h).flat_map(|_| (0..w).flat_map(|x| at(if box_columns.contains(&x) { 0.5 } else { 2.0 }).to_le_bytes())).collect();
+    let depth = texture(&device, w, h, DXGI_FORMAT_R32_FLOAT, &depth);
+    let colours: Vec<u8> = (0..h).flat_map(|_| (0..w).flat_map(|x| if box_columns.contains(&x) { near } else { wall })).collect();
+    let this = texture(&device, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, &colours);
+    let camera = |x: f32| -> Mat34 { [1.0, 0.0, 0.0, x, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0] };
+    let primary = reprojector.capture(&context, &this, &depth, projection, camera(0.0), None).unwrap();
+    let mapping = DepthMapping::from_projection(&projection, n).unwrap();
+    let view = View { projection, camera: camera(0.1), mapping, width: w, height: h };
+    let drawn: Vec<[u8; 4]> = {
+        let image = reprojector.run(&context, &view, &primary, None).unwrap().clone();
+        (0..w).map(|x| read_pixel(&device, &context, &image, x, 3).unwrap()).collect()
+    };
+    let depth_at = |texture: &ID3D11Texture2D, x: u32, y: u32| {
+        let (width, _, texels) = read_image(&device, &context, texture).unwrap();
+        let i = ((y * width + x) * 4) as usize;
+        f32::from_le_bytes([texels[i], texels[i + 1], texels[i + 2], texels[i + 3]])
+    };
+    let close = |got: f32, want: f32, what: &str| assert!((got - want).abs() < 1e-4, "{what}: depth {got}, expected {want}");
+    let (image, warped_depth) = reprojector.run_with_depth(&context, &view, &primary, None, (w, h)).unwrap();
+    let (image, warped_depth) = (image.clone(), warped_depth.clone());
+    let with_depth: Vec<[u8; 4]> = (0..w).map(|x| read_pixel(&device, &context, &image, x, 3).unwrap()).collect();
+    assert_eq!(with_depth, drawn, "the image is the one run draws");
+    assert_eq!(drawn[22], near);
+    close(depth_at(&warped_depth, 22, 3), at(0.5), "the box");
+    close(depth_at(&warped_depth, 5, 3), at(2.0), "the wall");
+    close(depth_at(&warped_depth, 31, 3), at(2.0), "the gap beside the box: the wall behind it");
+    // At half the size: each depth texel takes the image pixel under its centre.
+    let (_, half) = reprojector.run_with_depth(&context, &view, &primary, None, (w / 2, h / 2)).unwrap();
+    let half = half.clone();
+    assert_eq!(d3d::texture_desc(&half).Width, w / 2);
+    close(depth_at(&half, 11, 1), at(0.5), "the box at half size (image column 23)");
+    close(depth_at(&half, 2, 1), at(2.0), "the wall at half size (image column 5)");
+}
+
+#[test]
+#[ignore = "needs a GPU"]
+fn a_depth_stencil_frame_gives_its_depth_plane_as_r32() {
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+    let (device, context, _) = create_device(None).unwrap();
+    let mut reprojector = Reprojector::new(&device).unwrap();
+    let mut desc = d3d::simple_texture_desc(16, 8, DXGI_FORMAT_D32_FLOAT_S8X24_UINT);
+    desc.BindFlags = D3D11_BIND_DEPTH_STENCIL.0 as u32;
+    let depth = d3d::create_texture(&device, &desc).unwrap();
+    let mut view = None;
+    // SAFETY: a view of our own texture into a local, and a clear through it.
+    unsafe {
+        device.CreateDepthStencilView(&depth, None, Some(&mut view)).unwrap();
+        context.ClearDepthStencilView(view.as_ref().unwrap(), (D3D11_CLEAR_DEPTH.0 | D3D11_CLEAR_STENCIL.0) as u32, 0.375, 7);
+    }
+    let color = texture(&device, 16, 8, DXGI_FORMAT_R8G8B8A8_UNORM, &[0; 16 * 8 * 4]);
+    let camera: Mat34 = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let frame = reprojector.capture(&context, &color, &depth, [0.0; 16], camera, None).unwrap();
+    let plain = reprojector.plain_depth(&context, &frame).unwrap().clone();
+    let plain_desc = d3d::texture_desc(&plain);
+    assert_eq!((plain_desc.Width, plain_desc.Height, plain_desc.Format), (16, 8, DXGI_FORMAT_R32_FLOAT));
+    let (_, _, texels) = read_image(&device, &context, &plain).unwrap();
+    assert!(texels.chunks(4).all(|t| f32::from_le_bytes(t.try_into().unwrap()) == 0.375));
 }

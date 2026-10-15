@@ -5,6 +5,7 @@
 //! viewer, with which frame each eye of a published pair was drawn in ([`EyeKeys`]), which
 //! categories the viewer wants and which the producer can draw.
 
+use crate::protocol::{Stamp, Versioned};
 use crate::camera::Mat34;
 
 #[cfg(test)]
@@ -68,11 +69,14 @@ pub enum Category {
     /// frame ([`GameReport::costs`]) and names each pair's eye frames even with nothing drawn.
     /// No item of the menu.
     Stats = 52,
+    /// Action: the game's world stands still (its characters, animations and scripted scenes)
+    /// while the player's view goes on, to look around a moment in the headset.
+    FreezeWorld = 53,
 }
 
 impl Category {
     pub const FIRST_ACTION: u16 = 48;
-    pub const ALL: [Category; 16] = [
+    pub const ALL: [Category; 17] = [
         Category::Controllers,
         Category::Skeleton,
         Category::BoneAxes,
@@ -89,6 +93,7 @@ impl Category {
         Category::Depth,
         Category::Targets,
         Category::Stats,
+        Category::FreezeWorld,
     ];
 
     pub const fn bit(self) -> u64 {
@@ -127,6 +132,7 @@ impl Category {
             Category::Depth => "depth",
             Category::Targets => "targets",
             Category::Stats => "stats",
+            Category::FreezeWorld => "freeze_world",
         }
     }
 
@@ -152,6 +158,7 @@ impl Category {
             Category::Depth => "Depth",
             Category::Targets => "Game buffers",
             Category::Stats => "Stats",
+            Category::FreezeWorld => "Freeze the world",
         }
     }
 }
@@ -528,20 +535,6 @@ impl DebugBlock {
         frames: [DebugFrame::EMPTY; DEBUG_FRAMES],
     };
 
-    pub fn is_blank(&self) -> bool {
-        self.magic == 0
-    }
-
-    pub fn is_compatible(&self) -> bool {
-        self.magic == DEBUG_MAGIC && self.version == DEBUG_VERSION
-    }
-
-    /// Makes a blank block (all zeros, as a new mapping is) a fresh one, in place.
-    pub fn start(&mut self) {
-        self.magic = DEBUG_MAGIC;
-        self.version = DEBUG_VERSION;
-    }
-
     pub const fn frame_slot(key: u64) -> usize {
         (key % DEBUG_FRAMES as u64) as usize
     }
@@ -583,6 +576,21 @@ impl DebugBlock {
 
     pub fn write_eye_keys(&mut self, sequence: u64, keys: [u64; 2]) {
         self.pairs[Self::pair_slot(sequence)] = EyeKeys { sequence, keys };
+    }
+}
+
+impl Versioned for DebugBlock {
+    const MAGIC: u32 = DEBUG_MAGIC;
+    const VERSION: u32 = DEBUG_VERSION;
+    const WHAT: &'static str = "debug block";
+
+    fn stamp(&self) -> Stamp {
+        Stamp { magic: self.magic, version: self.version }
+    }
+
+    fn start(&mut self) {
+        self.magic = DEBUG_MAGIC;
+        self.version = DEBUG_VERSION;
     }
 }
 

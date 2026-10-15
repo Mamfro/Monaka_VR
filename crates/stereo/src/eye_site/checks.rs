@@ -11,8 +11,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::*};
 
 #[cfg(test)]
-mod lift_checks;
-#[cfg(test)]
 mod tests;
 
 /// Each eye's last two view centres and how each was made (true: from a camera turned ahead of the

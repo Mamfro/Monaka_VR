@@ -16,23 +16,34 @@ pub struct Settings {
     pub values: BTreeMap<String, Values>,
     /// Monaka's own settings ([`MONAKA`]), the same for every game.
     pub monaka: Values,
+    /// Where [`Settings::save`] writes: the file they were loaded from.
+    file: Option<PathBuf>,
 }
 
+/// The player's settings file; none without `APPDATA`.
 fn file() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join(r"monaka\settings.txt"))
 }
 
 impl Settings {
+    /// The player's settings, from their file.
     pub fn load() -> Settings {
-        file().and_then(|f| std::fs::read_to_string(f).ok()).map(|t| Settings::parse(&t)).unwrap_or_default()
+        file().map(Settings::load_from).unwrap_or_default()
+    }
+
+    /// The settings kept in `file` (all defaults while it is missing), saved back there.
+    pub fn load_from(file: PathBuf) -> Settings {
+        let mut settings = std::fs::read_to_string(&file).map(|t| Settings::parse(&t)).unwrap_or_default();
+        settings.file = Some(file);
+        settings
     }
 
     pub fn save(&self) -> Result<(), String> {
-        let file = file().ok_or("APPDATA is not set")?;
+        let file = self.file.as_ref().ok_or("APPDATA is not set")?;
         if let Some(folder) = file.parent() {
             std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
         }
-        std::fs::write(&file, self.text()).map_err(|e| format!("{}: {e}", file.display()))
+        std::fs::write(file, self.text()).map_err(|e| format!("{}: {e}", file.display()))
     }
 
     /// Values for a run of `game`: its own (all defaults when none were saved) and Monaka's own
@@ -76,21 +87,4 @@ impl Settings {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn round_trips() {
-        let text = "selected=dl2\ndl2.mode=framegen\ndl1.extra=probe_rig=1 hand_hold=0,0.01,0\na pack.x=1\nremoved_pack.x=1\nmonaka.controller_smoothing=5\njunk\n";
-        let settings = Settings::parse(text);
-        assert_eq!(settings.monaka.0["controller_smoothing"], "5");
-        assert!(!settings.values.contains_key("monaka"));
-        assert_eq!(settings.values("dl1").0["controller_smoothing"], "5", "every game's run gets Monaka's own");
-        assert_eq!(settings.values("unknown").0.len(), 1);
-        assert_eq!(settings.selected.as_deref(), Some("dl2"));
-        assert_eq!(settings.values("dl1").0["extra"], "probe_rig=1 hand_hold=0,0.01,0");
-        assert!(!settings.values.contains_key("a pack"));
-        assert_eq!(settings.values("removed_pack").0["x"], "1", "kept for when the pack comes back");
-        assert_eq!(Settings::parse(&settings.text()), settings);
-    }
-}
+mod tests;

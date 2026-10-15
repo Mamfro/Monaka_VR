@@ -203,3 +203,6 @@ fn set_to(opt: &Opt, value: &str) -> String {
         (_, None) => format!("Set to {},", value_name(opt, value)),
     }
 }
+
+#[cfg(test)]
+mod tests;

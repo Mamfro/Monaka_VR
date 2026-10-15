@@ -11,7 +11,7 @@
 use monaka_channel::d3d::{copy_texture, create_device, create_texture, find_adapter, read_image, read_pixel, simple_texture_desc};
 use monaka_channel::hands::HandChannel;
 use monaka_channel::pose::PoseChannel;
-use monaka_channel::reader::{self, AnyReader};
+use monaka_channel::reader::{self, FenceReader};
 use monaka_channel::{ChannelName, tick};
 use monaka_core::bmp;
 use monaka_core::protocol::{HandPose, HeadPose, RenderedPair};
@@ -104,13 +104,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // A producer creates its channel with its first frame; wait up to ten seconds for it.
-    let producer = reader::wait_for(&name, Duration::from_secs(10)).ok_or("no producer on that channel")?;
+    let producer = reader::wait_for(&name, Duration::from_secs(10)).ok_or("no producer on that channel")?.map_err(|mismatch| mismatch.to_string())?;
     let (width, height, adapter, format) = (producer.width, producer.height, producer.adapter, DXGI_FORMAT(producer.format as i32));
-    let transport = if producer.fence { "fence" } else { "keyed" };
-    println!("{transport} channel {width}x{height} format {} adapter {}:{}", format.0, adapter.high, adapter.low);
+    println!("channel {width}x{height} format {} adapter {}:{}", format.0, adapter.high, adapter.low);
 
     let (device, context, _) = create_device(Some(&find_adapter(adapter)?))?;
-    let mut reader = AnyReader::open(&name, &device, producer.fence)?;
+    let mut reader = FenceReader::open(&name, &device)?;
     let mut poses = PoseChannel::open(&name)?;
     let head = HeadPose { valid: 1, ipd: 0.064, position: [0.0, 1.7, 0.0], fov: [LEFT_FOV, RIGHT_FOV], ..HeadPose::default() };
     // `--hand`: a right controller held out in front (0.45 m ahead, 0.2 m below the head, in view
@@ -203,9 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let Some(first) = first else { return Err("no pair arrived".into()) };
     println!("pairs read {pairs}; first sequence {}; last sequence {seen} ({} ms old)", first.sequence, tick().saturating_sub(latest_tick));
-    if let Some((busy, idle)) = reader.misses() {
-        println!("empty reads: {busy} with the header locked by the producer, {idle} with no newer finished pair");
-    }
+    println!("empty reads: {} with the header locked by the producer, {} with no newer finished pair", reader.busy, reader.idle);
     for (eye, texture) in targets.iter().enumerate() {
         let pixel = read_pixel(&device, &context, texture, width / 2, height / 2)?;
         println!("eye {eye} centre pixel bytes {pixel:02x?}");

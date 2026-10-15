@@ -10,8 +10,8 @@ fn the_menu_draws_and_redraws_only_on_change() {
     let menu = Menu { tab: 0, selected: [1, 0, 0, 0, 0, 0], open: true, paged: false };
     let settings = Settings { wanted: Categories::NONE.with(Category::Skeleton, true), view: View::Depth, ..Settings::default() };
     let status = Status { offered: Categories::NONE.with(Category::Skeleton, true).with(Category::Controllers, true), synced: true, ..Status::default() };
-    let image = panel.draw(&device, &context, &menu, &settings, &status).unwrap().expect("drawn").clone();
-    assert!(panel.draw(&device, &context, &menu, &settings, &status).unwrap().is_none(), "nothing changed");
+    let image = panel.draw(&device, &context, &menu, &settings, &status, true).unwrap().expect("drawn").clone();
+    assert!(panel.draw(&device, &context, &menu, &settings, &status, true).unwrap().is_none(), "nothing changed");
     let (width, height, pixels) = read_image(&device, &context, &image).unwrap();
     assert_eq!([width, height], PIXELS);
     let at = |x: u32, y: u32| pixels[((y * width + x) * 4 + 3) as usize];
@@ -49,7 +49,7 @@ fn the_game_page_draws() {
     rows.push(Row::text("Mouse", "0.1297 degrees per count").tone(Tone::Good));
     let status = Status { page: Page::new("Explorer", &rows), ..Status::default() };
     let menu = Menu { tab: crate::menu::PAGE_TAB, selected: [0, 0, 0, 0, 0, 14], open: true, paged: true };
-    let image = panel.draw(&device, &context, &menu, &Settings::default(), &status).unwrap().expect("drawn").clone();
+    let image = panel.draw(&device, &context, &menu, &Settings::default(), &status, false).unwrap().expect("drawn").clone();
     let (width, _, pixels) = read_image(&device, &context, &image).unwrap();
     let shades: std::collections::HashSet<u8> = pixels.chunks(4).map(|p| p[0]).collect();
     assert!(shades.len() > 20, "{} shades", shades.len());

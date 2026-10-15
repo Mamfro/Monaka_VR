@@ -7,9 +7,9 @@
 //! The lay-over of a D3D12 game's HUD layer at its present request is [`present12`], on the game's
 //! `crate::providers::HudLayer12`.
 
+pub mod d3d11;
+pub mod d3d12;
 pub mod present12;
-#[cfg(test)]
-mod lift_checks;
 
 use monaka_core::feature::Feature;
 use monaka_core::manifest::{HUD_DISTANCE, HUD_SIZE, Opt};
@@ -32,15 +32,4 @@ fn shown<G: Game>(run: &Run<'_, G>) -> On {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use monaka_core::manifest::Kind;
-
-    #[test]
-    fn a_games_size_keeps_the_distance() {
-        let [size, distance] = options(0.55);
-        assert_eq!((size.id, distance.id), ("hud_scale", "hud_distance"));
-        assert!(matches!(size.kind, Kind::Number { default, .. } if default == 0.55));
-        assert!(matches!(OPTIONS[0].kind, Kind::Number { default, .. } if default == 0.5));
-    }
-}
+mod tests;

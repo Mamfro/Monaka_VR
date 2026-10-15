@@ -13,19 +13,19 @@
 //!   [`lay_hud_beside`]); on D3D12 the layer itself ([`HudLayer12`]), for the lay-over
 //!   (`crate::hud_layer::present12`).
 //!
-//! A feature bounds its game on the providers it reads (`crate::afw12::frame_warping`,
+//! A feature bounds its game on the providers it reads (`crate::afw::d3d12::frame_warping`,
 //! `crate::depth_layer::depth_layer`, `crate::foveate12::foveation`, `crate::framegen12::per_eye`),
 //! so a game without one does not compile.
 
 use crate::driver::Pending;
-use crate::hudover12::Params;
+use crate::hud_layer::d3d12::Params;
 use monaka_core::camera::Frustum;
 use monaka_core::protocol::HeadPose;
 use monaka_core::sync::Locked;
-use monaka_framegen::ffx::{Size2, state};
+use monaka_ffx::{Size2, state};
 use monaka_framegen::ffx_imports;
 use monaka_framegen::inputs::{self, Input, Motion, Place, Rendering, Upscaled};
-use monaka_framegen::upscale::{GameDispatch, create};
+use monaka_ffx::upscale::{GameDispatch, create};
 use monaka_producer::game::{Component, Game, Lack, Start};
 use monaka_producer::log_first;
 use monaka_streamline::imports::{self, Handlers};
@@ -234,11 +234,11 @@ fn upscaled<G: FrameInputs>(dispatch: &GameDispatch) {
     let frame = match frame() {
         Ok(frame) => {
             let ((rw, rh), (ow, oh)) = (size(dispatch.render_size), size(dispatch.upscale_size));
-            log_first!(1, "frame inputs: from FSR's dispatch: {rw}x{rh} upscaled to {ow}x{oh}, near {}, far {}, context flags {:?}", dispatch.near, dispatch.far, ffx_imports::upscale_flags());
+            log_first(1, format_args!("frame inputs: from FSR's dispatch: {rw}x{rh} upscaled to {ow}x{oh}, near {}, far {}, context flags {:?}", dispatch.near, dispatch.far, ffx_imports::upscale_flags()));
             Some(frame)
         }
         Err(why) => {
-            log_first!(5, "frame inputs: an FSR frame not taken: {why}");
+            log_first(5, format_args!("frame inputs: an FSR frame not taken: {why}"));
             None
         }
     };
@@ -251,7 +251,7 @@ fn upscaled_rendering<G: FrameInputs>(dispatch: &GameDispatch, label: &Pending) 
     let place = G::upscaled_place().ok_or("no camera place")?;
     let frustum = G::frustum(&label.pose, label.eye).or_else(G::own_frustum).ok_or("no frustum")?;
     let flags = ffx_imports::upscale_flags().unwrap_or_else(|| {
-        log_first!(1, "frame inputs: FSR's depth convention is not known (its context was made before the hooks); taken as reversed and infinite");
+        log_first(1, format_args!("frame inputs: FSR's depth convention is not known (its context was made before the hooks); taken as reversed and infinite"));
         create::DEPTH_INVERTED | create::DEPTH_INFINITE
     });
     Rendering::from_dispatch(dispatch, place, &frustum, flags).ok_or("no render size or near plane")
@@ -260,11 +260,13 @@ fn upscaled_rendering<G: FrameInputs>(dispatch: &GameDispatch, label: &Pending) 
 // --- D3D11 frame inputs --------------------------------------------------------------------------
 
 /// A D3D11 game's frame inputs, for the features that work on each eye's world image at the
-/// game's scene copy (AFW, `crate::afw11::ready`; the per-eye FSR upscaler,
+/// game's scene copy (AFW, `crate::afw::d3d11::ready`; the per-eye FSR upscaler,
 /// `crate::upscaler::fsr11`). Its draws hand them each frame's world image (the scene copied to the
 /// back buffer, before the HUD) and the HUD's draws; its eye site records the cameras each frame
 /// was rendered with.
 pub trait FrameInputs11: FrameLabels {
+    /// The game's world units in a metre (each eye's depth to the headset).
+    const UNITS_PER_METRE: f32 = 1.0;
     /// The game's D3D11 device (its swapchain's), for the features' own work.
     fn device(build: &Self::Build) -> Result<windows::Win32::Graphics::Direct3D11::ID3D11Device, monaka_producer::Rejection>;
     /// The scene depth of the frame shown at present `n`, kept from its scene copy.
@@ -368,29 +370,10 @@ pub fn lay_hud_beside<G: HudLayer>(queue: &ID3D12CommandQueue, layer: &ID3D12Res
     }
 }
 
-/// `crate::hudover12`'s params for the whole frame of `size`: the HUD where the game laid it out.
+/// `crate::hud_layer::d3d12`'s params for the whole frame of `size`: the HUD where the game laid it out.
 pub fn whole_frame(size: (u32, u32)) -> Params {
     Params { rect: [0.0, 0.0, size.0 as f32, size.1 as f32], ..Default::default() }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn first(_: &ID3D12CommandQueue, _: &ID3D12Resource) {}
-    fn second(_: &ID3D12CommandQueue, _: &ID3D12Resource) {}
-    fn beside(_: &ID3D12CommandQueue, _: &ID3D12Resource, _: [Params; 2]) {}
-
-    #[test]
-    fn a_feature_joins_the_hud_once_and_leaves_it() {
-        join_hud(first, beside);
-        join_hud(first, beside);
-        join_hud(second, beside);
-        assert_eq!(BEFORE.locked().len(), 2);
-        assert_eq!(BESIDE.locked().len(), 1);
-        leave_hud(first, beside);
-        assert!(BEFORE.locked().iter().all(|&b| std::ptr::fn_addr_eq(b, second as BeforeHud)));
-        assert!(BESIDE.locked().is_empty());
-        leave_hud(second, beside);
-    }
-}
+mod tests;

@@ -5,7 +5,7 @@
 //! ([`fitting_stream`]), the count of eyes not generated ([`skip_eye`]) and the release at stop
 //! ([`free_when_idle`]). How the eyes pair up stays in each game.
 
-use crate::ffx::{self, Camera, FrameGen, Resource, Size2};
+use monaka_ffx::{self as ffx, Camera, FrameGen, Resource, Size2};
 use monaka_channel::d3d12::{self, Recorder};
 use monaka_producer::log;
 use std::sync::OnceLock;
@@ -23,21 +23,6 @@ pub fn enable(api: ffx::Api) {
 
 pub fn enabled() -> bool {
     API.get().is_some()
-}
-
-impl Camera {
-    /// This camera for a frame rendered at `size`: Streamline's motion-vector scale normalises the
-    /// vectors to the screen while frame generation wants pixels, and a far plane that is not
-    /// beyond the near one (an infinite projection) gets a finite one.
-    pub fn for_render(mut self, size: Size2) -> Self {
-        self.render_size = size;
-        self.motion_vector_scale.x *= size.width as f32;
-        self.motion_vector_scale.y *= size.height as f32;
-        if self.far <= self.near || !self.far.is_finite() {
-            self.far = 100_000.0;
-        }
-        self
-    }
 }
 
 /// One eye's frame-generation context and the texture its generated frames go to.
@@ -123,7 +108,7 @@ static EYES_SKIPPED: AtomicU64 = AtomicU64::new(0);
 /// times. Always false (not generated), to return as the eye's outcome.
 pub fn skip_eye(why: &str) -> bool {
     EYES_SKIPPED.fetch_add(1, Relaxed);
-    monaka_producer::log_first!(12, "frame generation: an eye not generated: {why}");
+    monaka_producer::log_first(12, format_args!("frame generation: an eye not generated: {why}"));
     false
 }
 

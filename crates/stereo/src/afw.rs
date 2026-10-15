@@ -4,8 +4,8 @@
 //! newest real frame, which saw it from the right place, so the gaps get rendered pixels instead of
 //! stretched ones. Nothing waits for a later frame: no latency is added.
 //!
-//! Two backends do the GPU work on it: [`crate::afw11`] on D3D11 (each frame captured at the game's
-//! scene copy, the pair published over the keyed-mutex channel) and [`crate::afw12`] on D3D12
+//! Two backends do the GPU work on it: [`crate::afw::d3d11`] on D3D11 (each frame captured at the game's
+//! scene copy, the pair published over the fence channel) and [`crate::afw::d3d12`] on D3D12
 //! (each frame warped at its present request, the pair published over the fence channel, with each
 //! eye's depth to the headset and frame generation on top). Both run the same reprojection
 //! (`monaka_warp::reproject`). What they share is here:
@@ -35,8 +35,8 @@ use monaka_warp::View;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
-#[cfg(test)]
-mod lift_checks;
+pub mod d3d11;
+pub mod d3d12;
 #[cfg(test)]
 mod tests;
 
@@ -158,8 +158,8 @@ impl Shot {
     }
 }
 
-/// The rules where the backends have differed. Each backend keeps its game's (`afw11::RULES`,
-/// `afw12::RULES`).
+/// The rules where the backends have differed. Each backend keeps its game's (`d3d11::RULES`,
+/// `d3d12::RULES`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rules {
     /// A real frame fills the other eye's gaps while it is at most this many warps old (`None`:

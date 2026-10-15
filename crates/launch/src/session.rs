@@ -215,6 +215,9 @@ const AT_START_RESTART: Duration = Duration::from_secs(30);
 
 /// After the game is gone, how long the viewer has to end by itself before it is closed.
 const GAME_GONE_GRACE: Duration = Duration::from_secs(5);
+/// When VR starts in the headset, the game's window is brought to the front at these times after
+/// the viewer starts (SteamVR may take the front as its session begins), unless it is there.
+const FOCUS_GAME_AT: [Duration; 2] = [Duration::from_millis(1000), Duration::from_millis(4000)];
 
 /// How long the viewer waits for the first frame of a game joined as it starts.
 const AT_START_PRODUCER_WAIT: Duration = Duration::from_secs(600);
@@ -545,11 +548,22 @@ fn view(
     let mut child = command.spawn().map_err(|e| format!("cannot start the viewer: {e}"))?;
     let lines = forward(&mut child);
     report(Event::State(State::Running));
+    let started = Instant::now();
+    // In the headset only: the 2D window is where a desktop run is played.
+    let mut focus_at = if openxr.is_some() { &FOCUS_GAME_AT[..] } else { &[] };
     let mut stop_asked_at: Option<Instant> = None;
     let mut game_gone_at: Option<Instant> = None;
     let status = loop {
         while let Ok(line) = lines.try_recv() {
             report(viewer_line(line));
+        }
+        if let [at, rest @ ..] = focus_at
+            && started.elapsed() >= *at
+        {
+            focus_at = rest;
+            if !system::in_front(pid) && !system::focus(pid) && rest.is_empty() {
+                report(Event::Detail("The game's window could not be brought to the front: click it to play.".into()));
+            }
         }
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
             break status;
@@ -613,26 +627,4 @@ pub(crate) fn log_tail(log: &Path, count: usize, report: &mut dyn FnMut(Event)) 
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_viewer_setting_line_is_a_setting() {
-        assert!(matches!(viewer_line(format!("{SETTING_LINE} menu_reach_depth=20")), Event::Setting(id, value) if id == "menu_reach_depth" && value == "20"));
-        assert!(matches!(viewer_line("GPU: something".into()), Event::Detail(_)));
-    }
-
-    #[test]
-    fn dates_are_civil() {
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        assert_eq!(civil_from_days(20_367), (2025, 10, 6));
-        assert_eq!(civil_from_days(11_016), (2000, 2, 29));
-    }
-
-    #[test]
-    fn versions_sort_and_differ() {
-        let (a, b) = (version(), version());
-        assert_eq!(a.len(), "20261006T1122330000000-1a2b3c4d".len());
-        assert_ne!(a, b);
-    }
-}
+mod tests;

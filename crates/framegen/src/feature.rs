@@ -4,7 +4,7 @@
 //! update, when it is wanted (`on`), what it frees (`release`) and what it reports (`every`):
 //! `Component { on: smooth_chosen, release: framegen::close, ..framegen() }`.
 
-use crate::ffx::LOADER;
+use monaka_ffx::LOADER;
 use monaka_producer::game::{Component, Game, Lack, Start};
 use monaka_producer::log;
 

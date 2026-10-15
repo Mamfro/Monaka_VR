@@ -2,9 +2,9 @@
 //! and where it sits in the hand (grip), a producer reads them. Either side may create it. Every access waits at most a couple of
 //! milliseconds; a miss is not an error.
 
-use crate::shared::{Create, SharedBlock};
-use crate::{ChannelName, Error, Result};
-use monaka_core::protocol::{HandBlock, HandPose, PadState};
+use crate::shared::SharedBlock;
+use crate::{ChannelName, Result};
+use monaka_core::protocol::{Block, HandBlock, HandPose, PadState, Versioned};
 
 const WAIT_MS: u32 = 2;
 
@@ -14,17 +14,8 @@ pub struct HandChannel {
 
 impl HandChannel {
     pub fn open(channel: &ChannelName) -> Result<Self> {
-        let mut block = SharedBlock::<HandBlock>::create(&channel.hands(), &channel.hands_lock(), Create::OrOpen)?;
-        {
-            let mut record = block.lock(WAIT_MS).tolerant().ok_or(Error::Busy)?;
-            if record.is_blank() {
-                *record = HandBlock::fresh();
-            }
-            if !record.is_compatible() {
-                return Err(Error::Incompatible("hand block magic or version"));
-            }
-        }
-        Ok(Self { block })
+        let (name, lock) = channel.block(Block::Hands);
+        Ok(Self { block: SharedBlock::<HandBlock>::open_versioned(&name, &lock, WAIT_MS)? })
     }
 
     fn with<R>(&mut self, f: impl FnOnce(&mut HandBlock) -> R) -> Option<R> {
@@ -81,28 +72,4 @@ fn fresh(pose: HandPose, max_age_ms: u64) -> Option<HandPose> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use monaka_core::protocol::RIGHT_HAND;
-
-    #[test]
-    fn hands_travel_and_go_stale() {
-        let name = ChannelName::new(format!(r"Local\monaka-test-hands-{}", std::process::id())).unwrap();
-        let mut writer = HandChannel::open(&name).unwrap();
-        let mut reader = HandChannel::open(&name).unwrap();
-        assert!(reader.read(RIGHT_HAND, 1000).is_none());
-        let fresh = HandPose { valid: 1, position: [0.2, -0.3, -0.4], received_tick: crate::tick(), ..HandPose::default() };
-        assert!(writer.write(&[HandPose::default(), fresh], &[HandPose::default(), fresh]));
-        assert_eq!(reader.read(RIGHT_HAND, 1000), Some(fresh));
-        assert_eq!(reader.read_grip(RIGHT_HAND, 1000), Some(fresh));
-        let grip=HandPose { position:[0.3,-0.4,-0.5],..fresh };
-        assert!(writer.write(&[HandPose::default(),fresh], &[HandPose::default(),grip]));
-        assert_eq!(reader.read_palms(1000),[None,Some(HandPose { position:grip.position,..fresh })]);
-        assert!(reader.read(0, 1000).is_none(), "an invalid hand is not returned");
-        let old = HandPose { received_tick: crate::tick().saturating_sub(5000), ..fresh };
-        assert!(writer.write(&[HandPose::default(), old], &[HandPose::default(); 2]));
-        assert!(reader.read(RIGHT_HAND, 1000).is_none(), "a stale hand is not returned");
-        assert_eq!(reader.read_palms(1000),[None,None]);
-        assert!(reader.read(2, 1000).is_none());
-    }
-}
+mod tests;
