@@ -11,7 +11,7 @@
 
 use crate::roomscale;
 use monaka_core::feature::Feature;
-use monaka_core::manifest::{BINARY_FINGERS, FINGER_TRACKING, Manifest, ROOM_SCALE};
+use monaka_contract::manifest::{BINARY_FINGERS, FINGER_TRACKING, Manifest, ROOM_SCALE};
 use monaka_core::options::{Options, Shared};
 use monaka_producer::game::{Component, Game, Lack, On, OrMissing, Run, Start};
 

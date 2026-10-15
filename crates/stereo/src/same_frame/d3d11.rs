@@ -11,7 +11,7 @@ use super::{PAIRS, Settings};
 use crate::pairs::d3d11::{PairPublisher11, Step};
 use crate::present::{PresentFn, hook_dxgi_present};
 use monaka_channel::{ChannelName, d3d};
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_hook::{Hooks, InFlight, Original};
 use monaka_producer::Rejection;

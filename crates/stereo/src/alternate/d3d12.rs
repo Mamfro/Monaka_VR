@@ -19,7 +19,7 @@ use crate::pairs::d3d12::{EyeDepth12, PairDepth, PairPublisher12};
 use monaka_channel::ChannelName;
 use monaka_channel::pose::HeadSource;
 use monaka_core::alternate::{POSE_RING, Schedule};
-use monaka_core::protocol::{DepthParams, HeadPose};
+use monaka_contract::protocol::{DepthParams, HeadPose};
 use windows::Win32::Graphics::Direct3D12::{D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_PRESENT, ID3D12CommandQueue, ID3D12Resource};
 use windows::Win32::Graphics::Dxgi::IDXGISwapChain3;
 

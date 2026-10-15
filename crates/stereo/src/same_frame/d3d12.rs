@@ -15,7 +15,7 @@
 use super::{EyeHud, PAIRS, Settings};
 use crate::pairs::d3d12::{PairDepth, PairPublisher12, Step};
 use monaka_channel::{ChannelName, d3d12};
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_producer::{log, log_first};
 use monaka_warp::warp12::DepthWarp;

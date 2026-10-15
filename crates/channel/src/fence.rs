@@ -5,17 +5,19 @@
 //!
 //! A producer may send each eye's depth with a pair ([`FenceProducer::publish_with_depth`]): every
 //! slot then has a depth texture per eye beside its images, made on the first pair with depth and
-//! copied with the images on the same command list, so the `produced` fence covers both.
+//! copied with the images on the same command list, so the `produced` fence covers both. The
+//! depth textures and which pair each slot's depth belongs to are in the depth block beside the
+//! header ([`DepthBlock`]): a reader that never asks for depth never opens it.
 
 mod header;
 
 use crate::d3d::{self, adapter_luid, luid};
-use crate::d3d12::{self, Recorder, subresource, transition};
+use crate::d3d12::{self, Barriers, Recorder, subresource, transition};
 use crate::shared::{NamedMutex, OwnedHandle, SharedBlock};
 use crate::{ChannelName, Error, Result};
 pub(crate) use header::{HeaderWriter, Shared};
 use monaka_core::fence_rules::reader_take;
-use monaka_core::protocol::{DepthParams, DepthSlot, FENCE_SLOTS, FenceDepth, FenceHeader, Luid, depth_slot_format, dimensions_ok, dxgi_format, fence_format_ok};
+use monaka_contract::protocol::{Block, DepthBlock, DepthParams, DepthSlot, FENCE_SLOTS, FenceHeader, Luid, depth_slot_format, dimensions_ok, dxgi_format, fence_format_ok};
 use windows::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, GENERIC_ALL, HANDLE};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_SHADER_RESOURCE, ID3D11Device, ID3D11Device1, ID3D11Device5, ID3D11DeviceContext, ID3D11DeviceContext4, ID3D11Fence, ID3D11Texture2D,
@@ -117,7 +119,7 @@ struct ReaderDepth {
 }
 
 impl ReaderDepth {
-    fn open(producer: &OwnedHandle, device: &ID3D11Device, depth: &FenceDepth) -> Result<Self> {
+    fn open(producer: &OwnedHandle, device: &ID3D11Device, depth: &DepthBlock) -> Result<Self> {
         let (format, width, height) = (depth.format, depth.width, depth.height);
         if !matches!(format, dxgi_format::R32_TYPELESS | dxgi_format::R16_TYPELESS) || !dimensions_ok(width, height) {
             return Err(Error::Incompatible("depth textures"));
@@ -161,8 +163,17 @@ pub fn describe(name: &ChannelName) -> Option<Description> {
         .then(|| Description { width: header.width, height: header.height, adapter: header.adapter, format: header.format })
 }
 
+/// The reader's depth block: not opened yet, open, or refused for the run (another major's).
+enum DepthSource {
+    Untried,
+    Open(SharedBlock<DepthBlock>),
+    Off,
+}
+
 pub struct FenceReader {
+    channel: ChannelName,
     header: SharedBlock<FenceHeader>,
+    depth_block: DepthSource,
     _lease: NamedMutex,
     device: ID3D11Device,
     /// The producer process, for opening the depth textures it makes later.
@@ -211,7 +222,10 @@ impl FenceReader {
             .ok_or(Error::Incompatible("producer process"))?;
         let mut slots = Vec::with_capacity(FENCE_SLOTS);
         for slot in record.textures {
-            slots.push([open_texture(&producer, &device1, slot[0])?, open_texture(&producer, &device1, slot[1])?]);
+            let left = open_texture(&producer, &device1, slot[0])?;
+            // A channel for one image publishes its one texture as both eyes'.
+            let right = if slot[1] == slot[0] { left.clone() } else { open_texture(&producer, &device1, slot[1])? };
+            slots.push([left, right]);
         }
         let textures: [[ID3D11Texture2D; 2]; FENCE_SLOTS] = slots.try_into().map_err(|_| Error::Incompatible("slots"))?;
         let open_fence = |value: u64| -> Result<ID3D11Fence> {
@@ -225,7 +239,9 @@ impl FenceReader {
         let consumed = open_fence(record.consumed)?;
         drop(record);
         Ok(Self {
+            channel: name.clone(),
             header,
+            depth_block: DepthSource::Untried,
             _lease: lease,
             device: device.clone(),
             producer,
@@ -248,6 +264,12 @@ impl FenceReader {
     /// `seen`, then signals `consumed` so the producer may reuse the slot. `Ok(None)`: nothing new.
     pub fn read(&mut self, context: &ID3D11DeviceContext, eyes: [&ID3D11Texture2D; 2], seen: u64) -> Result<Option<Pair>> {
         Ok(self.take(context, eyes, seen, false)?.map(|(pair, _)| pair))
+    }
+
+    /// [`FenceReader::read`] of the left eye alone into `image` (a channel for one image, a HUD
+    /// panel).
+    pub fn read_one(&mut self, context: &ID3D11DeviceContext, image: &ID3D11Texture2D, seen: u64) -> Result<Option<Pair>> {
+        Ok(self.take(context, [image, image], seen, false)?.map(|(pair, _)| pair))
     }
 
     /// [`FenceReader::read`], also copying the pair's depth into [`FenceReader::depth_textures`]
@@ -277,7 +299,7 @@ impl FenceReader {
             return Err(Error::Incompatible("eye textures"));
         }
         let context4: ID3D11DeviceContext4 = context.cast()?;
-        let (slot, pair, depth) = {
+        let (slot, pair) = {
             let Some(mut record) = self.header.lock(0).tolerant() else {
                 self.busy += 1;
                 return Ok(None);
@@ -291,25 +313,15 @@ impl FenceReader {
             record.reader_claim = sequence;
             record.reader_slot = slot;
             let slot = slot as usize;
-            // New depth textures are opened under the lock, while their handles are surely open in
-            // the producer.
-            if with_depth && record.depth.generation != self.depth_generation {
-                self.depth_generation = record.depth.generation;
-                self.depth = None;
-                if record.depth.generation != 0 {
-                    self.depth = ReaderDepth::open(&self.producer, &self.device, &record.depth).ok().map(Box::new);
-                }
-            }
-            let held = record.depth.slots[slot];
-            let depth = (with_depth && held.sequence == sequence && held.params.is_valid())
-                .then_some(self.depth.as_ref())
-                .flatten()
-                .map(|d| ReadDepth { params: held.params, rects: held.rects, format: d.format, width: d.width, height: d.height });
-            (slot, Pair { sequence, tick: record.slot_ticks[slot] }, depth)
+            (slot, Pair { sequence, tick: record.slot_ticks[slot] })
         };
+        // The claim keeps the producer off this slot, its depth included, until the next read.
+        let depth = if with_depth { self.depth_for(slot, pair.sequence) } else { None };
         // SAFETY: copies a completed slot into our textures, then signals when the copy has run.
         unsafe {
-            for (target, source) in eyes.into_iter().zip(&self.textures[slot]) {
+            // The same target for both eyes ([`FenceReader::read_one`]): the left eye alone.
+            let count = if eyes[0] == eyes[1] { 1 } else { 2 };
+            for (target, source) in eyes.into_iter().zip(&self.textures[slot]).take(count) {
                 context.CopyResource(target, source);
             }
             if let (Some(_), Some(opened)) = (depth, &self.depth) {
@@ -321,6 +333,42 @@ impl FenceReader {
             context.Flush();
         }
         Ok(Some((pair, depth)))
+    }
+
+    /// The depth of pair `sequence` in `slot`, when the producer sent it with the pair: the depth
+    /// block opened on first asking, and the producer's newest depth textures opened on its
+    /// device.
+    fn depth_for(&mut self, slot: usize, sequence: u64) -> Option<ReadDepth> {
+        if matches!(self.depth_block, DepthSource::Untried) {
+            let (name, lock) = self.channel.block(Block::Depth);
+            self.depth_block = match SharedBlock::<DepthBlock>::open_versioned(&name, &lock, 0) {
+                Ok(block) => DepthSource::Open(block),
+                // Busy: the producer is starting it; asked again with the next pair.
+                Err(Error::Busy) => DepthSource::Untried,
+                Err(_) => DepthSource::Off,
+            };
+        }
+        let DepthSource::Open(block) = &mut self.depth_block else { return None };
+        let record = block.lock(0).tolerant()?;
+        // New depth textures are opened under the depth block's lock, while their handles are
+        // surely open in the producer.
+        if record.generation != self.depth_generation {
+            self.depth_generation = record.generation;
+            self.depth = None;
+            if record.generation != 0 {
+                self.depth = ReaderDepth::open(&self.producer, &self.device, &record).ok().map(Box::new);
+            }
+        }
+        let held = record.slots[slot];
+        (held.sequence == sequence && held.params.is_valid())
+            .then_some(self.depth.as_ref())
+            .flatten()
+            .map(|d| ReadDepth { params: held.params, rects: held.rects, format: d.format, width: d.width, height: d.height })
+    }
+
+    /// Whether the depth block would not open, so no pair will come with depth this run.
+    pub fn depth_refused(&self) -> bool {
+        matches!(self.depth_block, DepthSource::Off)
     }
 }
 
@@ -368,6 +416,8 @@ pub struct FenceProducer {
     height: u32,
     format: DXGI_FORMAT,
     sequence: u64,
+    /// One image a pair ([`FenceProducer::create_mono`]).
+    mono: bool,
 }
 
 const RECORDINGS: usize = 4;
@@ -383,12 +433,14 @@ type SlotTextures = [[ID3D12Resource; 2]; FENCE_SLOTS];
 
 /// [`FENCE_SLOTS`] pairs of shareable `width` x `height` textures in `format` on `device` (with
 /// `flags`), in the common state, and their shared handle values (the handles kept in `handles`).
+/// `mono`: one texture a slot, published as both eyes' ([`FenceProducer::create_mono`]).
 fn shared_slots(
     device: &ID3D12Device,
     width: u32,
     height: u32,
     format: DXGI_FORMAT,
     flags: D3D12_RESOURCE_FLAGS,
+    mono: bool,
     handles: &mut Vec<OwnedHandle>,
 ) -> Result<([[u64; 2]; FENCE_SLOTS], SlotTextures)> {
     let heap = D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() };
@@ -406,13 +458,18 @@ fn shared_slots(
     let mut published = [[0u64; 2]; FENCE_SLOTS];
     let mut slots = Vec::with_capacity(FENCE_SLOTS);
     for slot in published.iter_mut() {
-        let mut pair = Vec::with_capacity(2);
-        for value in slot.iter_mut() {
+        let mut pair: Vec<ID3D12Resource> = Vec::with_capacity(2);
+        for eye in 0..2 {
+            if mono && eye == 1 {
+                slot[1] = slot[0];
+                pair.push(pair[0].clone());
+                continue;
+            }
             let mut texture: Option<ID3D12Resource> = None;
             // SAFETY: creation with a valid descriptor into a local out-pointer.
             unsafe { device.CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &desc, D3D12_RESOURCE_STATE_COMMON, None, &mut texture)? };
             let texture = texture.ok_or(Error::Incompatible("slot texture"))?;
-            *value = share(device, &texture.cast()?, handles)?;
+            slot[eye] = share(device, &texture.cast()?, handles)?;
             pair.push(texture);
         }
         slots.push([pair.remove(0), pair.remove(0)]);
@@ -476,6 +533,17 @@ impl FenceProducer {
 
     /// Claims `name` and creates the shared slots on `queue`, a direct queue of `device`.
     pub fn create(name: &ChannelName, device: &ID3D12Device, queue: &ID3D12CommandQueue, width: u32, height: u32, format: DXGI_FORMAT) -> Result<Self> {
+        Self::create_with(name, device, queue, width, height, format, false)
+    }
+
+    /// [`FenceProducer::create`] for one image a pair (a HUD panel): a texture a slot, published as
+    /// both eyes', so a reader that copies both eyes still gets the image in each. Published with
+    /// [`FenceProducer::publish_one`].
+    pub fn create_mono(name: &ChannelName, device: &ID3D12Device, queue: &ID3D12CommandQueue, width: u32, height: u32, format: DXGI_FORMAT) -> Result<Self> {
+        Self::create_with(name, device, queue, width, height, format, true)
+    }
+
+    fn create_with(name: &ChannelName, device: &ID3D12Device, queue: &ID3D12CommandQueue, width: u32, height: u32, format: DXGI_FORMAT, mono: bool) -> Result<Self> {
         if !dimensions_ok(width, height) || !fence_format_ok(format.0 as u32) {
             return Err(Error::Incompatible("eye size or format"));
         }
@@ -486,7 +554,7 @@ impl FenceProducer {
             }
             let mut header = HeaderWriter::claim(name)?;
             let mut handles = Vec::new();
-            let (published, textures) = shared_slots(device, width, height, format, IMAGE_FLAGS, &mut handles)?;
+            let (published, textures) = shared_slots(device, width, height, format, IMAGE_FLAGS, mono, &mut handles)?;
             let produced: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_SHARED)?;
             let consumed: ID3D12Fence = device.CreateFence(0, D3D12_FENCE_FLAG_SHARED)?;
             let produced_handle = share(device, &produced.cast()?, &mut handles)?;
@@ -513,7 +581,7 @@ impl FenceProducer {
                 depth: None,
                 retired: Vec::new(),
             };
-            Ok(Self { header, gpu: Some(gpu), hold: None, hold_depth: None, retired_holds: Vec::new(), width, height, format, sequence: 0 })
+            Ok(Self { header, gpu: Some(gpu), hold: None, hold_depth: None, retired_holds: Vec::new(), width, height, format, sequence: 0, mono })
         }
     }
 
@@ -526,6 +594,12 @@ impl FenceProducer {
     /// them. `Ok(false)`: skipped because no slot or recording was free; it never waits.
     pub fn publish(&mut self, left: (&ID3D12Resource, D3D12_RESOURCE_STATES), right: (&ID3D12Resource, D3D12_RESOURCE_STATES), tick: u64) -> Result<bool> {
         self.publish_with_depth(left, right, None, tick)
+    }
+
+    /// One image (in `state`) as the pair, on a channel made by [`FenceProducer::create_mono`]
+    /// (one copy), or as both eyes on any other.
+    pub fn publish_one(&mut self, image: (&ID3D12Resource, D3D12_RESOURCE_STATES), tick: u64) -> Result<bool> {
+        self.publish_with_depth(image, image, None, tick)
     }
 
     /// [`FenceProducer::publish`] with each eye's depth beside its image (`None`: this pair has
@@ -541,6 +615,10 @@ impl FenceProducer {
         tick: u64,
     ) -> Result<bool> {
         let gpu = self.gpu.as_mut().ok_or(Error::Unhealthy)?;
+        if self.mono && left.0 != right.0 {
+            return Err(Error::Incompatible("two images on a channel for one"));
+        }
+        let mono = self.mono;
         let sources = [left, right];
         for (source, _) in sources {
             // SAFETY: reads a resource descriptor.
@@ -550,6 +628,7 @@ impl FenceProducer {
                 return Err(Error::Incompatible("eye image shape"));
             }
         }
+        let depth = depth.filter(|_| !self.header.depth_refused());
         let shape = depth.as_ref().map(depth_shape).transpose()?;
         // SAFETY: fence reads, command recording on our own lists, and queue submission.
         unsafe {
@@ -563,7 +642,7 @@ impl FenceProducer {
                 && gpu.depth.as_ref().is_none_or(|d| (d.format, d.width, d.height) != (format, width, height))
             {
                 let mut handles = Vec::new();
-                let (published, textures) = shared_slots(&gpu.device, width, height, DXGI_FORMAT(format as i32), DEPTH_FLAGS, &mut handles)?;
+                let (published, textures) = shared_slots(&gpu.device, width, height, DXGI_FORMAT(format as i32), DEPTH_FLAGS, false, &mut handles)?;
                 if !self.header.new_depth(format, width, height, published) {
                     return Ok(false);
                 }
@@ -592,15 +671,18 @@ impl FenceProducer {
             let list = &list;
             let same = left.0 == right.0;
             let targets = &gpu.textures[slot];
-            let mut before = Vec::with_capacity(8);
-            let mut after = Vec::with_capacity(8);
+            // Two eyes' colour and depth, each a source and a target.
+            let mut before = Barriers::<8>::new();
+            let mut after = Barriers::<8>::new();
             for (eye, (source, state)) in sources.iter().enumerate() {
                 if !(same && eye == 1) {
                     before.push(transition(source, *state, D3D12_RESOURCE_STATE_COPY_SOURCE));
                     after.push(transition(source, D3D12_RESOURCE_STATE_COPY_SOURCE, *state));
                 }
-                before.push(transition(&targets[eye], D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST));
-                after.push(transition(&targets[eye], D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON));
+                if !(mono && eye == 1) {
+                    before.push(transition(&targets[eye], D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST));
+                    after.push(transition(&targets[eye], D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON));
+                }
             }
             let depth_copies = depth.as_ref().zip(gpu.depth.as_ref()).map(|(depth, slots)| (depth.eyes, &slots.textures[slot]));
             if let Some((eyes, targets)) = depth_copies {
@@ -614,8 +696,8 @@ impl FenceProducer {
                     after.push(transition(&targets[eye], D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON));
                 }
             }
-            list.ResourceBarrier(&before);
-            for (eye, (source, _)) in sources.iter().enumerate() {
+            list.ResourceBarrier(before.as_slice());
+            for (eye, (source, _)) in sources.iter().enumerate().take(if mono { 1 } else { 2 }) {
                 list.CopyResource(&targets[eye], *source);
             }
             if let Some((eyes, targets)) = depth_copies {
@@ -624,7 +706,7 @@ impl FenceProducer {
                     list.CopyTextureRegion(&subresource(target, 0), 0, 0, 0, &subresource(source.texture, 0), None);
                 }
             }
-            list.ResourceBarrier(&after);
+            list.ResourceBarrier(after.as_slice());
             // This sequence is spent from here on, submitted or not, so no later pair shares it.
             self.sequence = sequence;
             if let Err(e) = gpu.recorder.submit_as(&gpu.queue, sequence) {

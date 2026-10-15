@@ -33,9 +33,9 @@ use crate::lists12::{self, Subscriber};
 use crate::providers::{FrameInputs, GameQueue};
 use monaka_channel::d3d12::{self, barrier, placed, subresource};
 use monaka_core::camera::Frustum;
-use monaka_core::manifest::{Kind, Opt, Shown, choice, line, opt};
+use monaka_contract::manifest::{Kind, Opt, Shown, choice, line, opt};
 use monaka_core::options::Options;
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_hook::{Hooks, InFlight, Original, mem};
 use monaka_producer::game::{Component, Every, Lack, Missing, OrMissing, Start, Switch};
@@ -235,7 +235,7 @@ pub const fn foveation<G: FrameInputs + GameQueue>() -> Component<G> {
     }
 }
 
-fn read_settings(options: &Options, _: &monaka_core::manifest::Manifest) {
+fn read_settings(options: &Options, _: &monaka_contract::manifest::Manifest) {
     Rings::read(options);
 }
 

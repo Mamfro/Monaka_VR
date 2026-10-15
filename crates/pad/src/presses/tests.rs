@@ -5,12 +5,12 @@ use crate::vr_pad::stop;
 #[test]
 fn a_hold_stays_until_let_go_or_the_stop() {
     let _serial = TEST_PRESSES.locked();
-    hold("guard", Gamepad { buttons: monaka_core::pad::button::RIGHT_SHOULDER, ..Gamepad::default() });
+    hold("guard", Gamepad { buttons: monaka_contract::gamepad::button::RIGHT_SHOULDER, ..Gamepad::default() });
     press("melee", Gamepad { right_trigger: 255, ..Gamepad::default() }, 60_000);
-    assert_eq!((pressed().buttons, pressed().right_trigger), (monaka_core::pad::button::RIGHT_SHOULDER, 255));
+    assert_eq!((pressed().buttons, pressed().right_trigger), (monaka_contract::gamepad::button::RIGHT_SHOULDER, 255));
     let_go("guard");
     assert_eq!(pressed().buttons, 0, "let go of the hold alone");
-    hold("guard", Gamepad { buttons: monaka_core::pad::button::RIGHT_SHOULDER, ..Gamepad::default() });
+    hold("guard", Gamepad { buttons: monaka_contract::gamepad::button::RIGHT_SHOULDER, ..Gamepad::default() });
     stop();
     assert_eq!(pressed(), Gamepad { right_trigger: 255, ..Gamepad::default() }, "the stop lets go of holds, a timed press runs out");
     let_go("melee");

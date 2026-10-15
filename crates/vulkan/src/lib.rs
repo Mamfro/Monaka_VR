@@ -1,6 +1,6 @@
 //! Vulkan games' frames out to Monaka. A Vulkan device shares nothing unless it was made with the
 //! external memory and semaphore extensions, so the game's device is hooked as it is made (the
-//! producer joins the game as it starts, `monaka_core::manifest::Launch::AtStart`), the extensions
+//! producer joins the game as it starts, `monaka_contract::manifest::Launch::AtStart`), the extensions
 //! added; then at each present the frame is copied, on the game's own queue, into buffers a D3D12
 //! device of Monaka's own made and shares, and handed to the game's frame handler there as a D3D12
 //! texture ([`share::Frame`]), for the D3D12 side of Monaka (pairs, warps) to take it on.

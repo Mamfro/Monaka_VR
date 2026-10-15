@@ -1,8 +1,8 @@
-//! Held d-pad menus by reaching over a shoulder (`--dpad-hold` with `--menu-reach`): the left
+//! Held d-pad menus by reaching over a shoulder (`dpad_menus` with `menu_reach`): the left
 //! hand over the left shoulder opens the d-pad-left menu, the right hand over the right shoulder
 //! the d-pad-right one (Dying Light: tools and weapons), and a flick of a stick picks from it.
 //!
-//! - **Opening.** A hand [`DEPTH`] behind the head's plane (`--menu-reach-depth`) and above the
+//! - **Opening.** A hand [`DEPTH`] behind the head's plane (`menu_reach_depth`) and above the
 //!   chest ([`in_zone`]) that comes to
 //!   rest there ([`REST_SPEED`] for [`REST_FOR`]) opens its menu: the d-pad direction is held for the
 //!   game and the controller buzzes. A melee backswing passes through the zone fast and never rests
@@ -11,7 +11,7 @@
 //!   hand's: [`Pick`]) neither moves nor turns: flicked from the centre past [`FLICK`], it presses
 //!   the face button in that direction (up Y, right B, down A, left X) until it comes back past
 //!   [`CENTRE`], as a player picking with that button would; each pick buzzes. A game that picks
-//!   with its right stick instead (`--menu-pick stick`, [`PickWith`]) is handed the flick as its
+//!   with its right stick instead (`menu_pick=stick`, [`PickWith`]) is handed the flick as its
 //!   right stick, and nothing else there while the menu is open; its left stick reads centred
 //!   then (its wheels follow either stick, and a player's thumb on the d-pad is off the stick). A
 //!   stick already pushed when the menu opened (running) picks nothing until it has been back at
@@ -26,7 +26,7 @@
 //! shoulder, the head would put the other hand, hanging at the body's side, behind it.
 
 use crate::math::{self, Quat, Vec3};
-use crate::pad::{Gamepad, button};
+use monaka_contract::{gamepad::Gamepad, gamepad::button};
 use std::time::{Duration, Instant};
 
 /// How far behind the head's plane a hand reaches to open its menu (metres), unless the player
@@ -78,22 +78,22 @@ pub enum PickWith {
     Stick,
 }
 
-/// `--menu-pick`: how a pick reaches the game.
+/// `menu_pick` (for the viewer): how a pick reaches the game.
 pub fn parse_with(word: &str) -> Result<PickWith, String> {
     match word {
         "buttons" => Ok(PickWith::Buttons),
         "stick" => Ok(PickWith::Stick),
-        other => Err(format!("--menu-pick: {other} is not buttons or stick")),
+        other => Err(format!("menu_pick: {other} is not buttons or stick")),
     }
 }
 
-/// `--menu-reach`: on (picking with that stick) or off.
+/// The `menu_reach` option: on (picking with that stick) or off.
 pub fn parse(word: &str) -> Result<Option<Pick>, String> {
     match word {
         "same" => Ok(Some(Pick::Same)),
         "other" => Ok(Some(Pick::Other)),
         "off" => Ok(None),
-        other => Err(format!("--menu-reach: {other} is not same, other or off")),
+        other => Err(format!("menu_reach: {other} is not same, other or off")),
     }
 }
 
@@ -140,7 +140,7 @@ pub struct Reach {
 }
 
 impl Reach {
-    /// `held`: the d-pad directions whose menus stay open only while held (`--dpad-hold`); the left
+    /// `held`: the d-pad directions whose menus stay open only while held (`dpad_menus`); the left
     /// hand opens d-pad left, the right hand d-pad right, where held. `depth`: how far behind the head
     /// a hand reaches to open its menu (metres; [`DEPTH`] unless the player sets their own).
     pub fn new(pick: Pick, held: u16, depth: f32) -> Self {

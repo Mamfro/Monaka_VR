@@ -71,12 +71,12 @@ fn an_experimental_choice_stays_offered_and_says_so() {
 
 #[test]
 fn the_rendering_tab_keeps_its_order() {
-    let opts = [crate::manifest::RENDER_SIZE, BOTH, crate::manifest::HEADSET_DEPTH, AER_AFW];
+    let opts = [monaka_contract::manifest::RENDER_SIZE, BOTH, monaka_contract::manifest::HEADSET_DEPTH, AER_AFW];
     let mut sorted = opts;
     sorted.sort_by_key(place);
     let ids: Vec<&str> = sorted.iter().map(|o| o.id).collect();
     assert_eq!(ids, ["stereo", "framegen", "headset_depth", "render_size"]);
-    assert_eq!(place(&crate::manifest::WORLD_HUD), 0, "another tab keeps the game's order");
+    assert_eq!(place(&monaka_contract::manifest::WORLD_HUD), 0, "another tab keeps the game's order");
 }
 
 #[test]

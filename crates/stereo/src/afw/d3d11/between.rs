@@ -14,7 +14,7 @@
 
 use crate::afw::{Previous, Presents, Rendered, Shot, halfway};
 use crate::upscaler::fsr11::fov_vertical;
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_framegen::pacing::Interval;
 use monaka_fsr11::{Error, FrameGen11, GenFrame, GenSettings};
 use monaka_producer::log;

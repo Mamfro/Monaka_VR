@@ -268,7 +268,7 @@ fn client_size(dc: HDC) -> Option<(u32, u32)> {
         let mut rect = RECT::default();
         GetClientRect(window, &mut rect).ok()?;
         let (w, h) = ((rect.right - rect.left) as u32, (rect.bottom - rect.top) as u32);
-        monaka_core::protocol::dimensions_ok(w, h).then_some((w, h))
+        monaka_contract::protocol::dimensions_ok(w, h).then_some((w, h))
     }
 }
 

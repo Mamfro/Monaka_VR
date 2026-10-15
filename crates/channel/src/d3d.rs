@@ -1,7 +1,7 @@
 //! Small Direct3D helpers shared by the transports, the viewer and the tests.
 
 use crate::Result;
-use monaka_core::protocol::Luid;
+use monaka_contract::protocol::Luid;
 use windows::Win32::Foundation::LUID;
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
 use windows::Win32::Graphics::Direct3D11::{

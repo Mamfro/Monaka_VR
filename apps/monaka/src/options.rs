@@ -4,7 +4,7 @@
 
 use crate::look;
 use eframe::egui::{self, Align, Checkbox, ComboBox, Label, Layout, RichText, Slider, TextEdit};
-use monaka_core::manifest::{DEBUG_MENU, DIAGNOSTIC_LOGGING};
+use monaka_contract::manifest::{DEBUG_MENU, DIAGNOSTIC_LOGGING};
 use monaka_launch::games::{Game, HowTo, Kind, MONAKA, Manifest, Opt, Shown, TABS, Values, number_text};
 use monaka_launch::settings::Settings;
 
@@ -29,13 +29,14 @@ enum Item {
 }
 
 /// The game's options with a place in the window: the Rendering tab's in Monaka's order, every
-/// other tab's in the game's, then Monaka's own settings. Command-line-only options have none, and
-/// the debug menu's switch none unless `debug_menu` (it is found from the About page).
-pub fn rows(game: &Game, debug_menu: bool) -> Vec<Row> {
+/// other tab's in the game's, then Monaka's own settings. Command-line-only options have none, the
+/// debug menu's switch none unless `debug_menu` (it is found from the About page), and the
+/// settings for testers ([`Opt::dev`]) none unless `dev`.
+pub fn rows(game: &Game, debug_menu: bool, dev: bool) -> Vec<Row> {
     let owned = |owner: &'static Manifest| owner.options.iter().map(move |opt| Row { owner, opt });
     let mut rows: Vec<Row> = owned(game.manifest).filter(|r| r.opt.shown != Shown::Monaka).collect();
     rows.sort_by_key(|r| monaka_core::rendering::place(r.opt));
-    let shown = |r: &Row| r.opt.shown != Shown::Line && (debug_menu || r.opt.id != DEBUG_MENU.id);
+    let shown = |r: &Row| r.opt.shown != Shown::Line && (debug_menu || r.opt.id != DEBUG_MENU.id) && (dev || !r.opt.dev);
     rows.into_iter().chain(owned(&MONAKA)).filter(shown).collect()
 }
 

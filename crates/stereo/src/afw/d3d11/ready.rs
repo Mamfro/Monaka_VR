@@ -13,7 +13,7 @@ use crate::driver::{Driver, Pending};
 use crate::feature::Presents;
 use crate::providers::FrameInputs11;
 use monaka_core::alternate::{PresentRing, Schedule};
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_producer::game::{Component, Every, Lack, Missing, Start};
 use monaka_producer::log;

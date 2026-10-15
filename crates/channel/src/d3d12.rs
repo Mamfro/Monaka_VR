@@ -34,6 +34,35 @@ pub fn transition(resource: &ID3D12Resource, before: D3D12_RESOURCE_STATES, afte
     }
 }
 
+/// Up to `N` barriers gathered on the stack (a publish's, without allocating).
+pub struct Barriers<const N: usize> {
+    list: [D3D12_RESOURCE_BARRIER; N],
+    len: usize,
+}
+
+impl<const N: usize> Barriers<N> {
+    pub fn new() -> Self {
+        Self { list: std::array::from_fn(|_| D3D12_RESOURCE_BARRIER::default()), len: 0 }
+    }
+
+    /// Adds `barrier`; more than `N` is a caller's bug.
+    pub fn push(&mut self, barrier: D3D12_RESOURCE_BARRIER) {
+        assert!(self.len < N, "more than {N} barriers");
+        self.list[self.len] = barrier;
+        self.len += 1;
+    }
+
+    pub fn as_slice(&self) -> &[D3D12_RESOURCE_BARRIER] {
+        &self.list[..self.len]
+    }
+}
+
+impl<const N: usize> Default for Barriers<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Records a transition unless the states are equal.
 pub fn barrier(list: &ID3D12GraphicsCommandList, resource: &ID3D12Resource, before: D3D12_RESOURCE_STATES, after: D3D12_RESOURCE_STATES) {
     if before != after {

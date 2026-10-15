@@ -28,7 +28,7 @@ use monaka_core::alternate::{PresentRing, Schedule};
 use monaka_core::camera::Frustum;
 use monaka_core::eye_history::{EyeHistory, Rules};
 use monaka_core::feature::Feature;
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_fsr11::{EyeFrame, Fsr11, Settings};
 use monaka_ffx::upscale::create;

@@ -118,7 +118,7 @@ impl Panel {
             resolve: resolve.ok_or("resolve shader")?,
             constants: constants.ok_or("constant buffer")?,
             device: device.clone(),
-            writer: LazyProducer11::new(name),
+            writer: LazyProducer11::mono(name),
             failures: 0,
         })
     }
@@ -173,7 +173,7 @@ impl Panel {
         self.resolve(context);
         let piece = self.piece;
         let Some(writer) = self.writer.get(&self.device, self.size.0, self.size.1, DXGI_FORMAT_R8G8B8A8_UNORM).ready(|note| log!("HUD panel {piece}: {note}")) else { return false };
-        match writer.publish_whole(context, [&self.out, &self.out], monaka_channel::tick()) {
+        match writer.publish_one(context, &self.out, monaka_channel::tick()) {
             Ok(published) => published,
             Err(e) => {
                 if self.failures == 0 {

@@ -315,7 +315,7 @@ impl Bridge {
     /// Copies the `width` x `height` colour of GL framebuffer `source` (0: the default back buffer)
     /// into a D3D11 texture, top row first. The texture is reused until the size changes.
     pub fn capture(&mut self, source: u32, width: u32, height: u32) -> Result<&ID3D11Texture2D> {
-        if !monaka_core::protocol::dimensions_ok(width, height) {
+        if !monaka_contract::protocol::dimensions_ok(width, height) {
             return Err(Error::Failed("capture size"));
         }
         let gl = self.gl;
@@ -377,10 +377,10 @@ impl Bridge {
     pub fn capture_eye(&mut self, slot: usize, source: u32, frame: (u32, u32), rect: [u32; 4], depth: Option<DepthSource>) -> Result<(ID3D11Texture2D, Option<ID3D11Texture2D>)> {
         let [left, top, width, height] = rect;
         let inside = left.checked_add(width).is_some_and(|right| right <= frame.0) && top.checked_add(height).is_some_and(|bottom| bottom <= frame.1);
-        if !monaka_core::protocol::dimensions_ok(width, height) || !inside {
+        if !monaka_contract::protocol::dimensions_ok(width, height) || !inside {
             return Err(Error::Failed("eye capture rect"));
         }
-        if depth.is_some_and(|d| !monaka_core::protocol::dimensions_ok(d.size.0, d.size.1)) {
+        if depth.is_some_and(|d| !monaka_contract::protocol::dimensions_ok(d.size.0, d.size.1)) {
             return Err(Error::Failed("depth capture size"));
         }
         if depth.is_some() && self.depth_pass.is_none() {
@@ -400,12 +400,14 @@ impl Bridge {
         let made = &self.eye_slots[slot];
         let colour = made.colour.as_ref().expect("made above");
         let depth_target = made.depth.as_ref().filter(|_| depth.is_some());
-        let mut objects: Vec<*mut c_void> = std::iter::once(colour.object).chain(depth_target.map(|t| t.object)).collect();
+        // The colour, and the depth when there is one (the count says how many).
+        let mut objects: [*mut c_void; 2] = [colour.object, depth_target.map_or(std::ptr::null_mut(), |t| t.object)];
+        let count = 1 + depth_target.is_some() as i32;
         let saved = Self::save();
         // SAFETY: the shared textures are locked around the GL copies into them, context current;
         // the state changed is restored before the unlock.
         unsafe {
-            if (gl.lock_objects)(interop, objects.len() as i32, objects.as_mut_ptr()) == 0 {
+            if (gl.lock_objects)(interop, count, objects.as_mut_ptr()) == 0 {
                 return Err(Error::Failed("wglDXLockObjectsNV"));
             }
             (gl.bind_framebuffer)(GL_READ_FRAMEBUFFER, source);
@@ -430,7 +432,7 @@ impl Bridge {
             _ => Ok(()),
         };
         // SAFETY: unlocks the objects locked above.
-        if unsafe { (gl.unlock_objects)(interop, objects.len() as i32, objects.as_mut_ptr()) } == 0 {
+        if unsafe { (gl.unlock_objects)(interop, count, objects.as_mut_ptr()) } == 0 {
             return Err(Error::Failed("wglDXUnlockObjectsNV"));
         }
         drawn?;
@@ -443,7 +445,7 @@ impl Bridge {
     /// a `width` x `height` D3D11 `R32_FLOAT` texture, top row first: the window depth (0..1) as the
     /// game wrote it. The texture is reused until the size changes.
     pub fn capture_depth(&mut self, source: u32, size: (u32, u32), multisampled: bool, region: [f32; 4], width: u32, height: u32) -> Result<&ID3D11Texture2D> {
-        if !monaka_core::protocol::dimensions_ok(width, height) || !monaka_core::protocol::dimensions_ok(size.0, size.1) {
+        if !monaka_contract::protocol::dimensions_ok(width, height) || !monaka_contract::protocol::dimensions_ok(size.0, size.1) {
             return Err(Error::Failed("depth capture size"));
         }
         if self.depth_pass.is_none() {
@@ -509,7 +511,7 @@ struct Bound {
 impl Canvas {
     /// A canvas of `width` x `height`; a GL context must be current.
     pub fn new(width: u32, height: u32) -> Result<Self> {
-        if !monaka_core::protocol::dimensions_ok(width, height) {
+        if !monaka_contract::protocol::dimensions_ok(width, height) {
             return Err(Error::Failed("canvas size"));
         }
         let gl = Functions::load()?;

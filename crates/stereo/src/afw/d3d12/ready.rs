@@ -4,7 +4,7 @@
 //! their counts.
 
 use super::*;
-use monaka_core::manifest::{DOMINANT_EYE, Manifest};
+use monaka_contract::manifest::{DOMINANT_EYE, Manifest};
 use monaka_core::options::Options;
 use std::sync::atomic::AtomicU8;
 

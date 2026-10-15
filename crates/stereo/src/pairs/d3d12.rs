@@ -14,7 +14,7 @@ use crate::publish::{FLAT, Tally, record_first};
 use monaka_channel::ChannelName;
 use monaka_channel::fence::{Depth, EyeDepth, FenceProducer};
 use monaka_channel::pose::HeadSource;
-use monaka_core::protocol::{DepthParams, HeadPose};
+use monaka_contract::protocol::{DepthParams, HeadPose};
 use monaka_producer::log;
 use windows::Win32::Graphics::Direct3D12::{D3D12_RESOURCE_STATES, ID3D12CommandQueue, ID3D12Resource};
 

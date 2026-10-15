@@ -1,7 +1,7 @@
 use super::*;
 use crate::menu::View;
 use monaka_channel::d3d::{create_device, read_image};
-use monaka_core::debug_draw::{Categories, Category};
+use monaka_contract::debug_draw::{Categories, Category};
 
 #[test]
 fn the_menu_draws_and_redraws_only_on_change() {
@@ -27,7 +27,7 @@ fn the_menu_draws_and_redraws_only_on_change() {
 
 #[test]
 fn the_game_page_draws() {
-    use monaka_core::page::{Page, Row, Tone};
+    use monaka_contract::page::{Page, Row, Tone};
     let (device, context, _) = create_device(None).unwrap();
     let mut panel = Panel::new(DXGI_FORMAT_R8G8B8A8_UNORM);
     let mut rows = vec![

@@ -1,0 +1,10 @@
+[package]
+name = "monaka_contract"
+description = "What crosses between Monaka and a game pack: the loader's entry points, the pack's manifest text, the options vocabulary, the run folder's files and the shared-memory records. Nothing else."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

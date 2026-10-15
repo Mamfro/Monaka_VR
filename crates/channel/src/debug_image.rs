@@ -1,5 +1,5 @@
 //! An image the producer shares for the debug views (the game's depth, one of its buffers;
-//! [`monaka_core::debug_draw::DebugDepth`]): one texture by name behind a keyed mutex, written by
+//! [`monaka_contract::debug_draw::DebugDepth`]): one texture by name behind a keyed mutex, written by
 //! the producer, read by the viewer. Neither waits: a writer finding the texture being read skips
 //! that frame, and an unread image is taken back by the next write, so the reader always gets the
 //! latest.

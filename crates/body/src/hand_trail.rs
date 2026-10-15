@@ -8,7 +8,7 @@
 use monaka_core::camera::{Mat34, apply_head};
 use monaka_core::gesture::{Release, ReleaseRules};
 use monaka_core::math::Vec3;
-use monaka_core::protocol::HandPose;
+use monaka_contract::protocol::HandPose;
 use monaka_core::trail::Trail;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;

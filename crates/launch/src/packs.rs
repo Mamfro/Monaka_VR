@@ -1,7 +1,8 @@
 //! Game packs: a producer DLL read as a pack, from its file and without loading it. Its
-//! `MONAKA_CONTRACT` and `MONAKA_MANIFEST` exports ([`monaka_core::pack`]) say which contract it
-//! speaks, who made it and which games it serves, with their options; nothing of the pack runs in
-//! the launcher.
+//! `MONAKA_CONTRACT` and `MONAKA_MANIFEST` exports ([`monaka_contract::pack`]) say which contract it
+//! speaks, who made it, the host features it requires and uses ([`monaka_contract::host`]) and
+//! which games it serves, with their options; nothing of the pack runs in the launcher. A pack runs
+//! when it speaks this Monaka's contract and this Monaka has every feature it requires.
 //!
 //! Packs the player adds live in the games folder ([`crate::Paths::packs`]), one folder per pack:
 //! its DLL and its licence files. [`scan`] reads them all. [`stage`] unpacks a zip (or takes a
@@ -9,8 +10,9 @@
 //! [`Staged::install`] moves it into place; [`remove`] deletes one. Monaka never downloads or
 //! updates a pack by itself, and vetting a pack is the player's call: the window warns each time.
 
-use monaka_core::manifest::Manifest;
-use monaka_core::pack::{self, About, Contract};
+use monaka_contract::host;
+use monaka_contract::manifest::Manifest;
+use monaka_contract::pack::{self, About, Contract};
 use monaka_core::pe;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -28,13 +30,33 @@ pub struct Pack {
     pub dll: PathBuf,
     pub contract: Contract,
     pub about: About,
+    /// The host features it cannot work without.
+    pub requires: Vec<String>,
+    /// The host features it does more with.
+    pub uses: Vec<String>,
     pub manifests: Vec<Manifest>,
 }
 
 impl Pack {
     /// Whether this Monaka can run the pack, or what the player should do.
     pub fn runs(&self) -> Result<(), String> {
-        pack::CONTRACT.runs(self.contract)
+        pack::CONTRACT.runs(self.contract)?;
+        let missing = self.missing_required();
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("it needs a newer Monaka, one with {}: update Monaka", missing.join(", ")))
+        }
+    }
+
+    /// The features it requires that this Monaka lacks.
+    pub fn missing_required(&self) -> Vec<&str> {
+        host::missing(&self.requires.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
+    /// The features it uses that this Monaka lacks: it runs without them, with less.
+    pub fn missing_uses(&self) -> Vec<&str> {
+        host::missing(&self.uses.iter().map(String::as_str).collect::<Vec<_>>())
     }
 
     /// The folder it was read from (its licence files sit beside it).
@@ -52,9 +74,10 @@ impl Pack {
         self.manifests.iter().map(|m| m.name).collect::<Vec<_>>().join(", ")
     }
 
-    /// Whether the pack was made for a newer Monaka than this one.
+    /// Whether the pack was made for a newer Monaka than this one: a newer contract, or a feature
+    /// it requires that this Monaka lacks.
     pub fn needs_newer_monaka(&self) -> bool {
-        pack::CONTRACT.needs_newer_host(self.contract)
+        pack::CONTRACT.needs_newer_host(self.contract) || !self.missing_required().is_empty()
     }
 
     /// What the player knows the pack by: its games, or its DLL when its games cannot be read.
@@ -90,31 +113,26 @@ fn from_bytes(dll: &Path, bytes: &[u8]) -> Result<Option<Pack>, String> {
     let name = dll.display();
     let Some(packed) = pe::file_export_u32(bytes, "MONAKA_CONTRACT").map_err(|e| format!("{name}: {e}"))? else { return Ok(None) };
     let contract = Contract::from_packed(packed);
-    // A pack for a newer Monaka is a pack this one cannot run, whatever its text holds (it may
-    // write text this Monaka cannot read): the player is asked to update Monaka.
-    if pack::CONTRACT.needs_newer_host(contract) {
+    // A pack of another contract (older, or for a newer Monaka) is a pack this one cannot run,
+    // whatever its text holds (it may write text this Monaka cannot read): its games are named
+    // where the text can be read, and [`Pack::runs`] says which update is needed.
+    if pack::CONTRACT.runs(contract).is_err() {
         let text = pe::file_export_text_up_to(bytes, "MONAKA_MANIFEST", MAX_MANIFEST).ok().flatten();
         let parsed = text.and_then(|t| pack::parse(&t).ok());
         let (about, manifests) = parsed.map(|p| (p.about, p.manifests)).unwrap_or_default();
-        return Ok(Some(Pack { dll: dll.to_path_buf(), contract, about, manifests }));
+        return Ok(Some(Pack { dll: dll.to_path_buf(), contract, about, requires: Vec::new(), uses: Vec::new(), manifests }));
     }
-    // A pack of another contract may write text this Monaka cannot read: say which update is
-    // needed rather than what failed to parse.
-    let wrong_contract = |e: String| match pack::CONTRACT.runs(contract) {
-        Err(why) => format!("{name} cannot run here: {why}"),
-        Ok(()) => e,
-    };
     let text = pe::file_export_text_up_to(bytes, "MONAKA_MANIFEST", MAX_MANIFEST)
         .map_err(|e| format!("{name}: {e}"))?
-        .ok_or_else(|| wrong_contract(format!("{name} is not a game pack (no MONAKA_MANIFEST export)")))?;
-    let parsed = pack::parse(&text).map_err(|e| wrong_contract(format!("{name}: its manifest: {e}")))?;
+        .ok_or_else(|| format!("{name} is not a game pack (no MONAKA_MANIFEST export)"))?;
+    let parsed = pack::parse(&text).map_err(|e| format!("{name}: its manifest: {e}"))?;
     if parsed.contract != contract {
         return Err(format!("{name}: its manifest says contract {}, its export {contract}", parsed.contract));
     }
     for manifest in &parsed.manifests {
-        manifest.check().map_err(|e| wrong_contract(format!("{name}: {e}")))?;
+        manifest.check().map_err(|e| format!("{name}: {e}"))?;
     }
-    Ok(Some(Pack { dll: dll.to_path_buf(), contract, about: parsed.about, manifests: parsed.manifests }))
+    Ok(Some(Pack { dll: dll.to_path_buf(), contract, about: parsed.about, requires: parsed.requires, uses: parsed.uses, manifests: parsed.manifests }))
 }
 
 /// The packs in a games folder, and the folders that hold none the launcher can run.
@@ -125,6 +143,38 @@ pub struct Scan {
     pub problems: Vec<String>,
     /// The packs among those made for a newer Monaka, by what the player knows them as.
     pub too_new: Vec<String>,
+    /// The folders holding a pack that cannot run, one each.
+    pub left_out: Vec<LeftOut>,
+}
+
+/// A folder in the games folder whose pack cannot run here, for the window's list: what the player
+/// knows it by and, in a sentence for them, why.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LeftOut {
+    pub folder: PathBuf,
+    pub name: String,
+    pub why: String,
+}
+
+impl Scan {
+    /// Notes that `folder` (named `name`) holds a pack (`pack`, when it could be read) that cannot
+    /// run, for `why`: a folder of several such DLLs is one entry, named by all their games.
+    fn leave_out(&mut self, folder: &Path, name: &str, pack: Option<&Pack>, why: &str) {
+        let games = pack.filter(|p| !p.manifests.is_empty()).map(Pack::names);
+        let why = match pack {
+            Some(pack) if pack.needs_newer_monaka() => "Made for a newer Monaka. Update Monaka to play it.".to_owned(),
+            Some(pack) if pack::CONTRACT.runs(pack.contract).is_err() => "Made for an older Monaka. Get a newer version of this game pack.".to_owned(),
+            _ => format!("{}.", why.trim_end_matches('.')),
+        };
+        match self.left_out.iter_mut().find(|l| l.folder == folder) {
+            Some(entry) => {
+                if let Some(games) = games {
+                    entry.name = if entry.name == name { games } else { format!("{}, {games}", entry.name) };
+                }
+            }
+            None => self.left_out.push(LeftOut { folder: folder.to_owned(), name: games.unwrap_or_else(|| name.to_owned()), why }),
+        }
+    }
 }
 
 /// Every pack in `games` (one folder each; hidden and staging folders skipped), by folder name.
@@ -154,6 +204,7 @@ fn scan_with(games: &Path, probe: impl Fn(&Path) -> Result<Option<Pack>, String>
                                 scan.too_new.push(format!("{} (game pack {name})", pack.label()));
                             }
                             scan.problems.push(format!("Game pack {name} ({}): {why}", pack.label()));
+                            scan.leave_out(&folder, &name, Some(&pack), &why);
                         }
                         None => scan.packs.push(pack),
                     }
@@ -161,11 +212,13 @@ fn scan_with(games: &Path, probe: impl Fn(&Path) -> Result<Option<Pack>, String>
                 Err(why) => {
                     found = true;
                     scan.problems.push(format!("Game pack {name}: {why}"));
+                    scan.leave_out(&folder, &name, None, "It cannot be read. Get it again from the people who made it");
                 }
             }
         }
         if !found {
             scan.problems.push(format!("Game pack {name}: no game pack DLL in {}", folder.display()));
+            scan.leave_out(&folder, &name, None, "There is no game pack in this folder");
         }
     }
     scan

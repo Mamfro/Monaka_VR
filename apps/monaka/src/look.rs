@@ -60,6 +60,11 @@ pub fn start(ctx: &egui::Context, forced: Option<bool>) {
     }
 }
 
+/// The games column's and the log's background: a step darker than the page in either theme.
+pub fn side(visuals: &egui::Visuals) -> Color32 {
+    if visuals.dark_mode { Color32::from_gray(26) } else { Color32::from_gray(243) }
+}
+
 /// egui's fonts with Segoe UI (and its semibold) first, as Windows' own windows draw.
 fn fonts() -> FontDefinitions {
     let mut fonts = FontDefinitions::default();

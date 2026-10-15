@@ -23,7 +23,7 @@ fn the_panel_lies_on_the_back_of_the_right_hand_top_toward_the_head_up() {
 
 #[test]
 fn the_left_hand_mirrors_its_sides() {
-    use monaka_core::protocol::LEFT_HAND;
+    use monaka_contract::protocol::LEFT_HAND;
     assert_eq!(facing(Side::BackOfHand, LEFT_HAND), -1.0, "the left grip's -X leaves the back of the hand");
     assert_eq!(facing(Side::Palm, LEFT_HAND), 1.0);
     assert!(offset(Side::BackOfHand, LEFT_HAND)[0] < 0.0 && offset(Side::Palm, LEFT_HAND)[0] > 0.0);

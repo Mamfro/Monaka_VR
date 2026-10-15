@@ -1,5 +1,5 @@
 use super::*;
-use monaka_core::manifest::Kind;
+use monaka_contract::manifest::Kind;
 
 #[test]
 fn a_games_size_keeps_the_distance() {

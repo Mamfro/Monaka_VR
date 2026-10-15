@@ -1,6 +1,6 @@
 use super::*;
 use crate::hand_trail::{Lost, TrailRules};
-use monaka_core::protocol::HandPose;
+use monaka_contract::protocol::HandPose;
 use std::time::Duration;
 
 const HAND_SPEED: Throwing = Throwing { given: 2.0, launched: 3.0, weapon_within: 0.5 };

@@ -1,5 +1,5 @@
 use super::*;
-use monaka_core::debug_draw::{Category, WHITE};
+use monaka_contract::debug_draw::{Category, WHITE};
 
 fn channel_name(what: &str) -> ChannelName {
     ChannelName::new(format!(r"Local\monaka-test-debug-{what}-{}", std::process::id())).unwrap()
@@ -31,7 +31,7 @@ fn wants_and_offers_travel() {
     let wanted = Wanted { categories: Categories::NONE.with(Category::Skeleton, true), pass: 3, buffer: 2, target: 4 };
     assert!(viewer.want(wanted));
     assert_eq!(producer.wanted(), wanted);
-    let listed = [monaka_core::debug_draw::DepthCandidate { width: 3840, height: 2160, format: 44, draws: 380, samples: 1, layers: 1, usable: 1 }];
+    let listed = [monaka_contract::debug_draw::DepthCandidate { width: 3840, height: 2160, format: 44, draws: 380, samples: 1, layers: 1, usable: 1 }];
     assert!(producer.write_candidates(&listed, 1));
     assert_eq!(viewer.candidates(), (listed.to_vec(), 1));
     assert!(producer.offer(Categories::NONE.with(Category::Swings, true)));
@@ -40,13 +40,13 @@ fn wants_and_offers_travel() {
 
 #[test]
 fn the_games_timing_and_settings_reach_the_viewer() {
-    use monaka_core::debug_draw::{CostTime, GAME_FRAMES};
+    use monaka_contract::debug_draw::{CostTime, GAME_FRAMES};
     let name = channel_name("game");
     let mut producer = DebugChannel::open(&name).unwrap();
     let mut viewer = DebugChannel::open(&name).unwrap();
     assert_eq!(viewer.game().map(|g| g.tick), Some(0), "nothing written yet");
     assert!(producer.write_game_text("Stereo method: AFW (Frame-warp)\nFrame generation: Off"));
-    let mut costs = [CostTime::default(); monaka_core::debug_draw::COSTS];
+    let mut costs = [CostTime::default(); monaka_contract::debug_draw::COSTS];
     costs[0] = CostTime { mean_ms: 0.4, worst_ms: 1.2 };
     let stretch = |frames| Stretch { fps: 71.5, frame_ms: 13.9, worst_frame_ms: 22.0, size: [2644, 2644], frames, costs };
     assert!(producer.write_game(&stretch(&[13.0, 14.0, 22.0])));
@@ -65,9 +65,9 @@ fn the_games_timing_and_settings_reach_the_viewer() {
 
 #[test]
 fn a_settings_line_too_long_is_cut_at_a_character() {
-    let mut game = monaka_core::debug_draw::GameReport::EMPTY;
-    let long = "é".repeat(monaka_core::debug_draw::GAME_TEXT);
+    let mut game = monaka_contract::debug_draw::GameReport::EMPTY;
+    let long = "é".repeat(monaka_contract::debug_draw::GAME_TEXT);
     game.set_text(&long);
-    assert_eq!(game.text().len(), monaka_core::debug_draw::GAME_TEXT);
+    assert_eq!(game.text().len(), monaka_contract::debug_draw::GAME_TEXT);
     assert!(game.text().chars().all(|c| c == 'é'));
 }

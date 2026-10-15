@@ -78,6 +78,48 @@ fn a_d3d11_producer_reaches_the_d3d11_reader() {
     assert_eq!(read_pixel(&reader_device, &reader_context, &targets[1], 5, 5).unwrap(), [0, 0, 255, 255]);
 }
 
+#[test]
+#[ignore = "needs a GPU"]
+fn a_channel_for_one_image_sends_it_as_both_eyes() {
+    let (device, context, _) = create_device(None).unwrap();
+    let pixels: Vec<u8> = (0..32 * 32).flat_map(|_| [0, 255, 0, 255]).collect();
+    let image = create_texture_with(&device, &d3d::simple_texture_desc(32, 32, DXGI_FORMAT_R8G8B8A8_UNORM), &pixels).unwrap();
+    let name = ChannelName::new(&format!(r"Local\monaka-test-fence11-mono-{}", std::process::id())).unwrap();
+    let mut producer = FenceProducer11::create_mono(&name, &device, 32, 32, DXGI_FORMAT_R8G8B8A8_UNORM).unwrap();
+    let other = create_texture_with(&device, &d3d::simple_texture_desc(32, 32, DXGI_FORMAT_R8G8B8A8_UNORM), &pixels).unwrap();
+    assert!(producer.publish_whole(&context, [&image, &other], 1).is_err(), "two images are refused");
+    assert!(producer.publish_one(&context, &image, 7).unwrap());
+
+    let (reader_device, reader_context, _) = create_device(None).unwrap();
+    let mut reader = FenceReader::open(&name, &reader_device).unwrap();
+    let targets = [0, 1].map(|_| d3d::create_texture(&reader_device, &d3d::simple_texture_desc(32, 32, DXGI_FORMAT_R8G8B8A8_UNORM)).unwrap());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    // A reader taking both eyes gets the one image in each.
+    let pair = loop {
+        if let Some(pair) = reader.read(&reader_context, [&targets[0], &targets[1]], 0).unwrap() {
+            break pair;
+        }
+        assert!(Instant::now() < deadline, "no pair");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!((pair.sequence, pair.tick), (1, 7), "refused before a slot was taken: no sequence spent");
+    for target in &targets {
+        assert_eq!(read_pixel(&reader_device, &reader_context, target, 5, 5).unwrap(), [0, 255, 0, 255]);
+    }
+    // One read into one texture.
+    assert!(producer.publish_one(&context, &image, 8).unwrap());
+    let single = d3d::create_texture(&reader_device, &d3d::simple_texture_desc(32, 32, DXGI_FORMAT_R8G8B8A8_UNORM)).unwrap();
+    let pair = loop {
+        if let Some(pair) = reader.read_one(&reader_context, &single, 1).unwrap() {
+            break pair;
+        }
+        assert!(Instant::now() < deadline, "no second pair");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(pair.tick, 8);
+    assert_eq!(read_pixel(&reader_device, &reader_context, &single, 5, 5).unwrap(), [0, 255, 0, 255]);
+}
+
 /// A `width` x `height` R32_FLOAT texture filled with `value`, as a game's depth copy would be.
 fn float_texture(device: &ID3D11Device, width: u32, height: u32, value: f32) -> ID3D11Texture2D {
     use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R32_FLOAT;
@@ -94,7 +136,7 @@ fn float_at_origin(device: &ID3D11Device, context: &ID3D11DeviceContext, texture
 #[test]
 #[ignore = "needs a GPU"]
 fn a_d3d11_producer_sends_depth_beside_the_eyes() {
-    use monaka_core::protocol::DepthParams;
+    use monaka_contract::protocol::DepthParams;
     let (device, context, _) = create_device(None).unwrap();
     let image = d3d::create_texture(&device, &d3d::simple_texture_desc(32, 32, DXGI_FORMAT_R8G8B8A8_UNORM)).unwrap();
     let (left, right) = (float_texture(&device, 16, 8, 0.25), float_texture(&device, 16, 8, 0.75));

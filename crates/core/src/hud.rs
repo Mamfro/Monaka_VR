@@ -26,7 +26,7 @@ pub fn with_hlsl(body: &str) -> String {
 }
 
 /// The pieces of the dynamic HUD, in the viewer's order: each a channel of its own
-/// ([`crate::protocol::ChannelName::panel`]), on a fixed place on a hand.
+/// ([`monaka_contract::protocol::ChannelName::panel`]), on a fixed place on a hand.
 pub const PIECES: [&str; 5] = ["minimap", "weapon", "quests", "health", "tool"];
 
 /// A HUD layout read longer ago than this (ms) is stale: the game stopped laying out its HUD.

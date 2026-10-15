@@ -7,7 +7,7 @@
 
 use crate::math::{Quat, Vec3, cross, dot, unit};
 use crate::options::Shared;
-use crate::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 
 /// How the head's position moves the view (the `head_position` option).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +52,36 @@ pub fn rotation(q: Quat) -> [f32; 9] {
         2.0 * (y * z + x * w),
         1.0 - 2.0 * (x * x + y * y),
     ]
+}
+
+/// Row-major 3x3 matrix (a rotation, or axes as rows).
+pub type Mat3 = [f32; 9];
+
+/// `a * b`.
+pub fn mul3(a: &Mat3, b: &Mat3) -> Mat3 {
+    std::array::from_fn(|at| {
+        let (i, j) = (at / 3, at % 3);
+        (0..3).map(|k| a[3 * i + k] * b[3 * k + j]).sum()
+    })
+}
+
+pub fn transpose3(a: &Mat3) -> Mat3 {
+    [a[0], a[3], a[6], a[1], a[4], a[7], a[2], a[5], a[8]]
+}
+
+/// `m * v`.
+pub fn apply3(m: &Mat3, v: Vec3) -> Vec3 {
+    [0, 1, 2].map(|i| m[3 * i] * v[0] + m[3 * i + 1] * v[1] + m[3 * i + 2] * v[2])
+}
+
+/// A frame's rotation.
+pub fn rotation_part(m: &Mat34) -> Mat3 {
+    [m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]]
+}
+
+/// The frame of rotation `r` at `position`.
+pub fn from_rotation(r: &Mat3, position: Vec3) -> Mat34 {
+    [r[0], r[1], r[2], position[0], r[3], r[4], r[5], position[1], r[6], r[7], r[8], position[2]]
 }
 
 pub fn all_finite(values: &[f32]) -> bool {

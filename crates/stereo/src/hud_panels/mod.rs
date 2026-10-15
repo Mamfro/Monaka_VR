@@ -32,14 +32,14 @@ mod tests;
 
 use monaka_channel::ChannelName;
 use monaka_channel::panels::PanelsChannel;
-pub use monaka_core::panels::{Place, Side};
+pub use monaka_contract::panels::{PANEL_PIECES, Place, Side};
 use monaka_producer::log;
 use monaka_core::feature::Feature;
 use monaka_core::hud::{LAYOUT_FRESH_MS, fit, union};
-use monaka_core::manifest::WORLD_HUD;
+use monaka_contract::manifest::WORLD_HUD;
 use monaka_core::sync::Locked;
 use monaka_producer::game::{Component, Game, Lack, On, Start};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering::*};
 use std::time::Instant;
 
@@ -56,8 +56,8 @@ pub struct Piece {
 /// beside it, the weapon above the right palm, health on the back of the left hand, the quick item
 /// (one icon) and a second gun above the left palm.
 pub mod places {
-    use monaka_core::panels::{Place, Side};
-    use monaka_core::protocol::{LEFT_HAND, RIGHT_HAND};
+    use monaka_contract::panels::{Place, Side};
+    use monaka_contract::protocol::{LEFT_HAND, RIGHT_HAND};
 
     /// A panel about a hand's width (metres); the quests (a wide list of text) wider, one icon
     /// smaller.
@@ -127,7 +127,7 @@ struct Shown {
 type Boxes = fn(&mut [Option<[f32; 4]>]);
 
 struct State {
-    channel: ChannelName,
+    channel: Arc<ChannelName>,
     pieces: &'static [Piece],
     masked: bool,
     margin: f32,
@@ -144,7 +144,7 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// The ready-made's part of the component's install: the run's channel and the game's pieces.
 pub fn install<G: HudPieces>(start: &mut Start<'_, G>) -> Result<(), Lack> {
-    let channel = start.channel()?.clone();
+    let channel = Arc::new(start.channel()?.clone());
     let declared = match PanelsChannel::open(&channel) {
         Ok(mut block) => {
             let count = block.declare(G::PIECES.iter().map(|p| (p.name, p.place)));
@@ -265,18 +265,20 @@ fn rect_of(found: &[f32; 4], (w, h): (f32, f32), size: (u32, u32), margin: f32) 
 }
 
 /// What a frame's piece draws need: the run's channel, the pieces, and each one's rectangle while
-/// it shows.
+/// it shows (the first [`PANEL_PIECES`], the ones the viewer is told of; asked at every present,
+/// so nothing here allocates).
 struct Frame {
-    channel: ChannelName,
+    channel: Arc<ChannelName>,
     pieces: &'static [Piece],
     masked: bool,
-    rects: Vec<Option<[f32; 4]>>,
+    rects: [Option<[f32; 4]>; PANEL_PIECES],
 }
 
 fn frame() -> Option<Frame> {
     let state = STATE.locked();
     let state = state.as_ref()?;
-    Some(Frame { channel: state.channel.clone(), pieces: state.pieces, masked: state.masked, rects: (0..state.pieces.len()).map(|i| rect(state, i)).collect() })
+    let rects = std::array::from_fn(|i| if i < state.pieces.len() { rect(state, i) } else { None });
+    Some(Frame { channel: state.channel.clone(), pieces: state.pieces, masked: state.masked, rects })
 }
 
 /// A rectangle of fractions of a layout of `size` in its pixels (x, y, width, height).
@@ -288,6 +290,33 @@ fn pixels(rect: [f32; 4], size: (u32, u32)) -> [f32; 4] {
 /// Logs piece `name`'s panel changing to `out`.
 fn note_change(name: &str, out: PanelOut) {
     monaka_producer::log!("HUD panel {name}: {}", if out == PanelOut::Shown { "drawn: on the hand" } else { "gone: cleared" });
+}
+
+/// The shown pieces' rectangles at a present (x, y, width, height in the layer's pixels), at most
+/// [`PANEL_PIECES`]; read as a slice.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Rects {
+    list: [[f32; 4]; PANEL_PIECES],
+    len: usize,
+}
+
+impl Rects {
+    fn of(rects: [Option<[f32; 4]>; PANEL_PIECES]) -> Self {
+        let mut made = Self::default();
+        for rect in rects.into_iter().flatten() {
+            made.list[made.len] = rect;
+            made.len += 1;
+        }
+        made
+    }
+}
+
+impl std::ops::Deref for Rects {
+    type Target = [[f32; 4]];
+
+    fn deref(&self) -> &[[f32; 4]] {
+        &self.list[..self.len]
+    }
 }
 
 /// What goes out of a piece's panel at a frame's end.

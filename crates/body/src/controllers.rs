@@ -5,7 +5,7 @@ use monaka_channel::ChannelName;
 use monaka_channel::fingers::FingerChannel;
 use monaka_channel::hands::HandChannel;
 use monaka_channel::reticles::ReticleChannel;
-use monaka_core::protocol::{FingerPose, HandPose, LEFT_HAND, RIGHT_HAND};
+use monaka_contract::protocol::{FingerPose, HandPose, LEFT_HAND, RIGHT_HAND};
 use monaka_producer::log;
 use std::sync::Mutex;
 use monaka_core::sync::Locked;

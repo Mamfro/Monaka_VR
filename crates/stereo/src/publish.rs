@@ -4,7 +4,7 @@
 use crate::alternate::Step;
 use monaka_channel::d3d;
 use monaka_channel::pose::HeadSource;
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 
 /// The poses of a flat frame: none. The viewer shows a pair whose record has an eye without a valid

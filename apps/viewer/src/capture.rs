@@ -11,7 +11,7 @@
 //! the clipboard ([`crate::clipboard`]), ready to paste.
 
 use monaka_channel::d3d::{self, create_texture, read_image};
-use monaka_core::protocol::{RenderedPair, dxgi_format};
+use monaka_contract::protocol::{RenderedPair, dxgi_format};
 use std::path::{Path, PathBuf};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 

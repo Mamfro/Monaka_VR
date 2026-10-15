@@ -1,12 +1,8 @@
 use super::*;
-use crate::manifest::{self, Launch, Status};
+use monaka_contract::manifest::{self, Launch, Status};
 
 #[test]
 fn sizes_and_angles() {
-    assert_eq!(parse_size("2644x2644"), Some((2644, 2644)));
-    assert_eq!(parse_size(" 2416 2644\n"), Some((2416, 2644)));
-    assert_eq!(parse_size("100x2644"), None);
-    assert_eq!(parse_size("2644"), None);
     let options = Options::parse("eye_size=2644x2644\nsynthetic_yaw=-30\nfar=270");
     assert_eq!(options.size("eye_size"), Some((2644, 2644)));
     assert_eq!(options.angle("synthetic_yaw", 180.0), Some(-30.0));
@@ -94,4 +90,17 @@ fn rendered_frustums() {
     assert_eq!(shared.separation_for(&HeadPose { ipd: 0.2, ..pose }), 0.064);
     let yawed = shared.synthetic_pose(90.0, 0.0);
     assert!((crate::math::yaw(yawed.orientation) - core::f32::consts::FRAC_PI_2).abs() < 1e-5);
+}
+
+#[test]
+fn unread_options_are_found() {
+    const GAME: manifest::Manifest = manifest::Manifest {
+        options: &[manifest::aim(&[manifest::AIM_MOTION, manifest::AIM_POINT], "hand_rig"), manifest::AIM_HAND, manifest::HUD_SIZE, manifest::FINGER_TRACKING, manifest::LATENCY],
+        ..manifest::Manifest::GAME
+    };
+    let unread = unread_options(&GAME, |o| {
+        o.text("aim");
+        o.number("hud_scale", 0.0, 1.0, 0.5);
+    });
+    assert_eq!(unread, ["aim_hand", "finger_tracking", "latency"]);
 }

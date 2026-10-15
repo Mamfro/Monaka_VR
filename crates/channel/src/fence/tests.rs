@@ -105,6 +105,26 @@ fn pairs_cross_from_d3d12_to_d3d11() {
     assert_eq!(read_pixel(&device, &context, targets[0], 3, 3).unwrap(), [0, 255, 0, 255]);
 }
 
+#[test]
+fn a_d3d12_channel_for_one_image_sends_it_as_both_eyes() {
+    let name = ChannelName::new(format!(r"Local\monaka-test-fence-mono-{}", std::process::id())).unwrap();
+    let (device12, queue) = gpu12();
+    let mut producer = FenceProducer::create_mono(&name, &device12, &queue, 64, 32, DXGI_FORMAT_R8G8B8A8_UNORM).unwrap();
+    let described = describe(&name).unwrap();
+    let (device, context, _) = create_device(Some(&find_adapter(described.adapter).unwrap())).unwrap();
+    let mut reader = FenceReader::open(&name, &device).unwrap();
+    let image = cleared(&device12, &queue, [0.0, 0.0, 1.0, 1.0]);
+    let other = cleared(&device12, &queue, [1.0, 0.0, 0.0, 1.0]);
+    assert!(producer.publish((&image, RT), (&other, RT), 1).is_err(), "two images are refused");
+    assert!(producer.publish_one((&image, RT), 7).unwrap());
+    let targets: [ID3D11Texture2D; 2] = std::array::from_fn(|_| create_texture(&device, &simple_texture_desc(64, 32, DXGI_FORMAT_R8G8B8A8_UNORM)).unwrap());
+    let pair = until(|| reader.read(&context, [&targets[0], &targets[1]], 0).unwrap());
+    assert_eq!(pair, Pair { sequence: 1, tick: 7 });
+    for target in &targets {
+        assert_eq!(read_pixel(&device, &context, target, 3, 3).unwrap(), [0, 0, 255, 255], "the one image in each eye");
+    }
+}
+
 /// A 64x32 depth buffer of `format` cleared to `depth`, left in the depth-write state, GPU work
 /// finished.
 fn cleared_depth(device: &ID3D12Device, queue: &ID3D12CommandQueue, format: DXGI_FORMAT, depth: f32) -> ID3D12Resource {
@@ -204,6 +224,52 @@ fn depth_crosses_beside_the_eyes() {
     assert!(producer.publish_with_depth((&image, RT), (&image, RT), Some(bad), 6).is_err());
     let outside = Depth { eyes: [EyeDepth { rect: Some([60, 0, 8, 8]), ..depth.eyes[0] }; 2], ..depth };
     assert!(producer.publish_with_depth((&image, RT), (&image, RT), Some(outside), 6).is_err());
+}
+
+#[test]
+fn a_header_writer_refuses_a_depth_block_of_another_major_for_the_run() {
+    use crate::shared::{Create, SharedBlock};
+    use monaka_contract::protocol::{Block, DEPTH_MAGIC, Stamp};
+    let name = ChannelName::new(format!(r"Local\monaka-test-depth-writer-{}", std::process::id())).unwrap();
+    let (block, lock) = name.block(Block::Depth);
+    let mut other = SharedBlock::<DepthBlock>::create(&block, &lock, Create::OrOpen).unwrap();
+    other.lock(0).tolerant().unwrap().stamp = Stamp { magic: DEPTH_MAGIC, major: 99, minor: 0, size: 0, _reserved: 0 };
+    let mut writer = HeaderWriter::claim(&name).unwrap();
+    assert!(!writer.depth_refused());
+    assert!(!writer.new_depth(dxgi_format::R32_TYPELESS, 64, 32, [[0; 2]; FENCE_SLOTS]));
+    assert!(writer.depth_refused(), "refused for the rest of the run");
+    // Its record is left as the other side made it.
+    assert_eq!(other.lock(0).tolerant().unwrap().stamp.major, 99);
+}
+
+#[test]
+#[ignore = "needs a GPU"]
+fn a_depth_block_of_another_major_leaves_the_pairs_without_depth() {
+    use crate::shared::{Create, SharedBlock};
+    use monaka_contract::protocol::{Block, DEPTH_MAGIC, Stamp};
+    let name = ChannelName::new(format!(r"Local\monaka-test-depth-major-{}", std::process::id())).unwrap();
+    // Another side made the depth block at a major this side does not read.
+    let (block, lock) = name.block(Block::Depth);
+    let mut other = SharedBlock::<DepthBlock>::create(&block, &lock, Create::OrOpen).unwrap();
+    other.lock(0).tolerant().unwrap().stamp = Stamp { magic: DEPTH_MAGIC, major: 99, minor: 0, size: 0, _reserved: 0 };
+    let (device12, queue) = gpu12();
+    let mut producer = FenceProducer::create(&name, &device12, &queue, 64, 32, DXGI_FORMAT_R8G8B8A8_UNORM).unwrap();
+    let described = describe(&name).unwrap();
+    let (device, context, _) = create_device(Some(&find_adapter(described.adapter).unwrap())).unwrap();
+    let mut reader = FenceReader::open(&name, &device).unwrap();
+    let targets: [ID3D11Texture2D; 2] =
+        std::array::from_fn(|_| create_texture(&device, &simple_texture_desc(64, 32, DXGI_FORMAT_R8G8B8A8_UNORM)).unwrap());
+    let targets = [&targets[0], &targets[1]];
+    let image = cleared(&device12, &queue, [1.0, 0.0, 0.0, 1.0]);
+    let left = cleared_depth(&device12, &queue, DXGI_FORMAT_D32_FLOAT, 0.25);
+    let depth = Depth { eyes: [EyeDepth { texture: &left, state: DEPTH, rect: None }; 2], params: DepthParams::new(0.05, 100.0, false) };
+    // The pairs still cross, without their depth, and both sides know depth is off for the run.
+    until(|| producer.publish_with_depth((&image, RT), (&image, RT), Some(depth), 3).unwrap().then_some(()));
+    let (_, read) = until(|| reader.read_with_depth(&context, targets, 0).unwrap());
+    assert_eq!(read, None);
+    assert!(reader.depth_refused());
+    assert!(producer.publish_with_depth((&image, RT), (&image, RT), Some(depth), 4).unwrap());
+    drop(other);
 }
 
 #[test]

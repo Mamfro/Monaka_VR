@@ -33,7 +33,7 @@ use crate::providers::FrameInputs;
 use monaka_channel::ChannelName;
 use monaka_channel::d3d12::{self, Recorder};
 use monaka_channel::pose::HeadSource;
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_framegen::inputs::{self, Motion};
 use monaka_framegen::{EyeStream, FrameInputs as Generated, SLOTS, fitting_stream, skip_eye as skip};

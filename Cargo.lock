@@ -1512,6 +1512,7 @@ dependencies = [
  "eframe",
  "egui_kittest",
  "monaka_channel",
+ "monaka_contract",
  "monaka_core",
  "monaka_launch",
  "windows",
@@ -1522,6 +1523,7 @@ name = "monaka_body"
 version = "0.2.0"
 dependencies = [
  "monaka_channel",
+ "monaka_contract",
  "monaka_core",
  "monaka_hook",
  "monaka_pad",
@@ -1532,13 +1534,21 @@ dependencies = [
 name = "monaka_channel"
 version = "0.2.0"
 dependencies = [
+ "monaka_contract",
  "monaka_core",
  "windows",
 ]
 
 [[package]]
+name = "monaka_contract"
+version = "0.2.0"
+
+[[package]]
 name = "monaka_core"
 version = "0.2.0"
+dependencies = [
+ "monaka_contract",
+]
 
 [[package]]
 name = "monaka_ffx"
@@ -1554,6 +1564,7 @@ name = "monaka_framegen"
 version = "0.2.0"
 dependencies = [
  "monaka_channel",
+ "monaka_contract",
  "monaka_core",
  "monaka_ffx",
  "monaka_hook",
@@ -1579,6 +1590,7 @@ name = "monaka_gl"
 version = "0.2.0"
 dependencies = [
  "monaka_channel",
+ "monaka_contract",
  "monaka_core",
  "windows",
 ]
@@ -1595,6 +1607,7 @@ dependencies = [
 name = "monaka_launch"
 version = "0.2.0"
 dependencies = [
+ "monaka_contract",
  "monaka_core",
  "windows",
 ]
@@ -1619,6 +1632,7 @@ version = "0.2.0"
 dependencies = [
  "egui",
  "monaka_channel",
+ "monaka_contract",
  "monaka_core",
  "windows",
 ]
@@ -1628,6 +1642,7 @@ name = "monaka_pad"
 version = "0.2.0"
 dependencies = [
  "monaka_channel",
+ "monaka_contract",
  "monaka_core",
  "monaka_hook",
  "monaka_producer",
@@ -1639,6 +1654,7 @@ name = "monaka_producer"
 version = "0.2.0"
 dependencies = [
  "monaka_channel",
+ "monaka_contract",
  "monaka_core",
  "monaka_hook",
 ]
@@ -1648,6 +1664,7 @@ name = "monaka_stereo"
 version = "0.2.0"
 dependencies = [
  "monaka_channel",
+ "monaka_contract",
  "monaka_core",
  "monaka_ffx",
  "monaka_framegen",
@@ -1677,6 +1694,7 @@ version = "0.2.0"
 dependencies = [
  "jpeg-encoder",
  "monaka_channel",
+ "monaka_contract",
  "monaka_core",
  "monaka_openxr",
  "monaka_overlay",
@@ -1688,6 +1706,7 @@ name = "monaka_vulkan"
 version = "0.2.0"
 dependencies = [
  "monaka_channel",
+ "monaka_contract",
  "monaka_core",
  "monaka_hook",
  "monaka_producer",

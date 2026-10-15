@@ -13,7 +13,7 @@
 //! A producer whose eyes alternate by present number (`monaka_stereo::driver`, [`crate::alternate`])
 //! can key tickets by that number instead and look them up ([`Tickets::find`]).
 
-use crate::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use std::collections::VecDeque;
 
 /// What a frame draws.

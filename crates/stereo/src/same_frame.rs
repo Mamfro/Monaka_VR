@@ -47,7 +47,7 @@ use crate::eye_site::EyeSite;
 use timing::{Stage, Timings};
 use turns::Turns;
 use monaka_channel::pose::{HeadSource, PoseChannel, Synthetic};
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_core::ticket::{Tickets, View};
 use monaka_producer::game::{Component, Game, Lack, Start};

@@ -17,7 +17,7 @@ pub mod upscale_per_eye;
 
 pub use stream::{EyeStream, FrameInputs, SLOTS, enable, enabled, eyes_skipped, fitting_stream, free_when_idle, skip_eye};
 
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_ffx as ffx;
 use monaka_producer::log;
 

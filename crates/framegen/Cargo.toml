@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+monaka_contract.workspace = true
 monaka_core.workspace = true
 monaka_channel.workspace = true
 monaka_ffx.workspace = true

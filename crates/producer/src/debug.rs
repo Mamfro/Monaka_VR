@@ -1,4 +1,4 @@
-//! Debug drawing from inside the game ([`monaka_core::debug_draw`]): any code, a probe included,
+//! Debug drawing from inside the game ([`monaka_contract::debug_draw`]): any code, a probe included,
 //! draws with one plain call, in tracking space, for the game frame it is working on (`key`: the
 //! number the game's loop counts frames by, the same one its publisher names the pair's eyes with,
 //! [`eye_keys`]). The viewer draws each eye with the primitives of the frame it was drawn in.
@@ -10,12 +10,12 @@
 use monaka_channel::ChannelName;
 use monaka_channel::debug::{DebugChannel, Stretch};
 use monaka_core::camera::Mat34;
-use monaka_core::debug_draw::{COSTS, Categories, Category, Cost, CostTime, DebugDepth, Primitive, axes as axes_of};
+use monaka_contract::debug_draw::{COSTS, Categories, Category, Cost, CostTime, DebugDepth, Primitive, axes as axes_of};
 use monaka_core::sync::Locked;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::*};
 
-pub use monaka_core::debug_draw::{BLUE, CYAN, GREEN, MAGENTA, ORANGE, RED, WHITE, YELLOW, rgba};
+pub use monaka_contract::debug_draw::{BLUE, CYAN, GREEN, MAGENTA, ORANGE, RED, WHITE, YELLOW, rgba};
 
 /// How often the viewer's wishes are read again (ms).
 const REFRESH_MS: u64 = 100;
@@ -190,7 +190,7 @@ pub fn wanted_buffer() -> u32 {
 }
 
 /// Lists the depth buffers the game drew with, and which is shared (1 the first, 0 none).
-pub fn share_candidates(candidates: &[monaka_core::debug_draw::DepthCandidate], chosen: u32) {
+pub fn share_candidates(candidates: &[monaka_contract::debug_draw::DepthCandidate], chosen: u32) {
     if let Ok(mut channel) = CHANNEL.try_lock()
         && let Some(channel) = channel.as_mut()
     {
@@ -205,7 +205,7 @@ pub fn wanted_target() -> u32 {
 }
 
 /// Lists the render targets the game drew into, and which is shared (1 the first, 0 none).
-pub fn share_targets(targets: &[monaka_core::debug_draw::DepthCandidate], chosen: u32) {
+pub fn share_targets(targets: &[monaka_contract::debug_draw::DepthCandidate], chosen: u32) {
     if let Ok(mut channel) = CHANNEL.try_lock()
         && let Some(channel) = channel.as_mut()
     {

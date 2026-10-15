@@ -1,17 +1,17 @@
 //! HUD pieces the game publishes on their own (`<channel>-panel-<piece>`, premultiplied RGBA),
 //! shown on the hands: each a quad in its controller's grip space, so the runtime moves it with
 //! the hand at the headset's own rate, on the back of the hand or above the palm. The producer
-//! declares its pieces and where each goes ([`monaka_core::panels`]); the declaration and each
+//! declares its pieces and where each goes ([`monaka_contract::panels`]); the declaration and each
 //! piece's channel are looked for now and then until they appear.
 
 use monaka_channel::d3d::{self, create_texture, simple_texture_desc};
 use monaka_channel::panels::PanelsChannel;
 use monaka_channel::reader::{self, FenceReader};
 use monaka_channel::ChannelName;
-use monaka_core::panels::{Place, Side};
+use monaka_contract::panels::{Place, Side};
 use monaka_core::math::{Quat, Vec3, add, conjugate, from_axes, multiply, rotate, sub};
-use monaka_core::protocol::{HandPose, HeadPose};
-use monaka_core::protocol::{RIGHT_HAND, dxgi_format};
+use monaka_contract::protocol::{HandPose, HeadPose};
+use monaka_contract::protocol::{RIGHT_HAND, dxgi_format};
 use monaka_openxr::{Extent2Df, Layer, Posef, Session, Space, Swapchain};
 use windows::Win32::Graphics::Direct3D11::{D3D11_BIND_SHADER_RESOURCE, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
@@ -100,7 +100,8 @@ pub struct HandPanel<'s> {
     name: Option<ChannelName>,
     format: u32,
     reader: Option<FenceReader>,
-    textures: Option<[ID3D11Texture2D; 2]>,
+    /// The panel as last read (one image: the channel carries one).
+    texture: Option<ID3D11Texture2D>,
     swapchain: Option<Swapchain<'s>>,
     size: (u32, u32),
     seen: u64,
@@ -114,7 +115,7 @@ impl<'s> HandPanel<'s> {
         // The channel's texels are RGBA8 and are copied as they are.
         let rgba = matches!(format, dxgi_format::R8G8B8A8_UNORM | dxgi_format::R8G8B8A8_UNORM_SRGB);
         let name = channel.panel(&piece).filter(|_| rgba);
-        Self { piece, place, name, format, reader: None, textures: None, swapchain: None, size: (0, 0), seen: 0, frames: 0 }
+        Self { piece, place, name, format, reader: None, texture: None, swapchain: None, size: (0, 0), seen: 0, frames: 0 }
     }
 
     /// Once per frame: opens the channel when it appears and takes a new panel into the swapchain.
@@ -128,17 +129,17 @@ impl<'s> HandPanel<'s> {
             let Some(Ok(description)) = reader::describe_any(name) else { return };
             let Ok(reader) = FenceReader::open(name, device) else { return };
             let size = (description.width, description.height);
-            // The staging textures in the channel's own format (the reader wants an exact match;
+            // The staging texture in the channel's own format (the reader wants an exact match;
             // the eyes' format, sRGB or not, is of the same family, so the copy into the
             // swapchain is allowed).
             let mut desc = simple_texture_desc(size.0, size.1, DXGI_FORMAT(description.format as i32));
             desc.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32;
-            let (Ok(a), Ok(b)) = (create_texture(device, &desc), create_texture(device, &desc)) else { return };
+            let Ok(texture) = create_texture(device, &desc) else { return };
             match session.create_swapchain(self.format as i64, size.0, size.1) {
                 Ok(swapchain) => {
                     println!("HUD panel {} on the {} hand, {:?} ({}x{})", self.piece, if self.place.hand == RIGHT_HAND { "right" } else { "left" }, self.place.side, size.0, size.1);
                     self.reader = Some(reader);
-                    self.textures = Some([a, b]);
+                    self.texture = Some(texture);
                     self.swapchain = Some(swapchain);
                     self.size = size;
                 }
@@ -149,20 +150,19 @@ impl<'s> HandPanel<'s> {
             }
             return;
         }
-        let (Some(reader), Some(textures), Some(swapchain)) = (&mut self.reader, &self.textures, &self.swapchain) else { return };
-        match reader.read(context, [&textures[0], &textures[1]], self.seen) {
+        let (Some(reader), Some(texture), Some(swapchain)) = (&mut self.reader, &self.texture, &self.swapchain) else { return };
+        match reader.read_one(context, texture, self.seen) {
             Ok(Some(pair)) => {
                 self.seen = pair.sequence;
                 let _ = swapchain.fill(|image| {
-                    d3d::copy_texture(context, image, &textures[0]);
-                    d3d::flush(context);
+                    d3d::copy_texture(context, image, texture);
                 });
             }
             Ok(None) => {}
             Err(e) => {
                 println!("HUD panel {} lost: {e}", self.piece);
                 self.reader = None;
-                self.textures = None;
+                self.texture = None;
                 self.swapchain = None;
                 self.seen = 0;
             }

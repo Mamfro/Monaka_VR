@@ -1,4 +1,4 @@
-//! Controller smoothing (`--controller-smoothing`, 0 off to 10): steadies the small shakes in the
+//! Controller smoothing (the `controller_smoothing` option, 0 off to 10): steadies the small shakes in the
 //! controllers' tracking before any game reads them, without slowing real movement. Each hand's
 //! grip pose goes through a One Euro filter (Casiez, Roussel and Vogel): a low-pass
 //! whose cutoff rises with the hand's speed, so a hand held still is steadied hard while a swing or
@@ -7,7 +7,7 @@
 //! so the two never drift apart.
 
 use monaka_core::math::{self, Quat, Vec3, angle_between, conjugate, multiply, quat_unit, same_side};
-use monaka_core::protocol::HandPose;
+use monaka_contract::protocol::HandPose;
 
 /// The cutoff (Hz) at rest at strength 1; strength `s` divides it by `s` (10 Hz at 1, 1 Hz at 10).
 const REST_CUTOFF: f32 = 10.0;

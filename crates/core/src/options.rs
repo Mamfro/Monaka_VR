@@ -1,7 +1,7 @@
 //! Producer options: `key=value` lines in a text file beside the injected DLL. Blank lines and
 //! lines starting with `#` are ignored; a later line overrides an earlier one.
 //!
-//! The launcher writes the file from the game's manifest (`monaka_core::manifest`), one line per
+//! The launcher writes the file from the game's manifest (`monaka_contract::manifest`), one line per
 //! option, so the ids here are the launcher's own. [`Shared`] reads the options every game means
 //! the same way; a game's config reads its own on top. [`Options`] remembers which keys were
 //! read, so a producer test can check it reads every option its manifest offers
@@ -9,8 +9,8 @@
 
 use crate::alternate::Schedule;
 use crate::camera::{Frustum, HeadPosition};
-use crate::manifest::{Manifest, aims};
-use crate::protocol::{HeadPose, LEFT_HAND, RIGHT_HAND};
+use monaka_contract::manifest::{Manifest, aims, parse_size};
+use monaka_contract::protocol::{HeadPose, LEFT_HAND, RIGHT_HAND};
 use std::str::FromStr;
 use std::sync::Mutex;
 
@@ -80,7 +80,7 @@ impl Options {
 
     /// `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`, else `default`.
     pub fn switch(&self, key: &str, default: bool) -> bool {
-        self.text(key).and_then(crate::manifest::parse_switch).unwrap_or(default)
+        self.text(key).and_then(monaka_contract::manifest::parse_switch).unwrap_or(default)
     }
 
     /// One of `choices` by its id (any case), else `default`.
@@ -106,12 +106,35 @@ impl Options {
     }
 }
 
-/// An eye image size, `WxH` or `W H` (for example the headset's, from `monaka_viewer --info`),
-/// each side 256..=8192.
-pub fn parse_size(text: &str) -> Option<(u32, u32)> {
-    let (w, h) = text.trim().split_once(['x', 'X', ' ', ','])?;
-    let (w, h) = (w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?);
-    ((256..=8192).contains(&w) && (256..=8192).contains(&h)).then_some((w, h))
+/// The options the launcher's defaults would make, and once more for each value another option
+/// waits on (`Opt::when`: the FSR settings behind `fsr=1`, the aiming hand behind
+/// `aim=controller`). With `read` having parsed each, the ids it never looked at: a producer
+/// test's check that it reads every option its manifest offers.
+pub fn unread_options(game: &Manifest, mut read: impl FnMut(&Options)) -> Vec<String> {
+    let mut variants: Vec<Option<(&str, &str)>> = vec![None];
+    for opt in game.options {
+        if let Some(when) = opt.when
+            && !variants.contains(&Some(when))
+        {
+            variants.push(Some(when));
+        }
+    }
+    let mut seen: Vec<String> = Vec::new();
+    for variant in variants {
+        let text: Vec<String> = game
+            .options
+            .iter()
+            .filter(|o| o.producer)
+            .map(|o| match variant {
+                Some((id, value)) if id == o.id => format!("{id}={value}"),
+                _ => format!("{}={}", o.id, o.default_text()),
+            })
+            .collect();
+        let options = Options::parse(&text.join("\n"));
+        read(&options);
+        seen.extend(options.keys_read());
+    }
+    game.options.iter().filter(|o| o.producer && !seen.iter().any(|k| k == o.id)).map(|o| o.id.to_owned()).collect()
 }
 
 // ---- The settings every game reads alike ----

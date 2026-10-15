@@ -2,9 +2,9 @@
 //! changed.
 
 use super::{Click, Item, Menu, PAGE_TAB, Press, Settings, Status, TABS};
-use monaka_core::page::{Kind, Tone};
+use monaka_contract::page::{Kind, Tone};
 use crate::Result;
-use crate::canvas::Canvas;
+use crate::canvas::{Canvas, Cursor};
 use egui::{Align2, Color32, CornerRadius, FontId, Frame, Margin, RichText, Sense, Stroke, StrokeKind, Vec2};
 use windows::Win32::Graphics::Direct3D11::*;
 #[cfg(test)]
@@ -28,6 +28,7 @@ const WARN: Color32 = Color32::from_rgb(240, 110, 90);
 
 pub struct Panel {
     canvas: Canvas,
+    cursor: Cursor,
     shown: Option<(Menu, Settings, Status, bool)>,
 }
 
@@ -43,7 +44,7 @@ pub(crate) fn outline(on: bool) -> Stroke {
 impl Panel {
     /// A panel drawn in `format` (the headset's image format).
     pub fn new(format: DXGI_FORMAT) -> Self {
-        Self { canvas: Canvas::new(format, PIXELS), shown: None }
+        Self { canvas: Canvas::new(format, PIXELS), cursor: Cursor::default(), shown: None }
     }
 
     /// The menu's latest image, once drawn.
@@ -70,6 +71,29 @@ impl Panel {
             self.shown = Some(now);
         }
         Ok(image)
+    }
+}
+
+impl Panel {
+    /// [`Panel::draw`] for a pointer in the headset: what it did on the menu since the last draw
+    /// (`events`), the cursor where it is, and the click it made, if one. Drawn when the menu shows
+    /// something new or the pointer did anything.
+    pub fn draw_pointed(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, menu: &Menu, settings: &Settings, status: &Status, events: Vec<egui::Event>) -> Result<(Option<&ID3D11Texture2D>, Option<Click>)> {
+        let now = (*menu, *settings, *status, false);
+        if self.shown == Some(now) && self.canvas.image().is_some() && events.is_empty() {
+            return Ok((None, None));
+        }
+        self.cursor.follow(&events);
+        let cursor = self.cursor;
+        let mut click = None;
+        let image = self.canvas.draw_with(device, context, events, |ui| {
+            click = layout(ui, menu, settings, status, true, false);
+            cursor.paint(ui.ctx());
+        })?;
+        if image.is_some() {
+            self.shown = Some(now);
+        }
+        Ok((image, click))
     }
 }
 

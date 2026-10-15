@@ -1,4 +1,4 @@
-//! The 2D window ([`monaka_core::manifest::DESKTOP_ARG`]): the run without a headset. The game
+//! The 2D window ([`monaka_contract::manifest::DESKTOP_ARG`]): the run without a headset. The game
 //! renders as for the headset, from a still synthetic head; its left eye shows in a desktop
 //! window with the debug views drawn on it, and the debug menu and its panels float over it as
 //! windows used with the mouse ([`DebugViews::window_ui`]). The window never takes focus, so the
@@ -12,11 +12,11 @@ use crate::{PRODUCER_SILENCE_MS, console, meter};
 use monaka_channel::d3d::{self, create_texture, find_adapter, simple_texture_desc};
 use monaka_channel::pose::PoseChannel;
 use monaka_channel::{ChannelName, tick};
-use monaka_core::protocol::{HeadPose, RenderedPair};
+use monaka_contract::protocol::{HeadPose, RenderedPair};
 use monaka_overlay::blit::{self, BlitPass};
 use monaka_channel::console::ConsoleChannel;
 use monaka_channel::hands::HandChannel;
-use monaka_core::protocol::HandPose;
+use monaka_contract::protocol::HandPose;
 use monaka_overlay::fake_vr::FakeVr;
 use monaka_overlay::panels::{Asked, Content};
 use monaka_overlay::window::Window;
@@ -50,12 +50,12 @@ pub fn run(name: &ChannelName, seconds: u64, producer_wait: u64, captures: Optio
     drawn_desc.BindFlags = (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32;
     let drawn = [create_texture(&device, &drawn_desc)?, create_texture(&device, &drawn_desc)?];
 
-    let mut poses = crate::side_channel("head pose channel", PoseChannel::open(name))?;
+    let mut poses = crate::pose_channel(PoseChannel::open(name))?;
     // Still, straight ahead, with a headset's field of view: the game renders as for a headset.
     // The fake head and controllers (the Fake VR panel): the head ahead, the hands held forward.
     let mut fake = FakeVr::desktop();
     let mut head = HeadPose::synthetic(fake.head[0], fake.head[1], HeadPose::SYNTHETIC_FOV, IPD);
-    let mut hands = crate::side_channel("hand channel", HandChannel::open(name))?;
+    let mut hands = crate::side_channel("hand channel", HandChannel::open(name));
     if let Some(poses) = poses.as_mut() {
         poses.write_head(&head);
     }
@@ -182,7 +182,7 @@ pub fn run(name: &ChannelName, seconds: u64, producer_wait: u64, captures: Optio
     println!("2D window: {frames} frames shown, {shown} pairs received");
     if closed {
         println!("2D window closed: VR stops");
-        return Ok(monaka_core::manifest::CLOSED_BY_PLAYER);
+        return Ok(monaka_contract::manifest::CLOSED_BY_PLAYER);
     }
     Ok(if shown > 0 { 0 } else { 2 })
 }

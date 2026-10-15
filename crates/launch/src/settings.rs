@@ -4,7 +4,7 @@
 //! readable after an update), for when it comes back.
 
 use crate::games::Values;
-use monaka_core::manifest::MONAKA;
+use monaka_contract::manifest::MONAKA;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 

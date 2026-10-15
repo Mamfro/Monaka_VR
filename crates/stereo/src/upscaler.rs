@@ -35,7 +35,7 @@ pub mod fsr11;
 pub mod own_dlss;
 
 use monaka_core::feature::Feature;
-use monaka_core::manifest::{Kind, Opt, Shown, opt};
+use monaka_contract::manifest::{Kind, Opt, Shown, opt};
 use monaka_framegen::{ffx_imports, upscale_per_eye};
 use monaka_producer::game::{Component, Game, Switch};
 

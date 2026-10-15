@@ -1,6 +1,6 @@
 use super::*;
 use monaka_channel::d3d::{create_device, create_texture, read_image, simple_texture_desc};
-use monaka_core::debug_draw::{Category, RED, WHITE};
+use monaka_contract::debug_draw::{Category, RED, WHITE};
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_TYPELESS, DXGI_FORMAT_R8G8B8A8_UNORM};
 
 const SIZE: u32 = 64;

@@ -5,7 +5,7 @@
 
 use monaka_channel::d3d;
 use monaka_channel::fence::ReadDepth;
-use monaka_core::protocol::dxgi_format;
+use monaka_contract::protocol::dxgi_format;
 use monaka_openxr::{DepthView, Session, Swapchain};
 use windows::Win32::Graphics::Direct3D11::{ID3D11DeviceContext, ID3D11Texture2D};
 
@@ -69,7 +69,6 @@ impl<'s> DepthChains<'s> {
             chain
                 .fill(|image| {
                     d3d::copy_texture(context, image, source);
-                    d3d::flush(context);
                 })
                 .ok()?;
         }

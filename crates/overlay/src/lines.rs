@@ -1,11 +1,11 @@
-//! Debug lines over an eye image ([`monaka_core::debug_draw::Primitive`]s in tracking space), drawn
+//! Debug lines over an eye image ([`monaka_contract::debug_draw::Primitive`]s in tracking space), drawn
 //! with the eye's own pose and field of view into the image itself, a few pixels wide whatever
 //! their distance, over everything (no depth test). The image's alpha is left as it was.
 
 use crate::Result;
 use crate::eye::EyeView;
 use crate::gpu::{self, Constants, Structured, Targets};
-use monaka_core::debug_draw::Primitive;
+use monaka_contract::debug_draw::Primitive;
 use windows::Win32::Graphics::Direct3D::D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;

@@ -25,7 +25,7 @@
 
 use monaka_core::camera::{direction_yaw_pitch, pointing_yaw_pitch};
 use monaka_core::pad::{StickTurn, TurnLatch};
-use monaka_core::protocol::{HeadPose, LEFT_HAND};
+use monaka_contract::protocol::{HeadPose, LEFT_HAND};
 use monaka_pad::mouse;
 use monaka_producer::log;
 use std::sync::Mutex;

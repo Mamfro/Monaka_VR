@@ -23,7 +23,7 @@ use crate::same_frame::d3d12::sink;
 use crate::same_frame::{EyeHud, PairHud, PresentsPairs};
 use crate::providers::FrameInputs;
 use monaka_channel::d3d12::{self, Recorder};
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_ffx::Size2;
 use monaka_framegen::hud12::HudComposer;

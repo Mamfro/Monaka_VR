@@ -230,6 +230,7 @@ pub const TYPE_FRAME_WAIT_INFO: StructureType = 33;
 pub const TYPE_COMPOSITION_LAYER_PROJECTION: StructureType = 35;
 pub const TYPE_COMPOSITION_LAYER_QUAD: StructureType = 36;
 pub const TYPE_REFERENCE_SPACE_CREATE_INFO: StructureType = 37;
+pub const TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING: StructureType = 40;
 pub const TYPE_VIEW_CONFIGURATION_VIEW: StructureType = 41;
 pub const TYPE_FRAME_STATE: StructureType = 44;
 pub const TYPE_FRAME_BEGIN_INFO: StructureType = 46;

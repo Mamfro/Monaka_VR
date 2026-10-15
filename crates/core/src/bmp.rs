@@ -52,7 +52,7 @@ pub fn bgra(width: u32, height: u32, rows: &[u8]) -> Vec<u8> {
 /// Normalize one packed texel in a supported stereo DXGI format to RGBA8.
 /// This is numeric channel conversion, not HDR tone mapping or gamma conversion.
 pub fn dxgi_rgba8(format: u32, pixel: [u8; 4]) -> Option<[u8; 4]> {
-    use crate::protocol::dxgi_format::*;
+    use monaka_contract::protocol::dxgi_format::*;
     match format {
         R8G8B8A8_UNORM => Some(pixel),
         B8G8R8A8_UNORM => Some([pixel[2], pixel[1], pixel[0], pixel[3]]),

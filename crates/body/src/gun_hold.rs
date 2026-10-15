@@ -15,7 +15,7 @@
 use crate::Frames;
 use monaka_core::camera::{IDENTITY_MATRIX, Mat34, apply_3x3, apply_head, compose, position, rigid_inverse};
 use monaka_core::math::{Vec3, dot, forward_axis, length, sub, unit};
-use monaka_core::protocol::HandPose;
+use monaka_contract::protocol::HandPose;
 use monaka_core::reach::turn_about;
 
 /// A held weapon lined up with its controller, as the game describes it.

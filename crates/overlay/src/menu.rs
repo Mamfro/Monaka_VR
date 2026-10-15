@@ -4,8 +4,8 @@
 //! viewer acts on. [`panel`] draws it.
 
 use crate::panels::{PanelId, Panels};
-use monaka_core::debug_draw::{Categories, Category, DEPTH_CANDIDATES, DepthCandidate};
-use monaka_core::page::{self, Page};
+use monaka_contract::debug_draw::{Categories, Category, DEPTH_CANDIDATES, DepthCandidate};
+use monaka_contract::page::{self, Page};
 
 pub mod panel;
 pub(crate) mod painter;
@@ -84,7 +84,7 @@ pub enum Item {
     SaveCapture,
     /// A panel of its own beside the menu, on or off ([`crate::panels`]).
     Panel(PanelId),
-    /// Row `n` of the game's page ([`monaka_core::page`]).
+    /// Row `n` of the game's page ([`monaka_contract::page`]).
     Page(u8),
 }
 
@@ -437,8 +437,8 @@ const REPEAT: f64 = 0.12;
 impl StickRepeat {
     /// The left stick and the D-pad of `pad` at `now` (seconds): a D-pad direction held is the
     /// stick pushed all the way that way.
-    pub fn step_pad(&mut self, pad: &monaka_core::pad::Gamepad, now: f64) -> Option<Press> {
-        use monaka_core::pad::button;
+    pub fn step_pad(&mut self, pad: &monaka_contract::gamepad::Gamepad, now: f64) -> Option<Press> {
+        use monaka_contract::gamepad::button;
         let held = |bit: u16| pad.buttons & bit != 0;
         let along = |stick: i16, plus: u16, minus: u16| match (held(plus), held(minus)) {
             (true, false) => 1.0,

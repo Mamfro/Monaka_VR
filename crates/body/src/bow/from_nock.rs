@@ -18,7 +18,7 @@ use crate::held::Kind;
 use monaka_core::camera::{Mat34, apply_3x3, unapply_3x3};
 use monaka_core::gesture::Pull;
 use monaka_core::math::{self, Vec3, dot, sub};
-use monaka_core::protocol::LEFT_HAND;
+use monaka_contract::protocol::LEFT_HAND;
 use monaka_core::sync::Locked;
 use monaka_producer::log;
 use std::sync::Mutex;

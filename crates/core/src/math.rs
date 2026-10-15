@@ -1,7 +1,7 @@
 //! Head and eye geometry in OpenXR conventions: +X right, +Y up, looking down -Z, quaternions
 //! stored xyzw.
 
-use crate::protocol::{EyeGaze, HeadPose};
+use monaka_contract::protocol::{EyeGaze, HeadPose};
 
 pub type Quat = [f32; 4];
 pub type Vec3 = [f32; 3];

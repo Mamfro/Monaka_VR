@@ -4,13 +4,14 @@
 //! controller's buttons where an Xbox pad has them: thumbsticks to sticks, triggers to triggers,
 //! grips to bumpers, face buttons to A/B (right) and X/Y (left), menu to Start.
 //!
-//! What the pad goes through once read (the controller proxy, `--act-like`; the d-pad layer; the
-//! held d-pad choices, `--dpad-hold`) is [`monaka_core::pad_layer`], which the harness applies too.
+//! What the pad goes through once read (the controller proxy, `controller_proxy`; the d-pad
+//! layer; the held d-pad choices, `dpad_menus`) is [`monaka_core::pad_layer`], which the harness applies too.
 //! The layer's controls are actions of their own here: `pad_dpad_layer` (the d-pad and Back, on
 //! the left thumbrest by default), `pad_dpad_shift` (the d-pad only: Index controllers' left
 //! trackpad touch, since pressing that trackpad is Start) and the proxy's stand-in.
 
-use monaka_core::pad::{Gamepad, button, stick, trigger};
+use monaka_core::pad::{stick, trigger};
+use monaka_contract::{gamepad::Gamepad, gamepad::button};
 pub use monaka_core::pad_layer::{Proxy, dpad_directions};
 use monaka_core::pad_layer::{Held, Layers};
 use monaka_openxr::{Action, ActionSet, Result, Session};
@@ -184,7 +185,13 @@ impl<'s> PadActions<'s> {
         Ok(Self { actions, layers: Cell::new(Layers::new(hold, proxy)) })
     }
 
-    /// The controllers act like `proxy` from the next read (the headset's Monaka menu).
+    /// The d-pad directions held and the proxy of another game, from the next read (a game linked
+    /// into the home's viewer).
+    pub fn set_layers(&self, hold: u16, proxy: Proxy) {
+        self.layers.set(Layers::new(hold, proxy));
+    }
+
+    /// The controllers act like `proxy` from the next read (set in the headset's home).
     pub fn set_proxy(&self, proxy: Proxy) {
         let mut layers = self.layers.get();
         layers.proxy = proxy;

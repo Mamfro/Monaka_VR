@@ -95,7 +95,7 @@ fn on<G: Hits>(run: &Run<'_, G>) -> On {
 
 static PHYSICAL: OnceLock<Physical> = OnceLock::new();
 /// The hand whose weapon the look follows.
-static AIM_SIDE: AtomicUsize = AtomicUsize::new(monaka_core::protocol::RIGHT_HAND);
+static AIM_SIDE: AtomicUsize = AtomicUsize::new(monaka_contract::protocol::RIGHT_HAND);
 static LOOK: ReachLook = ReachLook::new();
 /// The blade at the last two looks: [before, latest].
 static BLADES: Mutex<[Option<held::WorldLine>; 2]> = Mutex::new([None; 2]);

@@ -8,7 +8,7 @@
 //! method holds that input neutral itself).
 
 use monaka_core::aim::Levelling;
-use monaka_core::manifest::{Kind, Opt, line};
+use monaka_contract::manifest::{Kind, Opt, line};
 use monaka_core::sync::Locked;
 use monaka_producer::game::{Component, Game, Lack, Start, Switch};
 use monaka_producer::log;

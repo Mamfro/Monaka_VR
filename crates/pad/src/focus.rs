@@ -5,7 +5,7 @@
 //! inactive, `WM_KILLFOCUS`) stop there, everything else goes on to the game's own; it is put back
 //! at the give-back.
 
-use monaka_core::manifest::{Kind, Opt, opt};
+use monaka_contract::manifest::{Kind, Opt, opt};
 use monaka_producer::game::{Component, Game, Switch};
 use monaka_producer::log;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

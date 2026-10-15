@@ -9,7 +9,7 @@
 //! at once. A copy is never unloaded: it stays loaded and inert after its stop.
 
 use monaka_core::pe::{self, Image};
-use monaka_core::status::{State, code};
+use monaka_contract::status::{State, code};
 use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HMODULE, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
@@ -47,8 +47,8 @@ fn producer_host(file_name: &str, bytes: &[u8]) -> Result<String, Failure> {
     let packed = pe::file_export_u32(bytes, "MONAKA_CONTRACT")
         .map_err(|e| format!("{file_name}: {e}"))?
         .ok_or_else(|| format!("{file_name} is not a game pack for this Monaka (it has no MONAKA_CONTRACT export)"))?;
-    let contract = monaka_core::pack::Contract::from_packed(packed);
-    monaka_core::pack::CONTRACT.runs(contract).map_err(|why| format!("{file_name} cannot run: {why}"))?;
+    let contract = monaka_contract::pack::Contract::from_packed(packed);
+    monaka_contract::pack::CONTRACT.runs(contract).map_err(|why| format!("{file_name} cannot run: {why}"))?;
     pe::file_export_text(bytes, "MONAKA_HOST")
         .map_err(|e| format!("{file_name}: {e}"))?
         .ok_or_else(|| format!("{file_name} does not name its game (no MONAKA_HOST export)"))

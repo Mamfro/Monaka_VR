@@ -99,7 +99,7 @@ fn the_stick_presses_once_then_repeats_while_held() {
 
 #[test]
 fn the_d_pad_presses_as_the_stick_pushed_all_the_way() {
-    use monaka_core::pad::{Gamepad, button};
+    use monaka_contract::{gamepad::Gamepad, gamepad::button};
     let mut stick = StickRepeat::default();
     let pad = |buttons: u16| Gamepad { buttons, ..Gamepad::default() };
     assert_eq!(stick.step_pad(&pad(button::DPAD_DOWN), 0.0), Some(Press::Down));
@@ -111,7 +111,7 @@ fn the_d_pad_presses_as_the_stick_pushed_all_the_way() {
 }
 
 fn with_page() -> Status {
-    use monaka_core::page::Row;
+    use monaka_contract::page::Row;
     let rows = [Row::heading("Camera"), Row::button(10, "Use", "VP +64"), Row::text("Eye", "(1, 2, 3)"), Row::button(11, "Turn test", "")];
     Status { page: Page::new("Explorer", &rows), ..everything_offered() }
 }

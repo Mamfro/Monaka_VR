@@ -5,7 +5,7 @@
 //! (or of the game's picture alone, overlays on it) saved as PNG, its path the answer.
 
 use crate::debug_views::DebugViews;
-use monaka_core::debug_draw::Category;
+use monaka_contract::debug_draw::Category;
 use monaka_overlay::fake_vr::{FakeVr, Hand, Preset};
 use monaka_overlay::panels::PanelId;
 use std::fmt::Write;

@@ -1,15 +1,16 @@
 //! The debug menu's panels in the headset ([`monaka_overlay::panels`]): the panels switched on in
 //! the Panels tab float in a row with the menu, the menu first ([`strip`]). While the menu is open
-//! the row slides so the one the pad drives (LB / RB pick it) is where the menu opened, outlined;
-//! with the menu closed the panels stay where they were until switched off. A page is drawn again
-//! a few times a second, and at once when it is outlined or let go.
+//! LB / RB slide the row so another panel is where the menu opened; with the menu closed the panels
+//! stay where they were until switched off. A controller points at them ([`crate::pointer`]). A
+//! page is drawn again a few times a second, and at once when the pointer does anything on it.
 
 use monaka_channel::d3d;
 use monaka_core::math::{self, Quat, Vec3};
 
 use monaka_openxr::{Extent2Df, Layer, Posef, Session, Space, Swapchain};
-use monaka_overlay::canvas::Canvas;
-use monaka_overlay::panels::{self, Content, HeadsetFocus, PanelId, Panels};
+use monaka_overlay::canvas::{Canvas, Cursor};
+use monaka_overlay::egui;
+use monaka_overlay::panels::{self, Asked, Content, PanelId, Panels};
 use monaka_overlay::quad::Rectangle;
 use std::time::{Duration, Instant};
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
@@ -72,8 +73,7 @@ struct Shown<'s> {
     canvas: Canvas,
     swapchain: Option<Swapchain<'s>>,
     drawn_at: Option<Instant>,
-    /// What it was last drawn as (outlined or not, the console's place).
-    drawn_as: Option<HeadsetFocus>,
+    cursor: Cursor,
     failed: bool,
 }
 
@@ -96,21 +96,22 @@ impl<'s> HeadsetPanels<'s> {
             match self.shown.iter_mut().find(|s| s.id == id) {
                 Some(shown) if slide => shown.place = *place,
                 Some(_) => {}
-                None => self.shown.push(Shown { id, place: *place, canvas: Canvas::new(self.format, id.pixels()), swapchain: None, drawn_at: None, drawn_as: None, failed: false }),
+                None => self.shown.push(Shown { id, place: *place, canvas: Canvas::new(self.format, id.pixels()), swapchain: None, drawn_at: None, cursor: Cursor::default(), failed: false }),
             }
         }
     }
 
-    /// Draws each panel's page when it is due or shown otherwise now (`focus`: outlined, the
-    /// console's place), and hands it to the headset.
-    pub fn show(&mut self, session: &'s Session<'_>, device: &ID3D11Device, context: &ID3D11DeviceContext, content: &Content<'_>, now: Instant, focus: impl Fn(PanelId) -> HeadsetFocus) {
+    /// Draws each panel's page when it is due or the pointer did anything on it (`events`, by
+    /// panel), and hands it to the headset; what was asked on one, if anything.
+    pub fn show(&mut self, session: &'s Session<'_>, device: &ID3D11Device, context: &ID3D11DeviceContext, content: &Content<'_>, now: Instant, mut events: impl FnMut(PanelId) -> Vec<egui::Event>) -> Option<Asked> {
+        let mut asked = None;
         for shown in self.shown.iter_mut().filter(|s| !s.failed) {
-            let wanted = focus(shown.id);
-            if shown.drawn_as == Some(wanted) && shown.drawn_at.is_some_and(|at| now.duration_since(at) < REDRAW) {
+            let pointed = events(shown.id);
+            if pointed.is_empty() && shown.drawn_at.is_some_and(|at| now.duration_since(at) < REDRAW) {
                 continue;
             }
             shown.drawn_at = Some(now);
-            shown.drawn_as = Some(wanted);
+            shown.cursor.follow(&pointed);
             if shown.swapchain.is_none() {
                 let [w, h] = shown.id.pixels();
                 match session.create_swapchain(self.format.0 as i64, w, h) {
@@ -122,8 +123,11 @@ impl<'s> HeadsetPanels<'s> {
                     }
                 }
             }
-            let id = shown.id;
-            let image = match shown.canvas.draw(device, context, |ui| panels::headset_page(ui, id, content, &wanted)) {
+            let (id, cursor) = (shown.id, shown.cursor);
+            let image = match shown.canvas.draw_with(device, context, pointed, |ui| {
+                asked = panels::headset_page(ui, id, content).or(asked.take());
+                cursor.paint(ui.ctx());
+            }) {
                 Ok(Some(image)) => image.clone(),
                 Ok(None) => continue,
                 Err(e) => {
@@ -135,13 +139,13 @@ impl<'s> HeadsetPanels<'s> {
             if let Some(swapchain) = &shown.swapchain
                 && let Err(e) = swapchain.fill(|target| {
                     d3d::copy_texture(context, target, &image);
-                    d3d::flush(context);
                 })
             {
                 println!("Debug panels: {} could not be shown ({e}); it is off this run", id.label());
                 shown.failed = true;
             }
         }
+        asked
     }
 
     /// The panels' layers.

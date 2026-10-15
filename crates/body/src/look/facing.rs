@@ -23,7 +23,7 @@ use monaka_core::aim::Convention;
 use monaka_core::camera::head_yaw_pitch;
 use monaka_core::math::wrap_radians as wrapped;
 use monaka_core::pad::{StickTurn, TurnLatch};
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_producer::game::{Lack, Start};
 use monaka_producer::log;
@@ -407,7 +407,7 @@ pub fn steer<G: Looks + HandRig>(update: PlayerUpdate) {
         if began {
             log!("head aim: climbing; the head turns the character through the right stick");
         }
-        monaka_pad::press("climb", monaka_core::pad::Gamepad { thumb_rx: (climb.push * 32767.0) as i16, ..Default::default() }, 100);
+        monaka_pad::press("climb", monaka_contract::gamepad::Gamepad { thumb_rx: (climb.push * 32767.0) as i16, ..Default::default() }, 100);
         // Still live: the arms and the vertical look input go on as while steering.
         super::steered(now);
         if now.saturating_sub(climb.traced) >= 100 && CLIMB_TRACES.fetch_add(1, Relaxed) < 1500 {

@@ -5,7 +5,7 @@
 
 use crate::skeleton::Skeleton;
 use monaka_core::camera::{Mat34, position};
-use monaka_core::protocol::{HandPose, HeadPose};
+use monaka_contract::protocol::{HandPose, HeadPose};
 use monaka_producer::log;
 use std::sync::atomic::{AtomicU64, Ordering::*};
 

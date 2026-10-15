@@ -16,7 +16,7 @@
 //! without it: what that kind lacks reads as released, and the left grip stands in for what it has
 //! instead ([`proxied`]).
 
-use crate::pad::{Gamepad, button};
+use monaka_contract::{gamepad::Gamepad, gamepad::button};
 use std::time::{Duration, Instant};
 
 /// Which controller the ones at hand act like.

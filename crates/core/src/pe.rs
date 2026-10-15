@@ -183,7 +183,7 @@ pub fn file_export_u32(bytes: &[u8], name: &str) -> Result<Option<u32>> {
 /// `;`-separated), ignoring case.
 pub fn host_listed(hosts: &str, executable: &str) -> bool {
     // `*` (`manifest::ANY_EXECUTABLE`): a producer for any game on its engine checks the engine itself.
-    hosts.split(';').any(|host| !host.is_empty() && !executable.is_empty() && (host == crate::manifest::ANY_EXECUTABLE || host.eq_ignore_ascii_case(executable)))
+    hosts.split(';').any(|host| !host.is_empty() && !executable.is_empty() && (host == monaka_contract::manifest::ANY_EXECUTABLE || host.eq_ignore_ascii_case(executable)))
 }
 
 /// The RVA of the named export of an image mapped in memory (read through `image` by RVA), which

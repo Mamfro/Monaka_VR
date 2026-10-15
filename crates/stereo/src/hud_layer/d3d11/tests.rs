@@ -32,11 +32,11 @@ fn a_layout_keeps_its_place_in_the_placed_viewport() {
 struct Labelled;
 
 impl monaka_producer::game::Game for Labelled {
-    const MANIFESTS: &'static [monaka_core::manifest::Manifest] = &[];
+    const MANIFESTS: &'static [monaka_contract::manifest::Manifest] = &[];
     const ADAPTER: monaka_producer::game::Adapter<Self> = monaka_producer::game::Adapter { components: &[] };
     type Build = ();
     type Frame = ();
-    fn prepare(_: &'static monaka_producer::Session, _: &'static monaka_core::manifest::Manifest, _: &monaka_core::options::Options) -> Result<(), Rejection> {
+    fn prepare(_: &'static monaka_producer::Session, _: &'static monaka_contract::manifest::Manifest, _: &monaka_core::options::Options) -> Result<(), Rejection> {
         Ok(())
     }
 }

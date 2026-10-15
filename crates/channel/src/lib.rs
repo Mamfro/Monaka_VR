@@ -1,7 +1,7 @@
 //! Windows transport for the channels between game producers and the viewer.
 //!
 //! This is an edge crate: the Win32 and Direct3D calls live here, behind small safe types. The
-//! record layouts and the transport rules come from `monaka_core`.
+//! record layouts come from `monaka_contract`, the transport rules from `monaka_core`.
 //!
 //! - [`shared`]: named shared memory guarded by a named mutex.
 //! - [`pose`]: head pose (viewer to producer) and rendered-pair poses (producer to viewer).
@@ -26,9 +26,10 @@ pub mod panels;
 pub mod pose;
 pub mod reader;
 pub mod reticles;
+pub mod seqlock;
 pub mod shared;
 
-pub use monaka_core::protocol::ChannelName;
+pub use monaka_contract::protocol::ChannelName;
 
 use std::fmt;
 
@@ -44,7 +45,7 @@ pub enum Error {
     Incompatible(&'static str),
     /// The other side's record is the same kind at another protocol version: the game pack and
     /// this Monaka were built apart.
-    Version(monaka_core::protocol::Mismatch),
+    Version(monaka_contract::protocol::Mismatch),
     /// The header mutex could not be taken without waiting.
     Busy,
     /// A previous owner died holding a lock or key; the channel cannot be trusted.
@@ -75,11 +76,10 @@ impl From<windows::core::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// The error for a block of kind `what` (`magic` at `version` expected) found with `found_magic`
-/// and `found_version`: a version mismatch when it is that kind of block, else an incompatible one.
-pub(crate) fn incompatible_block(what: &'static str, (found_magic, found_version): (u32, u32), magic: u32, version: u32) -> Error {
-    let stamp = monaka_core::protocol::Stamp { magic: found_magic, version: found_version };
-    monaka_core::protocol::Mismatch::of(stamp, what, magic, version).map_or(Error::Incompatible(what), Error::Version)
+/// The error for a block of kind `what` (`magic` at major `major` expected) found with `stamp`: a
+/// version mismatch when it is that kind of block, else an incompatible one.
+pub(crate) fn incompatible_block(what: &'static str, stamp: monaka_contract::protocol::Stamp, magic: u32, major: u16) -> Error {
+    monaka_contract::protocol::Mismatch::of(stamp, what, magic, major).map_or(Error::Incompatible(what), Error::Version)
 }
 
 /// Milliseconds since boot, the clock the channels stamp pairs with.

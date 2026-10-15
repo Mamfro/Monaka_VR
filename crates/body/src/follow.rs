@@ -25,7 +25,7 @@ use checks::{
 use hold::{Hold, note_hold, two_handed};
 use monaka_core::camera::{self as cam, Mat34, apply_head, compose, position, rigid_inverse, translation};
 use monaka_core::math::{Vec3, unit, yaw, yaw_rotation};
-use monaka_core::protocol::{HandPose, HeadPose, LEFT_HAND, RIGHT_HAND};
+use monaka_contract::protocol::{HandPose, HeadPose, LEFT_HAND, RIGHT_HAND};
 use monaka_core::reach::{apply, arm_moves, spin_about, twist_between};
 use monaka_producer::log;
 use std::sync::Mutex;

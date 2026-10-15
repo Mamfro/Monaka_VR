@@ -15,7 +15,7 @@ use crate::hands::{self, At, In, Point};
 use monaka_core::feature::Feature;
 use monaka_core::gesture::wrist_roll;
 use monaka_core::math::{Quat, cross, dot, forward_axis, right_axis, wrap_degrees};
-use monaka_core::protocol::{HandPose, LEFT_HAND, RIGHT_HAND};
+use monaka_contract::protocol::{HandPose, LEFT_HAND, RIGHT_HAND};
 use monaka_core::sync::Locked;
 use monaka_pad::actions::{self, Action, Actions, Reading, Source};
 use monaka_producer::game::{Component, Lack, On, Run, Start, Switch};

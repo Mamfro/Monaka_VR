@@ -7,14 +7,31 @@
 
 use monaka_core::camera::{Mat34, compose, position};
 use monaka_core::math::{Vec3, cross, dot, unit};
-use monaka_core::protocol::{FingerPose, LEFT_HAND, RIGHT_HAND};
+use monaka_contract::protocol::{FingerPose, LEFT_HAND, RIGHT_HAND};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::time::Instant;
 
 /// Binary fingers ([`set_binary`]): each finger either open or clenched.
 static BINARY: AtomicBool = AtomicBool::new(false);
-/// Which fingers are clenched now, by side (thumb first).
-static CLENCHED: Mutex<[[bool; 5]; 2]> = Mutex::new([[false; 5]; 2]);
+/// Each hand's fingers with binary fingers on (by side, thumb first).
+static HANDS: Mutex<[Clench; 2]> = Mutex::new([Clench::OPEN; 2]);
+
+/// One hand's fingers with binary fingers on: which are clenched, how far each has gone from open
+/// toward the fist (0 to 1), and when that was worked out.
+#[derive(Clone, Copy)]
+struct Clench {
+    clenched: [bool; 5],
+    amount: [f32; 5],
+    at: Option<Instant>,
+}
+
+impl Clench {
+    const OPEN: Clench = Clench { clenched: [false; 5], amount: [0.0; 5], at: None };
+}
+
+/// How long a finger takes to go from open to the fist, or back (seconds): a quick clench, seen.
+const CLENCH_SECONDS: f32 = 0.15;
 
 /// A clenched finger's knuckles (radians, from the hand out: a tight fist), and an open one's (a
 /// relaxed hand). The thumb has two.
@@ -25,27 +42,42 @@ const OPEN: [[f32; 3]; 5] = [[0.1, 0.1, 0.0], [0.1, 0.15, 0.1], [0.1, 0.15, 0.1]
 const CLENCH_AT: f32 = 0.35;
 const OPEN_AT: f32 = 0.2;
 
-/// Turns binary fingers on or off: tracked fingers then snap to open or a tight fist (the Frame's
-/// finger sensing reads a finger on a trigger as half curled).
+/// Turns binary fingers on or off: tracked fingers then go to open or a tight fist (the Frame's
+/// finger sensing reads a finger on a trigger as half curled), moving there quickly rather than
+/// jumping.
 pub fn set_binary(on: bool) {
     BINARY.store(on, Relaxed);
 }
 
-/// `tracked` as the game should take it: unchanged, or snapped to open and clenched fingers with
-/// binary fingers on (`side` 0 left, 1 right).
+/// `tracked` as the game should take it: unchanged, or each finger on its way to open or clenched
+/// with binary fingers on (`side` 0 left, 1 right).
 pub fn shape(side: usize, tracked: FingerPose) -> FingerPose {
+    shape_at(side, tracked, Instant::now())
+}
+
+/// [`shape`] at `now`.
+fn shape_at(side: usize, tracked: FingerPose, now: Instant) -> FingerPose {
     if !BINARY.load(Relaxed) {
         return tracked;
     }
-    let Ok(mut clenched) = CLENCHED.lock() else { return tracked };
-    let Some(state) = clenched.get_mut(side) else { return tracked };
+    let Ok(mut hands) = HANDS.lock() else { return tracked };
+    let Some(hand) = hands.get_mut(side) else { return tracked };
+    // How far a finger may move since the last look (a hand seen again after a while gets there
+    // at once).
+    let step = hand.at.map_or(1.0, |at| now.saturating_duration_since(at).as_secs_f32() / CLENCH_SECONDS);
+    hand.at = Some(now);
     let mut shaped = tracked;
     for (finger, bends) in shaped.fingers.iter_mut().enumerate() {
         let full: f32 = FIST[finger].iter().sum();
         let curl: f32 = bends.iter().take(3).map(|b| if b.is_finite() { b.max(0.0) } else { 0.0 }).sum::<f32>() / full;
-        state[finger] = if state[finger] { curl >= OPEN_AT } else { curl >= CLENCH_AT };
-        let target = if state[finger] { FIST[finger] } else { OPEN[finger] };
-        *bends = [target[0], target[1], target[2], 0.0];
+        let clenched = &mut hand.clenched[finger];
+        *clenched = if *clenched { curl >= OPEN_AT } else { curl >= CLENCH_AT };
+        let amount = &mut hand.amount[finger];
+        *amount = if *clenched { (*amount + step).min(1.0) } else { (*amount - step).max(0.0) };
+        // Eased in and out: the finger starts and settles gently.
+        let eased = *amount * *amount * (3.0 - 2.0 * *amount);
+        let knuckle = |k: usize| OPEN[finger][k] + (FIST[finger][k] - OPEN[finger][k]) * eased;
+        *bends = [knuckle(0), knuckle(1), knuckle(2), 0.0];
     }
     shaped
 }

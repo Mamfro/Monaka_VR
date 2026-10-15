@@ -1,6 +1,6 @@
 //! A recorded debug stream: what the viewer kept of the last seconds of a run, one [`Frame`] per
 //! pair it showed: both eyes' poses and fields of view, the head and the controllers as tracked,
-//! and the debug drawing ([`crate::debug_draw`]) each eye was drawn with. The viewer writes it,
+//! and the debug drawing ([`monaka_contract::debug_draw`]) each eye was drawn with. The viewer writes it,
 //! the analysis mode and the playground's playback read it.
 //!
 //! The file: the 8 bytes `MNKSTRM1`, a little-endian `u32` version and a reserved `u32`, then
@@ -16,7 +16,7 @@
 //!
 //! All positions are in the headset's tracking space, in metres.
 
-use crate::debug_draw::{Category, KIND_SEGMENT, Primitive};
+use monaka_contract::debug_draw::{Category, KIND_SEGMENT, Primitive};
 use crate::math::{Quat, Vec3};
 
 #[cfg(test)]

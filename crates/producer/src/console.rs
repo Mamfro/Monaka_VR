@@ -1,5 +1,5 @@
 //! The probe console: part of every run while the debug menu is on (the launcher leaves
-//! [`monaka_core::manifest::DEBUG_MENU_MARKER`] in the run folder; [`open`] at the run's start,
+//! [`monaka_contract::manifest::DEBUG_MENU_MARKER`] in the run folder; [`open`] at the run's start,
 //! [`close`] first thing at its stop), it answers text commands from a tool (`monaka_play
 //! console`, the Console panel) through the run's console channel, on a thread of its own. What it does is
 //! research on the running game with no rebuild. Watching: probes at any function

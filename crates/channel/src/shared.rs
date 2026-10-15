@@ -1,11 +1,11 @@
 //! Named kernel objects: handles, mutexes, and shared-memory records guarded by a mutex.
 
 use crate::{Error, Result};
-use monaka_core::console::ConsoleBlock;
-use monaka_core::debug_draw::DebugBlock;
-use monaka_core::page::PageBlock;
-use monaka_core::panels::PanelsBlock;
-use monaka_core::protocol::{FenceHeader, FingerBlock, HandBlock, PoseBlock, ReticleBlock, Stamp, Versioned};
+use monaka_contract::console::ConsoleBlock;
+use monaka_contract::debug_draw::DebugBlock;
+use monaka_contract::page::PageBlock;
+use monaka_contract::panels::PanelsBlock;
+use monaka_contract::protocol::{DepthBlock, FenceHeader, FingerBlock, HandBlock, PoseBlock, ReticleBlock, Stamp, Versioned};
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
@@ -25,40 +25,76 @@ use windows::core::HSTRING;
 ///
 /// # Safety
 /// Implementors must be `#[repr(C)]` and made only of integers, floats and arrays or structs of
-/// them, so every bit pattern another process writes is a valid value.
-pub unsafe trait SharedRecord: Copy {}
+/// them, so every bit pattern another process writes is a valid value, and `CAPACITY` must be at
+/// least their size.
+pub unsafe trait SharedRecord: Copy {
+    /// The bytes a mapping of it has: its size, or for a [`Versioned`] record its fixed capacity, so
+    /// both sides map the same bytes whichever minor of the record each knows.
+    const CAPACITY: usize = size_of::<Self>();
+}
 
-// SAFETY: repr(C) records of integers and floats only.
-unsafe impl SharedRecord for PoseBlock {}
-unsafe impl SharedRecord for HandBlock {}
-unsafe impl SharedRecord for FingerBlock {}
-unsafe impl SharedRecord for ReticleBlock {}
-unsafe impl SharedRecord for DebugBlock {}
-unsafe impl SharedRecord for PageBlock {}
-unsafe impl SharedRecord for ConsoleBlock {}
-unsafe impl SharedRecord for PanelsBlock {}
-
-unsafe impl SharedRecord for FenceHeader {}
+// SAFETY: repr(C) records of integers and floats only; each capacity is checked against its size
+// where the record is declared.
+unsafe impl SharedRecord for PoseBlock {
+    const CAPACITY: usize = <Self as Versioned>::CAPACITY;
+}
+unsafe impl SharedRecord for HandBlock {
+    const CAPACITY: usize = <Self as Versioned>::CAPACITY;
+}
+unsafe impl SharedRecord for FingerBlock {
+    const CAPACITY: usize = <Self as Versioned>::CAPACITY;
+}
+unsafe impl SharedRecord for ReticleBlock {
+    const CAPACITY: usize = <Self as Versioned>::CAPACITY;
+}
+unsafe impl SharedRecord for DebugBlock {
+    const CAPACITY: usize = <Self as Versioned>::CAPACITY;
+}
+unsafe impl SharedRecord for PageBlock {
+    const CAPACITY: usize = <Self as Versioned>::CAPACITY;
+}
+unsafe impl SharedRecord for ConsoleBlock {
+    const CAPACITY: usize = <Self as Versioned>::CAPACITY;
+}
+unsafe impl SharedRecord for PanelsBlock {
+    const CAPACITY: usize = <Self as Versioned>::CAPACITY;
+}
+unsafe impl SharedRecord for DepthBlock {
+    const CAPACITY: usize = <Self as Versioned>::CAPACITY;
+}
+unsafe impl SharedRecord for FenceHeader {
+    const CAPACITY: usize = <Self as Versioned>::CAPACITY;
+}
 unsafe impl SharedRecord for Stamp {}
 
 impl<T: SharedRecord + Versioned> SharedBlock<T> {
     /// The block `name` (guarded by `lock`), made when it is not there yet and started when blank,
-    /// so either side may create it; refused when it holds another layout. Waits up to `wait_ms`
-    /// for the lock.
+    /// so either side may create it; refused when it holds another major version of its layout
+    /// (any minor is read: see `monaka_contract::protocol`). Waits up to `wait_ms` for the lock.
     pub fn open_versioned(name: &str, lock: &str, wait_ms: u32) -> Result<Self> {
-        let mut block = Self::create(name, lock, Create::OrOpen)?;
+        let mut block = match Self::create(name, lock, Create::OrOpen) {
+            Ok(block) => block,
+            // A mapping smaller than this side's capacity is another major's: say so, from its
+            // stamp, rather than that it would not map.
+            Err(e) => return Err(stamp_of(name, lock).map_or(e, |stamp| crate::incompatible_block(T::WHAT, stamp, T::MAGIC, T::MAJOR))),
+        };
         {
             let mut record = block.lock(wait_ms).tolerant().ok_or(Error::Busy)?;
             if record.is_blank() {
                 record.start();
             }
             if !record.is_compatible() {
-                let stamp = record.stamp();
-                return Err(crate::incompatible_block(T::WHAT, (stamp.magic, stamp.version), T::MAGIC, T::VERSION));
+                return Err(crate::incompatible_block(T::WHAT, record.stamp(), T::MAGIC, T::MAJOR));
             }
         }
         Ok(block)
     }
+}
+
+/// The stamp at the start of mapping `name`, whatever its size.
+fn stamp_of(name: &str, lock: &str) -> Option<Stamp> {
+    let mut block = SharedBlock::<Stamp>::open(name, lock, false).ok()?;
+    block.lock(0).tolerant().map(|stamp| *stamp)
 }
 
 /// A kernel handle closed on drop.
@@ -189,8 +225,8 @@ unsafe impl<T: SharedRecord> Send for SharedBlock<T> {}
 
 impl<T: SharedRecord> SharedBlock<T> {
     pub fn create(name: &str, lock_name: &str, mode: Create) -> Result<Self> {
-        let size = size_of::<T>() as u32;
-        // SAFETY: page-file-backed mapping of size_of::<T>() bytes; the name is valid.
+        let size = T::CAPACITY as u32;
+        // SAFETY: page-file-backed mapping of T::CAPACITY bytes; the name is valid.
         let mapping = unsafe { CreateFileMappingW(INVALID_HANDLE_VALUE, None, PAGE_READWRITE, 0, size, &HSTRING::from(name)) }?;
         // SAFETY: reads the last-error value set by the call above.
         let existed = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
@@ -215,10 +251,22 @@ impl<T: SharedRecord> SharedBlock<T> {
 
     fn map(mapping: OwnedHandle, mutex: NamedMutex, writable: bool) -> Result<Self> {
         let access = if writable { FILE_MAP_ALL_ACCESS } else { FILE_MAP_READ };
-        // SAFETY: maps size_of::<T>() bytes; fails if the existing mapping is smaller.
-        let view = unsafe { MapViewOfFile(mapping.raw(), access, 0, 0, size_of::<T>()) };
+        // SAFETY: maps T::CAPACITY bytes (at least a T); fails if the existing mapping is smaller.
+        let view = unsafe { MapViewOfFile(mapping.raw(), access, 0, 0, T::CAPACITY) };
         let view = NonNull::new(view.Value.cast::<T>()).ok_or_else(windows::core::Error::from_thread)?;
         Ok(Self { view, writable, mutex, _mapping: mapping })
+    }
+
+    /// The record, for lock-free access to its [`monaka_contract::protocol::Seq`] parts
+    /// ([`crate::seqlock`]).
+    pub(crate) fn record(&self) -> *const T {
+        self.view.as_ptr()
+    }
+
+    /// The record to write a [`monaka_contract::protocol::Seq`] part of ([`crate::seqlock`]).
+    pub(crate) fn record_for_writing(&self) -> *mut T {
+        assert!(self.writable, "shared block was opened read-only");
+        self.view.as_ptr()
     }
 
     pub fn lock(&mut self, timeout_ms: u32) -> Locked<BlockGuard<'_, T>> {

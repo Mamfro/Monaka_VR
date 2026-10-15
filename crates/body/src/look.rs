@@ -24,8 +24,8 @@ pub mod targets;
 
 use aim::AimSettings;
 use monaka_core::feature::Feature;
-use monaka_core::manifest::{AIM_HAND, AIM_LOOK, AIM_MOTION, AIM_MOUSE, AIM_POINT, Opt, aims};
-use monaka_core::protocol::HeadPose;
+use monaka_contract::manifest::{AIM_HAND, AIM_LOOK, AIM_MOTION, AIM_MOUSE, AIM_POINT, Opt, aims};
+use monaka_contract::protocol::HeadPose;
 use monaka_core::situation::Situation;
 use monaka_core::sync::Locked;
 use monaka_producer::game::{Component, Game, Lack, On, Start};
@@ -38,7 +38,7 @@ mod tests;
 
 /// The look's options for a game whose arms go on the controllers: what aims (motion controls,
 /// look-based, pointing, the mouse) and which hand.
-pub const OPTIONS: &[Opt] = &[monaka_core::manifest::aim(&[AIM_MOTION, AIM_LOOK, AIM_POINT, AIM_MOUSE], aims::HAND_RIG), AIM_HAND];
+pub const OPTIONS: &[Opt] = &[monaka_contract::manifest::aim(&[AIM_MOTION, AIM_LOOK, AIM_POINT, AIM_MOUSE], aims::HAND_RIG), AIM_HAND];
 
 /// A game with the look: how the turn reaches it, and its hooks.
 pub trait Looks: Game {

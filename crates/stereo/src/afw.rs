@@ -27,7 +27,7 @@ use monaka_core::alternate::{PresentRing, Schedule};
 use monaka_core::camera::{Frustum, Mat34, Mat44, offset_right, plausible_camera};
 use monaka_core::depth::{DepthMapping, depth_params};
 use monaka_core::math::Vec3;
-use monaka_core::protocol::{DepthParams, HeadPose};
+use monaka_contract::protocol::{DepthParams, HeadPose};
 use monaka_core::rendering::StereoMethod;
 use monaka_framegen::inputs::Rendering;
 use monaka_producer::game::{Component, Every, Game, Lack, On, Start};

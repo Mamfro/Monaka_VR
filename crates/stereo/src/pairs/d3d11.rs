@@ -10,7 +10,7 @@ use crate::publish::{FLAT, Tally, copy_into, record_first};
 use monaka_channel::fence11::{FenceProducer11, LazyProducer11};
 use monaka_channel::pose::HeadSource;
 use monaka_channel::{ChannelName, d3d};
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_producer::log;
 use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 

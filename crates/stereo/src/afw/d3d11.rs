@@ -31,7 +31,7 @@ use monaka_channel::d3d;
 use monaka_channel::fence11::{Depth, EyeDepth, LazyProducer11};
 use monaka_channel::pose::HeadSource;
 use monaka_channel::ChannelName;
-use monaka_core::protocol::{DepthParams, HeadPose};
+use monaka_contract::protocol::{DepthParams, HeadPose};
 use monaka_producer::log;
 use monaka_warp::{Frame, HudLayer, Reprojector};
 use std::time::Instant;

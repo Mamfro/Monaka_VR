@@ -153,17 +153,17 @@ fn hand_rooted() -> Plain {
 
 struct Wolfish;
 impl Game for Wolfish {
-    const MANIFESTS: &'static [monaka_core::manifest::Manifest] = &[];
+    const MANIFESTS: &'static [monaka_contract::manifest::Manifest] = &[];
     const ADAPTER: Adapter<Self> = Adapter { components: &[] };
     type Build = ();
     type Frame = ();
-    fn prepare(_: &'static monaka_producer::Session, _: &'static monaka_core::manifest::Manifest, _: &monaka_core::options::Options) -> Result<(), monaka_producer::Rejection> {
+    fn prepare(_: &'static monaka_producer::Session, _: &'static monaka_contract::manifest::Manifest, _: &monaka_core::options::Options) -> Result<(), monaka_producer::Rejection> {
         Ok(())
     }
 }
 impl HandRig for Wolfish {
     const RIG: Rig = Rig {
-        method: Method::HandRooted { shoulders: [[-10.9, 10.0, -10.8], [-10.9, -10.0, -10.8]], poles: [[0.0, 0.6, -1.0], [0.0, -0.6, -1.0]], left_grip: IDENTITY_MATRIX, right_melee_grip: None },
+        method: Method::HandRooted { shoulders: [[-10.9, 10.0, -10.8], [-10.9, -10.0, -10.8]], poles: [[0.0, 0.6, -1.0], [0.0, -0.6, -1.0]], left_grip: IDENTITY_MATRIX, right_melee_grip: || None },
         holds: Holds::TwoHanded,
         climbing: Climbing::None,
         fingers: None,
@@ -261,11 +261,11 @@ fn named_arms(id: usize) -> Plain {
 
 struct Chromish;
 impl Game for Chromish {
-    const MANIFESTS: &'static [monaka_core::manifest::Manifest] = &[];
+    const MANIFESTS: &'static [monaka_contract::manifest::Manifest] = &[];
     const ADAPTER: Adapter<Self> = Adapter { components: &[] };
     type Build = ();
     type Frame = ();
-    fn prepare(_: &'static monaka_producer::Session, _: &'static monaka_core::manifest::Manifest, _: &monaka_core::options::Options) -> Result<(), monaka_producer::Rejection> {
+    fn prepare(_: &'static monaka_producer::Session, _: &'static monaka_contract::manifest::Manifest, _: &monaka_core::options::Options) -> Result<(), monaka_producer::Rejection> {
         Ok(())
     }
 }
@@ -309,13 +309,67 @@ fn the_carried_method_writes_what_follow_writes() {
     assert_eq!(new.writes.borrow().len(), new.names.len(), "every bone put back as written");
 }
 
+/// A game whose right hand sometimes holds a sword ([`SWORD`]): the rig locks it to the controller
+/// by its holder only then.
+struct Swordish;
+static SWORD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The sword's holder in the palm: turned a quarter about the palm's forward.
+fn sword_in_palm() -> Mat34 {
+    [0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+}
+impl Game for Swordish {
+    const MANIFESTS: &'static [monaka_contract::manifest::Manifest] = &[];
+    const ADAPTER: Adapter<Self> = Adapter { components: &[] };
+    type Build = ();
+    type Frame = ();
+    fn prepare(_: &'static monaka_producer::Session, _: &'static monaka_contract::manifest::Manifest, _: &monaka_core::options::Options) -> Result<(), monaka_producer::Rejection> {
+        Ok(())
+    }
+}
+impl HandRig for Swordish {
+    const RIG: Rig = Rig {
+        method: Method::Carried { bones: BoneAxes::DYING_LIGHT_1, mirror: Some(MIRROR), melee_holder: Some(sword_in_palm) },
+        holds: Holds::TwoHanded,
+        climbing: Climbing::Animated,
+        fingers: None,
+    };
+    fn held(side: usize) -> Kind {
+        if side == RIGHT_HAND && SWORD.load(std::sync::atomic::Ordering::Relaxed) { Kind::Blade } else { Kind::Nothing }
+    }
+}
+
+#[test]
+fn a_melee_holder_holds_the_weapon_only_while_the_aim_hand_has_one() {
+    let _serial = POSING.locked();
+    crate::declare_mirror(MIRROR);
+    let game = translation([0.0, 1.6, 0.0]);
+    let head = HeadPose { orientation: [0.0, 0.0, 0.0, 1.0], position: [0.0, 1.6, 0.0], valid: 1, ..HeadPose::default() };
+    let palm = |x: f32| HandPose { orientation: [0.0, 0.0, 0.0, 1.0], position: [0.25 * x, 1.25, -0.35], valid: 1, received_tick: 0 };
+    let palms = Palms { game, origin: IDENTITY_MATRIX, head, palms: [Some(palm(-1.0)), Some(palm(1.0))], aim_side: RIGHT_HAND, hold: [0.0; 3], bones: None };
+    let followed = |id: usize, melee_holder: Option<Mat34>| {
+        let arms = named_arms(id);
+        let pose = Pose { game, origin: IDENTITY_MATRIX, head, palms: palms.palms, aim_side: RIGHT_HAND, hold: [0.0; 3], gun: false, melee_holder, bones: BoneAxes::DYING_LIGHT_1 };
+        crate::follow(&arms, &Snapshot::take(&arms).unwrap(), &pose).unwrap();
+        arms.worlds.into_inner()
+    };
+    let rigged = |id: usize, sword: bool| {
+        SWORD.store(sword, std::sync::atomic::Ordering::Relaxed);
+        let arms = named_arms(id);
+        frame::<Swordish>(&arms, &Snapshot::take(&arms).unwrap(), Moment { hands: Hands::Palms(palms), fingers: false }).unwrap();
+        arms.worlds.into_inner()
+    };
+    assert_eq!(rigged(40, true), followed(41, Some(sword_in_palm())), "a sword: held by its holder");
+    assert_eq!(rigged(42, false), followed(43, None), "an empty hand: by the wrist");
+    assert_ne!(followed(44, None), followed(45, Some(sword_in_palm())), "the holder moves the hand");
+}
+
 /// The holders as the rig left them are what a feature read back from the skeleton right after
 /// the rig before (the bow's holder at the arms callback): a written joint as written, a helper
 /// where the engine moved it with its bone.
 #[test]
 fn the_debug_views_draw_the_bones_for_the_frame_being_drawn() {
     use monaka_channel::debug::{DebugChannel, Source, Wanted};
-    use monaka_core::debug_draw::{Categories, Category, ORANGE};
+    use monaka_contract::debug_draw::{Categories, Category, ORANGE};
     let _serial = POSING.locked();
     crate::declare_mirror(MIRROR);
     let name = monaka_channel::ChannelName::new(format!(r"Local\monaka-test-rig-debug-{}", std::process::id())).unwrap();
@@ -342,7 +396,7 @@ fn the_debug_views_draw_the_bones_for_the_frame_being_drawn() {
 #[test]
 fn a_hand_rooted_skeleton_is_drawn_through_its_moments_space() {
     use monaka_channel::debug::{DebugChannel, Source, Wanted};
-    use monaka_core::debug_draw::{Categories, Category};
+    use monaka_contract::debug_draw::{Categories, Category};
     let _serial = POSING.locked();
     let name = monaka_channel::ChannelName::new(format!(r"Local\monaka-test-rooted-debug-{}", std::process::id())).unwrap();
     let mut viewer = DebugChannel::open(&name).unwrap();
@@ -455,4 +509,48 @@ fn blends_run_from_one_frame_to_the_other() {
     assert!(camera::distance(&blend(&a, &b, 0.0), &a) < 1e-5 && camera::distance(&blend(&a, &b, 1.0), &b) < 1e-5);
     let (s, c) = 45f32.to_radians().sin_cos();
     assert!(camera::distance(&blend(&a, &b, 0.5), &[c, -s, 0.0, 1.0, s, c, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]) < 1e-5);
+}
+
+#[test]
+fn a_melee_hand_keeps_its_resting_fingers_while_the_game_twirls_the_weapon() {
+    let _serial = POSING.locked();
+    let target = [1.0, 0.0, 0.0, 15.0, 0.0, 1.0, 0.0, -5.0, 0.0, 0.0, 1.0, -10.0];
+    let resting = hand_rooted();
+    let at_rest = Snapshot::take(&resting).unwrap();
+    let grip = compose(&rigid_inverse(&at_rest.worlds[1]), &at_rest.worlds[2]);
+    let rooted = HandRooted { shoulders: [[-10.9, 10.0, -10.8], [-10.9, -10.0, -10.8]], poles: [[0.0, 0.6, -1.0], [0.0, -0.6, -1.0]], left_grip: IDENTITY_MATRIX, right_melee_grip: Some(grip), held: [Kind::Nothing, Kind::Melee] };
+    // At the resting grip the game's fingers are the hand's.
+    let mut frames = Frames::new(&at_rest);
+    rooted.place(&resting, &mut frames, 1, [None, Some(target)]).unwrap();
+    let rested = frames.now.clone();
+    // A twirl: the knife half a turn in the hand, one finger of the game's somewhere else.
+    let twirled = hand_rooted();
+    {
+        let mut worlds = twirled.worlds.borrow_mut();
+        let at = worlds[1];
+        worlds[1] = [1.0, 0.0, 0.0, at[3], 0.0, -1.0, 0.0, at[7], 0.0, 0.0, -1.0, at[11]];
+        worlds[3][3] += 2.0;
+    }
+    let twirling = Snapshot::take(&twirled).unwrap();
+    let mut frames = Frames::new(&twirling);
+    rooted.place(&twirled, &mut frames, 1, [None, Some(target)]).unwrap();
+    for finger in [3, 4, 5] {
+        assert!(camera::distance(&frames.now[finger], &rested[finger]) < 1e-4, "finger {finger} keeps its resting place");
+    }
+}
+
+#[test]
+fn the_grip_held_longest_comes_first() {
+    let _serial = POSING.locked();
+    MELEE_GRIPS.locked().clear();
+    let forward = IDENTITY_MATRIX;
+    let reversed = [1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0];
+    let nudged = [1.0, 0.0, 0.0, 0.1, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    for grip in [forward, reversed, nudged, forward] {
+        tally_melee_grip(&grip);
+    }
+    let held = melee_grips_held_longest(2);
+    MELEE_GRIPS.locked().clear();
+    assert_eq!(held[0], (forward, 0.75), "a nudge counts as the same grip");
+    assert_eq!(held[1], (reversed, 0.25));
 }

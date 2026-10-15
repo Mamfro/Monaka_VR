@@ -1,11 +1,11 @@
-//! The probe console beside a channel ([`monaka_core::console`]). A tool asks and reads answers;
+//! The probe console beside a channel ([`monaka_contract::console`]). A tool asks and reads answers;
 //! the producer takes questions and answers them. Either side may create it. Every access waits
 //! at most a couple of milliseconds; a miss is not an error.
 
 use crate::shared::SharedBlock;
 use crate::{ChannelName, Result};
-use monaka_core::console::ConsoleBlock;
-use monaka_core::protocol::Block;
+use monaka_contract::console::ConsoleBlock;
+use monaka_contract::protocol::Block;
 
 const WAIT_MS: u32 = 2;
 

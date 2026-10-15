@@ -7,7 +7,7 @@
 //! copying and signals the `consumed` fence when done. Neither side waits. All header reads and
 //! writes happen under the header mutex.
 
-use crate::protocol::{FENCE_SLOTS, FenceHeader};
+use monaka_contract::protocol::{FENCE_SLOTS, FenceHeader};
 
 /// A slot the producer must not overwrite: the newest pair, or the slot the reader is still
 /// copying from.
@@ -56,7 +56,6 @@ pub fn commit(header: &mut FenceHeader, commit: Commit) {
 pub fn unmark(header: &mut FenceHeader, slot: u32) {
     header.slot_sequences[slot as usize] = 0;
     header.slot_ticks[slot as usize] = 0;
-    header.depth.slots[slot as usize] = Default::default();
 }
 
 #[cfg(test)]

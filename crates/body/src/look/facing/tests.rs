@@ -22,11 +22,11 @@ pub(super) const HEAD_ONLY: AimSettings = AimSettings { head_aim: true, hand_aim
 pub(super) const UNITS: TargetUnits = TargetUnits { convention: Convention { yaw_per_radian: -57.29578, pitch_per_radian: 57.29578, pitch_limit: 90.0 }, yaw_zero: 0.0, turn: 360.0 };
 
 impl Game for Faced {
-    const MANIFESTS: &'static [monaka_core::manifest::Manifest] = &[];
+    const MANIFESTS: &'static [monaka_contract::manifest::Manifest] = &[];
     const ADAPTER: Adapter<Self> = Adapter { components: &[] };
     type Build = ();
     type Frame = ();
-    fn prepare(_: &'static monaka_producer::Session, _: &'static monaka_core::manifest::Manifest, _: &monaka_core::options::Options) -> Result<(), monaka_producer::Rejection> {
+    fn prepare(_: &'static monaka_producer::Session, _: &'static monaka_contract::manifest::Manifest, _: &monaka_core::options::Options) -> Result<(), monaka_producer::Rejection> {
         Ok(())
     }
 }

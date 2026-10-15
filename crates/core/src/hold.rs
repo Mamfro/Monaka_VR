@@ -1,10 +1,10 @@
-//! A button held to open one of Monaka's own menus over the game (Start for the Monaka menu, Back
+//! A button held to open one of Monaka's own menus over the game (Start for Monaka's home, Back
 //! for the debug menu): held for [`HOLD`] it acts; a shorter press still reaches the game, as a tap
 //! of [`TAP`] when let go ([`LongPress`]). Start and Back held together belong to the capture chord
 //! ([`crate::chord`]), so neither acts then ([`HoldToggle`]). The viewer and the harness both put
 //! the pad through these, so a script's held button acts as a player's would.
 
-use crate::pad::{Gamepad, button};
+use monaka_contract::{gamepad::Gamepad, gamepad::button};
 use std::time::{Duration, Instant};
 
 /// How long a button is held before it acts.

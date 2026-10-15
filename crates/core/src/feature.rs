@@ -6,7 +6,7 @@
 //! Some providers serve several features and are not features themselves: what each hand holds,
 //! the game's actions, the situations it reports (`crate::situation`).
 //!
-//! Each shared option belongs to one feature (`Opt::owner`): only the component that provides that
+//! Each shared option belongs to one feature ([`owner`]): only the component that provides that
 //! feature may offer it, so a game's options say what its code honours ([`fault`], checked at
 //! compile time while the game's options are built). The `aim` choices follow the features too:
 //! motion controls need the hand rig, look and pointing aim need the look ([`aim_choice_allowed`]).
@@ -15,7 +15,7 @@
 //! settings leave off, or one this build cannot carry (a fact its table lacks), with the reason,
 //! for the stop's summary.
 
-use crate::manifest::{Kind, Opt, SHARED};
+use monaka_contract::manifest::{self, Kind, Opt, SHARED};
 use crate::situation::Situation;
 
 /// Something Monaka does for the player in a game, named for its mechanism.
@@ -163,6 +163,35 @@ pub const fn same_str(a: &str, b: &str) -> bool {
     true
 }
 
+/// The feature that owns each shared option ([`SHARED`]), by id: only a component providing it may
+/// offer the option, since that component is what honours it.
+pub const OWNERS: &[(&str, Feature)] = &[
+    (manifest::AIM_HAND.id, Feature::Look),
+    (manifest::FINGER_TRACKING.id, Feature::FingerRig),
+    (manifest::BINARY_FINGERS.id, Feature::FingerRig),
+    (manifest::WORLD_HUD.id, Feature::HudPanels),
+    (manifest::HUD_SIZE.id, Feature::HudLayer),
+    (manifest::HUD_DISTANCE.id, Feature::HudLayer),
+    (manifest::HEAD_MOVEMENT.id, Feature::Stereo),
+    (manifest::LATENCY.id, Feature::Stereo),
+    (manifest::EYE_SEPARATION.id, Feature::Stereo),
+    (manifest::ROOM_SCALE.id, Feature::RoomScale),
+    (manifest::CONTROLLER_PAD.id, Feature::Gamepad),
+    (manifest::HEADSET_DEPTH.id, Feature::DepthLayer),
+];
+
+/// The feature owning the shared option `id` ([`OWNERS`]); `None` for any other option.
+pub const fn owner(id: &str) -> Option<Feature> {
+    let mut i = 0;
+    while i < OWNERS.len() {
+        if same_str(OWNERS[i].0, id) {
+            return Some(OWNERS[i].1);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Whether a game with `has` can carry the `aim` choice `choice`: motion controls (`hand_rig`)
 /// need the hand rig; look (`head`) and pointing (`controller`) aim need the look; `off` always.
 pub const fn aim_choice_allowed(choice: &str, has: Features) -> bool {
@@ -237,7 +266,10 @@ pub const fn fault(component: &str, provides: &[Feature], options: &[Opt], has: 
     while i < options.len() {
         let opt = &options[i];
         let start = Message::new().push("component `").push(component).push("` offers `").push(opt.id).push("`: ");
-        if let Some(owner) = opt.owner {
+        if let Some(owner) = owner(opt.id) {
+            if !opt.shared {
+                return Some(start.push("that is a shared option's id: offer the shared constant (`manifest::SHARED`)"));
+            }
             let mut provided = false;
             let mut p = 0;
             while p < provides.len() {
@@ -251,9 +283,6 @@ pub const fn fault(component: &str, provides: &[Feature], options: &[Opt], has: 
         let mut s = 0;
         while s < SHARED.len() {
             if same_str(SHARED[s].id, opt.id) {
-                if opt.owner.is_none() {
-                    return Some(start.push("that is a shared option's id: offer the shared constant (`manifest::SHARED`)"));
-                }
                 if !same_kind(&SHARED[s].kind, &opt.kind) {
                     return Some(start.push("a shared option adjusted for a game keeps its kind"));
                 }

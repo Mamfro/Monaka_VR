@@ -5,7 +5,7 @@
 
 use crate::menu::panel::{ACCENT, DIM, ON, TEXT};
 use egui::{Color32, FontId, Pos2, RichText, Sense, Stroke, Vec2};
-use monaka_core::debug_draw::{COSTS, Cost, CostTime};
+use monaka_contract::debug_draw::{COSTS, Cost, CostTime};
 
 #[cfg(test)]
 mod tests;

@@ -24,3 +24,29 @@ fn reads_and_writes_survive_bad_addresses() {
     assert!(!write(8, 1u32));
     std::hint::black_box(&mut target);
 }
+
+#[test]
+fn c_strings_read_up_to_an_unreadable_page_and_across_chunks() {
+    use windows::Win32::System::Memory::{MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS, PAGE_READWRITE, VirtualAlloc, VirtualFree, VirtualProtect};
+    // SAFETY: two fresh pages of our own; the second made unreadable, both freed at the end.
+    let pages = unsafe { VirtualAlloc(None, 8192, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) } as usize;
+    assert_ne!(pages, 0);
+    let mut old = Default::default();
+    // SAFETY: our own page.
+    unsafe { VirtualProtect((pages + 4096) as *const _, 4096, PAGE_NOACCESS, &mut old) }.unwrap();
+    // A string whose NUL is the first page's last byte.
+    let end = pages + 4096;
+    assert!(write_bytes(end - 6, b"hello\0"));
+    assert_eq!(read_c_string(end - 6, 64).as_deref(), Some("hello"));
+    // One without its NUL before the unreadable page fails instead of faulting.
+    assert!(write_bytes(end - 3, b"abc"));
+    assert_eq!(read_c_string(end - 3, 64), None);
+    // A long string crosses chunks; `max` bounds it.
+    let long = vec![b'x'; 700];
+    assert!(write_bytes(pages, &long));
+    assert!(write(pages + 700, 0u8));
+    assert_eq!(read_c_string(pages, 1000).map(|s| s.len()), Some(700));
+    assert_eq!(read_c_string(pages, 700), None, "no NUL within max");
+    // SAFETY: frees the pages allocated above.
+    unsafe { VirtualFree(pages as *mut _, 0, MEM_RELEASE) }.unwrap();
+}

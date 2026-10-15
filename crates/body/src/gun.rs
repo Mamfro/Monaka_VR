@@ -40,7 +40,7 @@ fn on<G: Fires + HeldItems>(run: &Run<'_, G>) -> On {
 }
 
 /// The aiming hand, and the shots placed.
-static AIM_SIDE: Mutex<usize> = Mutex::new(monaka_core::protocol::RIGHT_HAND);
+static AIM_SIDE: Mutex<usize> = Mutex::new(monaka_contract::protocol::RIGHT_HAND);
 static SHOTS: AtomicU64 = AtomicU64::new(0);
 static INSTALLED: Mutex<bool> = Mutex::new(false);
 

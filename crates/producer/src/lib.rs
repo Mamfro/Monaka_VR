@@ -9,15 +9,19 @@
 #![forbid(unsafe_code)]
 
 use monaka_core::options::Options;
-pub use monaka_core::{manifest, pack, status};
-use monaka_core::status::{State, code};
-use monaka_core::protocol::ChannelName;
+pub use monaka_contract::{manifest, pack, status};
+/// For [`producer!`]'s test that a game reads every option it offers.
+#[doc(hidden)]
+pub use monaka_core::options::unread_options;
+use monaka_contract::status::{State, code};
+use monaka_contract::host;
+use monaka_contract::protocol::{ChannelName, LIVE_CHANNEL_FILE};
 use monaka_hook::module::Module;
 use monaka_hook::{Hooks, InFlight};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use monaka_core::sync::Locked;
 
@@ -166,7 +170,7 @@ impl Lifecycle {
             Err(rejection) => {
                 remove_crash_log();
                 session.log(format_args!("rejected: {}", rejection.reason));
-                session.write_log();
+                session.close();
                 self.set(State::Rejected);
                 rejection.code
             }
@@ -190,8 +194,13 @@ impl Lifecycle {
                 (State::ShutdownFailed, failure.code)
             }
         };
+        // A copy is never started again: once stopped its log thread ends. After a failed stop
+        // detours may still be running and logging, so the thread stays.
         if let Some(session) = Session::get() {
-            session.write_log();
+            match state {
+                State::Stopped => session.close(),
+                _ => session.write_log(),
+            }
         }
         self.set(state);
         code
@@ -208,6 +217,11 @@ impl Default for Lifecycle {
 pub struct Session {
     dir: PathBuf,
     log: log::LogFile,
+    /// The host's features ([`Session::host_has`]).
+    host: Vec<String>,
+    /// The copy is done (stopped or rejected): the log thread has ended, and lines are written as
+    /// they come.
+    closed: AtomicBool,
 }
 
 static SESSION: OnceLock<Session> = OnceLock::new();
@@ -229,7 +243,8 @@ impl Session {
         let mut opened = false;
         let session = SESSION.get_or_init(|| {
             opened = true;
-            Session { dir, log }
+            let host = std::fs::read_to_string(dir.join(host::FEATURES_FILE)).map(|text| host::parse_features(&text)).unwrap_or_default();
+            Session { dir, log, host, closed: AtomicBool::new(false) }
         });
         if opened {
             std::thread::Builder::new()
@@ -238,12 +253,14 @@ impl Session {
                     // The player's diagnostic logging is checked about once a second; it may
                     // change while the game runs.
                     let check_every = (1000 / log::WRITE_EVERY.as_millis()).max(1);
-                    for turn in 0u128.. {
+                    let mut turn = 0u128;
+                    while !session.closed.load(Ordering::Acquire) {
                         if turn % check_every == 0 {
                             session.log.follow(session.has(manifest::DIAGNOSTIC_MARKER));
                         }
                         std::thread::sleep(log::WRITE_EVERY);
                         session.log.write_pending();
+                        turn += 1;
                     }
                 })
                 .ok()?;
@@ -283,9 +300,9 @@ impl Session {
         self.options(manifest.options_file)
     }
 
-    /// The GPU channel the launcher chose (`live-channel.txt`, a `Local\monaka-` name).
+    /// The GPU channel the launcher chose ([`LIVE_CHANNEL_FILE`], a `Local\monaka-` name).
     pub fn channel(&self) -> Option<ChannelName> {
-        let text = self.text("live-channel.txt")?;
+        let text = self.text(LIVE_CHANNEL_FILE)?;
         let name = text.trim();
         name.starts_with(r"Local\monaka-").then(|| ChannelName::new(name)).flatten()
     }
@@ -295,12 +312,28 @@ impl Session {
         self.channel().ok_or_else(|| Rejection::unsupported(r"live-channel.txt names no Local\monaka- channel"))
     }
 
+    /// Whether the Monaka running this pack has host feature `name` (`monaka_contract::host`), as
+    /// the launcher listed them in the run folder: a feature it lacks is work no one would read.
+    pub fn host_has(&self, name: &str) -> bool {
+        self.host.iter().any(|have| have == name)
+    }
+
     pub fn log(&self, args: fmt::Arguments<'_>) {
         self.log.line(args);
+        if self.closed.load(Ordering::Acquire) {
+            self.log.write_pending();
+        }
     }
 
     /// Writes the pending log lines now, rather than at the writer thread's next turn.
     pub fn write_log(&self) {
+        self.log.write_pending();
+    }
+
+    /// The copy is done: the log thread ends at its next turn, and lines logged from here on are
+    /// written at once.
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
         self.log.write_pending();
     }
 }
@@ -363,17 +396,21 @@ macro_rules! producer {
         pub static MONAKA_HOST: [u8; $crate::manifest::host_len(<$game as $crate::game::Game>::MANIFESTS)] =
             $crate::manifest::host_bytes(<$game as $crate::game::Game>::MANIFESTS);
 
-        /// The pack contract this producer was built against (`monaka_core::pack::CONTRACT`), read
+        /// The pack contract this producer was built against (`monaka_contract::pack::CONTRACT`), read
         /// by the launcher from the file.
         #[unsafe(no_mangle)]
         pub static MONAKA_CONTRACT: u32 = $crate::pack::CONTRACT.packed();
 
-        /// The manifests as text (`monaka_core::pack`), NUL-terminated, read by the launcher from
-        /// the file: the game list, options and tabs come from the pack, and who made it from the
-        /// game crate's `authors` and `repository`.
+        /// The host features the pack names: what the game requires, and what its components use.
+        const MONAKA_USES: [(&str, bool); 4] = $crate::game::host_uses::<$game>();
+        const MONAKA_NEEDS: $crate::pack::Needs<'static> = $crate::pack::Needs { requires: <$game as $crate::game::Game>::REQUIRES, uses: &MONAKA_USES };
+
+        /// The manifests as text (`monaka_contract::pack`), NUL-terminated, read by the launcher from
+        /// the file: the game list, options and tabs come from the pack, who made it from the game
+        /// crate's `authors` and `repository`, and the host features it names.
         #[unsafe(no_mangle)]
-        pub static MONAKA_MANIFEST: [u8; $crate::pack::text_len(<$game as $crate::game::Game>::MANIFESTS, env!("CARGO_PKG_AUTHORS"), env!("CARGO_PKG_REPOSITORY"), env!("CARGO_PKG_VERSION"))] =
-            $crate::pack::text_bytes(<$game as $crate::game::Game>::MANIFESTS, env!("CARGO_PKG_AUTHORS"), env!("CARGO_PKG_REPOSITORY"), env!("CARGO_PKG_VERSION"));
+        pub static MONAKA_MANIFEST: [u8; $crate::pack::text_len(<$game as $crate::game::Game>::MANIFESTS, env!("CARGO_PKG_AUTHORS"), env!("CARGO_PKG_REPOSITORY"), env!("CARGO_PKG_VERSION"), &MONAKA_NEEDS)] =
+            $crate::pack::text_bytes(<$game as $crate::game::Game>::MANIFESTS, env!("CARGO_PKG_AUTHORS"), env!("CARGO_PKG_REPOSITORY"), env!("CARGO_PKG_VERSION"), &MONAKA_NEEDS);
 
         /// Called by the loader on a new thread in the game.
         #[unsafe(no_mangle)]
@@ -407,7 +444,7 @@ macro_rules! producer {
                 for manifest in manifests {
                     manifest.check().unwrap_or_else(|why| panic!("{why}"));
                     // Each option the manifest offers is read by the shared settings or a component.
-                    let unread = $crate::manifest::unread_options(manifest, |options| $crate::game::read_all::<$game>(options, manifest));
+                    let unread = $crate::unread_options(manifest, |options| $crate::game::read_all::<$game>(options, manifest));
                     assert!(unread.is_empty(), "{}: offered but read by nothing: {unread:?}", manifest.id);
                 }
                 let host = ::std::str::from_utf8(&super::MONAKA_HOST[..super::MONAKA_HOST.len() - 1]).unwrap();
@@ -418,6 +455,7 @@ macro_rules! producer {
                 assert_eq!(read.about.source, env!("CARGO_PKG_REPOSITORY"));
                 assert_eq!(read.about.version, env!("CARGO_PKG_VERSION"));
                 assert!(read.manifests.iter().eq(manifests.iter()), "the manifest text does not read back as the manifests");
+                assert!(read.missing_required().is_empty(), "requires host features this Monaka lacks: {:?}", read.missing_required());
             }
         }
     };

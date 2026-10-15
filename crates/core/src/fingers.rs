@@ -11,7 +11,7 @@ const THUMB: [usize; 4] = [2, 3, 4, 5];
 const FINGERS: [[usize; 5]; 4] = [[6, 7, 8, 9, 10], [11, 12, 13, 14, 15], [16, 17, 18, 19, 20], [21, 22, 23, 24, 25]];
 
 pub const THUMB_FINGER: usize = 0;
-/// Fingers in [`crate::protocol::FingerPose::fingers`]: thumb, index, middle, ring, little.
+/// Fingers in [`monaka_contract::protocol::FingerPose::fingers`]: thumb, index, middle, ring, little.
 pub const FINGER_COUNT: usize = 5;
 
 /// How the bone after a joint turns from the bone before it, in the earlier bone's frame

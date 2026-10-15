@@ -31,7 +31,7 @@
 
 use crate::providers::FrameLabels;
 use monaka_core::options::Hud;
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_hook::{Hooks, InFlight, Original, Placement, slot};
 use monaka_producer::{Rejection, log};
 use std::ffi::c_void;

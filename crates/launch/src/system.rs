@@ -196,15 +196,21 @@ pub fn documents() -> Option<PathBuf> {
     }
 }
 
-/// Whether a VR session is already running: a viewer, from this launcher or a PowerShell one. A
-/// second session would stop the first one's producer and fight its viewer.
-pub fn viewer_running() -> bool {
-    !processes_named(&["monaka_viewer.exe"]).is_empty()
+/// The viewer's executable: one running means a VR session is already on, from this launcher or a
+/// PowerShell one. A second session would stop the first one's producer and fight its viewer.
+pub const VIEWER_EXE: &str = "monaka_viewer.exe";
+/// SteamVR's server: running means SteamVR is.
+pub const STEAMVR_EXE: &str = "vrserver.exe";
+
+/// Whether a VR session is already running ([`VIEWER_EXE`]): a viewer other than `ours` (the
+/// window's own headset view).
+pub fn viewer_running(ours: Option<u32>) -> bool {
+    processes_named(&[VIEWER_EXE]).iter().any(|p| Some(p.pid) != ours)
 }
 
-/// Whether SteamVR is running (its `vrserver`).
+/// Whether SteamVR is running ([`STEAMVR_EXE`]).
 pub fn steamvr_running() -> bool {
-    !processes_named(&["vrserver.exe"]).is_empty()
+    !processes_named(&[STEAMVR_EXE]).is_empty()
 }
 
 /// SteamVR's OpenXR loader and runtime manifest, which the viewer is pointed at.

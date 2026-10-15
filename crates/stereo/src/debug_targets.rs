@@ -12,7 +12,7 @@
 use monaka_channel::ChannelName;
 use monaka_channel::d3d12::compute::{blob_bytes, compile};
 use monaka_channel::debug_image::ImageWriter;
-use monaka_core::debug_draw::{Category, DEPTH_CANDIDATES, DebugDepth, DepthCandidate};
+use monaka_contract::debug_draw::{Category, DEPTH_CANDIDATES, DebugDepth, DepthCandidate};
 use monaka_core::sync::Locked;
 use monaka_producer::{debug, log};
 use std::ffi::c_void;

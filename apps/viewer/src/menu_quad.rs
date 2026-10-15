@@ -1,12 +1,12 @@
-//! A headset menu's quad, the same for the debug menu ([`crate::debug_menu`]) and the Monaka menu
-//! ([`crate::monaka_menu`]): where it floats (placed ahead of the head when it opens), its
+//! A headset menu's quad, the same for the debug menu ([`crate::debug_menu`]) and Monaka's home
+//! (each panel of [`crate::home`]): where it floats (placed ahead of the head when it opens), its
 //! swapchain (made at its first show), its image handed to the headset, and the menu turned off for
 //! the run when any of that fails.
 
 use crate::debug_menu::Buzz;
 use monaka_channel::d3d;
 use monaka_core::math::{self, Quat, Vec3};
-use monaka_core::protocol::{LEFT_HAND, RIGHT_HAND};
+use monaka_contract::protocol::{LEFT_HAND, RIGHT_HAND};
 use monaka_openxr::{Posef, Session, Swapchain};
 use windows::Win32::Graphics::Direct3D11::{ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
@@ -70,7 +70,6 @@ impl<'s> MenuQuad<'s> {
         if let Some(swapchain) = &self.swapchain
             && let Err(e) = swapchain.fill(|target| {
                 d3d::copy_texture(context, target, &image);
-                d3d::flush(context);
             })
         {
             self.fail(format!("its image could not be shown ({e})"));

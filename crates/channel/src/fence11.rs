@@ -14,7 +14,7 @@ use crate::d3d::{self, adapter_luid};
 use crate::fence::{HeaderWriter, Shared};
 use crate::shared::OwnedHandle;
 use crate::{ChannelName, Error, Result};
-use monaka_core::protocol::{DepthParams, DepthSlot, FENCE_SLOTS, dimensions_ok, dxgi_format, fence_format_of};
+use monaka_contract::protocol::{DepthParams, DepthSlot, FENCE_SLOTS, dimensions_ok, dxgi_format, fence_format_of};
 use windows::Win32::Foundation::{GENERIC_ALL, HANDLE};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_FENCE_FLAG_SHARED, D3D11_RESOURCE_MISC_SHARED,
@@ -72,23 +72,34 @@ struct DepthSlots {
 
 /// [`FENCE_SLOTS`] pairs of shareable `width` x `height` textures in `format`, bound as `bind`, and
 /// their shared handle values (the handles kept in `handles`).
-fn shared_slots(device: &ID3D11Device, width: u32, height: u32, format: DXGI_FORMAT, bind: u32, handles: &mut Vec<OwnedHandle>) -> Result<([[u64; 2]; FENCE_SLOTS], [[ID3D11Texture2D; 2]; FENCE_SLOTS])> {
+/// `mono`: one texture a slot, published as both eyes' ([`FenceProducer11::create_mono`]).
+fn shared_slots(device: &ID3D11Device, width: u32, height: u32, format: DXGI_FORMAT, bind: u32, mono: bool, handles: &mut Vec<OwnedHandle>) -> Result<([[u64; 2]; FENCE_SLOTS], [[ID3D11Texture2D; 2]; FENCE_SLOTS])> {
     let mut desc = d3d::simple_texture_desc(width, height, format);
     desc.BindFlags = bind;
     desc.MiscFlags = (D3D11_RESOURCE_MISC_SHARED.0 | D3D11_RESOURCE_MISC_SHARED_NTHANDLE.0) as u32;
     let mut published = [[0u64; 2]; FENCE_SLOTS];
     let mut slots = Vec::with_capacity(FENCE_SLOTS);
     for slot in published.iter_mut() {
-        let pair = [d3d::create_texture(device, &desc)?, d3d::create_texture(device, &desc)?];
-        for (value, texture) in slot.iter_mut().zip(&pair) {
+        let left = d3d::create_texture(device, &desc)?;
+        let right = if mono { left.clone() } else { d3d::create_texture(device, &desc)? };
+        let pair = [left, right];
+        for (eye, texture) in pair.iter().enumerate() {
+            if mono && eye == 1 {
+                slot[1] = slot[0];
+                continue;
+            }
             let resource: IDXGIResource1 = texture.cast()?;
             let access = (DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE).0;
             // SAFETY: an unnamed NT handle for a shareable texture we own.
-            *value = keep(handles, unsafe { resource.CreateSharedHandle(None, access, PCWSTR::null()) }?)?;
+            slot[eye] = keep(handles, unsafe { resource.CreateSharedHandle(None, access, PCWSTR::null()) }?)?;
         }
         slots.push(pair);
     }
     Ok((published, slots.try_into().map_err(|_| Error::Incompatible("slots"))?))
+}
+
+fn same_box(a: &D3D11_BOX, b: &D3D11_BOX) -> bool {
+    (a.left, a.top, a.front, a.right, a.bottom, a.back) == (b.left, b.top, b.front, b.right, b.bottom, b.back)
 }
 
 /// Keeps `handle` open in `handles`; its value as the header publishes it.
@@ -146,12 +157,25 @@ pub struct FenceProducer11 {
     /// The depth textures, once a pair has come with depth.
     depth: Option<DepthSlots>,
     with_depth: u64,
+    /// One image a pair ([`FenceProducer11::create_mono`]).
+    mono: bool,
 }
 
 impl FenceProducer11 {
     /// Claims `name` and creates the shared slots on `device` (D3D11.4 or later, for shared fences),
     /// for images of `format`'s family ([`fence_format_of`]).
     pub fn create(name: &ChannelName, device: &ID3D11Device, width: u32, height: u32, format: DXGI_FORMAT) -> Result<Self> {
+        Self::create_with(name, device, width, height, format, false)
+    }
+
+    /// [`FenceProducer11::create`] for one image a pair (a HUD panel): a texture a slot, published
+    /// as both eyes', so a reader that copies both eyes still gets the image in each. Published with
+    /// [`FenceProducer11::publish_one`].
+    pub fn create_mono(name: &ChannelName, device: &ID3D11Device, width: u32, height: u32, format: DXGI_FORMAT) -> Result<Self> {
+        Self::create_with(name, device, width, height, format, true)
+    }
+
+    fn create_with(name: &ChannelName, device: &ID3D11Device, width: u32, height: u32, format: DXGI_FORMAT, mono: bool) -> Result<Self> {
         let channel_format = fence_format_of(format.0 as u32);
         let Some(channel_format) = channel_format.filter(|_| dimensions_ok(width, height)) else { return Err(Error::Incompatible("eye size or format")) };
         let device5: ID3D11Device5 = device.cast()?;
@@ -159,7 +183,7 @@ impl FenceProducer11 {
         let mut header = HeaderWriter::claim(name)?;
         let mut handles = Vec::new();
         let bind = (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32;
-        let (published, textures) = shared_slots(device, width, height, DXGI_FORMAT(channel_format as i32), bind, &mut handles)?;
+        let (published, textures) = shared_slots(device, width, height, DXGI_FORMAT(channel_format as i32), bind, mono, &mut handles)?;
         let fence = || -> Result<ID3D11Fence> {
             let mut fence = None;
             // SAFETY: creates a shareable fence on our device into a local out-pointer.
@@ -184,6 +208,7 @@ impl FenceProducer11 {
             sequence: 0,
             depth: None,
             with_depth: 0,
+            mono,
         })
     }
 
@@ -231,6 +256,12 @@ impl FenceProducer11 {
         self.publish_whole_with_depth(context, eyes, None, tick)
     }
 
+    /// One whole image of the channel's size as the pair, on a channel made by
+    /// [`FenceProducer11::create_mono`] (one copy), or as both eyes on any other.
+    pub fn publish_one(&mut self, context: &ID3D11DeviceContext, image: &ID3D11Texture2D, tick: u64) -> Result<bool> {
+        self.publish_whole_with_depth(context, [image, image], None, tick)
+    }
+
     /// [`FenceProducer11::publish_whole`] with each eye's depth beside its image.
     pub fn publish_whole_with_depth(&mut self, context: &ID3D11DeviceContext, eyes: [&ID3D11Texture2D; 2], depth: Option<Depth<'_>>, tick: u64) -> Result<bool> {
         let whole = D3D11_BOX { left: 0, top: 0, front: 0, right: self.width, bottom: self.height, back: 1 };
@@ -241,6 +272,9 @@ impl FenceProducer11 {
     /// the channel's depth textures at the depth's size; a later size or format makes them anew. A
     /// depth the channel cannot carry is refused with the pair, as a wrong image is.
     pub fn publish_with_depth(&mut self, context: &ID3D11DeviceContext, eyes: [(&ID3D11Texture2D, D3D11_BOX); 2], depth: Option<Depth<'_>>, tick: u64) -> Result<bool> {
+        if self.mono && (eyes[0].0 != eyes[1].0 || !same_box(&eyes[0].1, &eyes[1].1)) {
+            return Err(Error::Incompatible("two images on a channel for one"));
+        }
         for (source, region) in eyes {
             let desc = d3d::texture_desc(source);
             let fits = region.right - region.left == self.width && region.bottom - region.top == self.height && region.right <= desc.Width && region.bottom <= desc.Height;
@@ -251,6 +285,7 @@ impl FenceProducer11 {
         if !d3d::is_immediate_context_of(context, &self.device) {
             return Err(Error::Incompatible("context"));
         }
+        let depth = depth.filter(|_| !self.header.depth_refused());
         let shape = depth.as_ref().map(|d| depth_shape(d, &self.device)).transpose()?;
         let context4: ID3D11DeviceContext4 = context.cast()?;
         if let Some((format, width, height, _)) = shape
@@ -258,7 +293,7 @@ impl FenceProducer11 {
         {
             // Replaced textures are freed by D3D once the GPU is done with them.
             let mut handles = Vec::new();
-            let (published, textures) = shared_slots(&self.device, width, height, DXGI_FORMAT(format as i32), D3D11_BIND_SHADER_RESOURCE.0 as u32, &mut handles)?;
+            let (published, textures) = shared_slots(&self.device, width, height, DXGI_FORMAT(format as i32), D3D11_BIND_SHADER_RESOURCE.0 as u32, false, &mut handles)?;
             if !self.header.new_depth(format, width, height, published) {
                 return Ok(false);
             }
@@ -279,7 +314,7 @@ impl FenceProducer11 {
         // eye's depth whole into a same-family slot texture of its size, then the shared fence
         // signalled behind the copies.
         let signalled = unsafe {
-            for (target, (source, region)) in self.textures[slot].iter().zip(&eyes) {
+            for (target, (source, region)) in self.textures[slot].iter().zip(&eyes).take(if self.mono { 1 } else { 2 }) {
                 context.CopySubresourceRegion(target, 0, 0, 0, 0, *source, 0, Some(region));
             }
             if let Some((eyes, targets)) = depth_copies {
@@ -308,6 +343,8 @@ impl FenceProducer11 {
 /// first frame).
 pub struct LazyProducer11 {
     channel: ChannelName,
+    /// Made for one image a pair ([`FenceProducer11::create_mono`]).
+    mono: bool,
     producer: Option<FenceProducer11>,
     failed: bool,
     refused: Option<(u32, u32, i32)>,
@@ -332,7 +369,12 @@ impl<'a> Lazy<'a> {
 
 impl LazyProducer11 {
     pub fn new(channel: ChannelName) -> Self {
-        Self { channel, producer: None, failed: false, refused: None }
+        Self { channel, mono: false, producer: None, failed: false, refused: None }
+    }
+
+    /// [`LazyProducer11::new`] for a channel of one image a pair (a HUD panel).
+    pub fn mono(channel: ChannelName) -> Self {
+        Self { mono: true, ..Self::new(channel) }
     }
 
     pub fn channel(&self) -> &ChannelName {
@@ -362,7 +404,7 @@ impl LazyProducer11 {
         }
         let mut note = None;
         if self.producer.is_none() {
-            match FenceProducer11::create(&self.channel, device, width, height, format) {
+            match FenceProducer11::create_with(&self.channel, device, width, height, format, self.mono) {
                 Ok(producer) => {
                     note = Some(format!("GPU channel {} created at {width}x{height} format {}", self.channel.as_str(), format.0));
                     self.producer = Some(producer);

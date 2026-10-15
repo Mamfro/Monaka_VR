@@ -56,15 +56,26 @@ pub fn read_finite<const N: usize>(address: usize) -> Option<[f32; N]> {
     read::<[f32; N]>(address).filter(|v| v.iter().all(|c| c.is_finite()))
 }
 
-/// A NUL-terminated byte string of at most `max` bytes, as text.
+/// A NUL-terminated byte string of at most `max` bytes, as text. Read in chunks that stay inside
+/// one page, so a string that ends just before an unreadable page still reads.
 pub fn read_c_string(address: usize, max: usize) -> Option<String> {
+    const PAGE: usize = 4096;
+    const CHUNK: usize = 256;
     let mut text = Vec::new();
+    let mut chunk = [0u8; CHUNK];
     while text.len() < max {
-        let byte = read::<u8>(address + text.len())?;
-        if byte == 0 {
-            return String::from_utf8(text).ok();
+        let at = address.checked_add(text.len())?;
+        let len = CHUNK.min(PAGE - at % PAGE).min(max - text.len());
+        if !read_bytes(at, &mut chunk[..len]) {
+            return None;
         }
-        text.push(byte);
+        match chunk[..len].iter().position(|&b| b == 0) {
+            Some(end) => {
+                text.extend_from_slice(&chunk[..end]);
+                return String::from_utf8(text).ok();
+            }
+            None => text.extend_from_slice(&chunk[..len]),
+        }
     }
     None
 }

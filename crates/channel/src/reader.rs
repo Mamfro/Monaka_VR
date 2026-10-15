@@ -5,7 +5,7 @@
 pub use crate::fence::{Description, FenceReader};
 use crate::shared::SharedBlock;
 use crate::{ChannelName, fence};
-use monaka_core::protocol::{FENCE_MAGIC, FENCE_VERSION, Mismatch, Stamp};
+use monaka_contract::protocol::{FENCE_MAGIC, FENCE_MAJOR, Mismatch, Stamp};
 use std::time::{Duration, Instant};
 
 /// The channel's producer, if one has made its channel. `Err`: a producer is there, but its
@@ -14,10 +14,10 @@ pub fn describe_any(name: &ChannelName) -> Option<std::result::Result<Descriptio
     if let Some(d) = fence::describe(name) {
         return Some(Ok(d));
     }
-    Mismatch::of(header_stamp(name)?, "stereo channel", FENCE_MAGIC, FENCE_VERSION).map(Err)
+    Mismatch::of(header_stamp(name)?, "stereo channel", FENCE_MAGIC, FENCE_MAJOR).map(Err)
 }
 
-/// The first eight bytes of the channel's header, whatever its layout's size.
+/// The stamp at the start of the channel's header, whatever its layout's size.
 fn header_stamp(name: &ChannelName) -> Option<Stamp> {
     let mut block = SharedBlock::<Stamp>::open(&name.header(), &name.header_lock(), false).ok()?;
     block.lock(0).tolerant().map(|stamp| *stamp)

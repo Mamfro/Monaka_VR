@@ -10,13 +10,13 @@ use crate::recorder::Recorder;
 use monaka_channel::debug::{DebugChannel, Source};
 use monaka_channel::debug_image::ImageReader;
 use monaka_channel::page::PageChannel;
-use monaka_core::debug_draw::{DebugDepth, GameReport};
+use monaka_contract::debug_draw::{DebugDepth, GameReport};
 use monaka_channel::{ChannelName, d3d, tick};
 use monaka_core::camera::Mat34;
-use monaka_core::debug_draw::{self, Categories, Category, Primitive};
+use monaka_contract::debug_draw::{self, Categories, Category, Primitive};
 use monaka_core::math::{self, Quat, Vec3};
-use monaka_core::pad::Gamepad;
-use monaka_core::protocol::{HandPose, HeadPose, RenderedPair};
+use monaka_contract::gamepad::Gamepad;
+use monaka_contract::protocol::{HandPose, HeadPose, RenderedPair};
 use monaka_core::stream;
 use monaka_openxr::{Layer, Session, Space, Swapchain};
 use monaka_overlay::eye::EyeView;
@@ -25,8 +25,9 @@ use monaka_overlay::lines::LinePass;
 use monaka_overlay::quad::QuadPass;
 use monaka_overlay::menu::{Command, DepthNear, Settings, Status, View};
 use monaka_overlay::egui;
-use monaka_overlay::console_view::ConsoleNav;
-use monaka_overlay::panels::{self, Content, HeadsetFocus, PanelId};
+use crate::pointer::{Pointer, Target};
+use monaka_overlay::canvas::PIXELS_PER_POINT;
+use monaka_overlay::panels::{self, Content, PanelId};
 use monaka_overlay::views::{self, ViewPass};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -49,7 +50,7 @@ const GRIP_AXES: f32 = 0.05;
 
 pub struct DebugViews<'s> {
     channel: Option<DebugChannel>,
-    /// The game's page ([`monaka_core::page`]), shown as a tab of the menu.
+    /// The game's page ([`monaka_contract::page`]), shown as a tab of the menu.
     page: Option<PageChannel>,
     /// None until the first drawing, and after the pass failed (logged once).
     lines: Option<LinePass>,
@@ -84,10 +85,15 @@ pub struct DebugViews<'s> {
     menu: HeadsetMenu<'s>,
     /// The panels switched on in the menu, as the headset shows them.
     panels: HeadsetPanels<'s>,
-    /// What the pad drives in the headset, in the row of the menu and the panels (0: the menu),
-    /// and where the console panel is.
+    /// Which of the row of the menu and the panels is where the menu opened (0: the menu).
     focus: usize,
-    console: ConsoleNav,
+    /// The controller pointing at the row, what it did on each (the menu first), and where each
+    /// floats.
+    pointer: Pointer,
+    events: Vec<Vec<egui::Event>>,
+    places: Vec<debug_panels::Place>,
+    /// A capture asked for with the pointer, for the next read of the pad to say.
+    capture_asked: bool,
     said_at: u64,
     /// The pair whose primitives `eyes` holds.
     read: Option<u64>,
@@ -140,7 +146,10 @@ impl<'s> DebugViews<'s> {
             menu: HeadsetMenu::new(format),
             panels: HeadsetPanels::new(format),
             focus: 0,
-            console: ConsoleNav::default(),
+            pointer: Pointer::default(),
+            events: Vec::new(),
+            places: Vec::new(),
+            capture_asked: false,
             said_at: 0,
             read: None,
             eyes: [Vec::new(), Vec::new()],
@@ -158,10 +167,10 @@ impl<'s> DebugViews<'s> {
         let depth = self.depth || offered.has(Category::Depth);
         let depth_passes = self.channel.as_mut().and_then(|c| c.depth()).map_or(0, |d| d.passes);
         let (listed, shared) = self.channel.as_mut().map(|c| c.candidates()).unwrap_or_default();
-        let mut depth_buffers = [Default::default(); monaka_core::debug_draw::DEPTH_CANDIDATES];
+        let mut depth_buffers = [Default::default(); monaka_contract::debug_draw::DEPTH_CANDIDATES];
         depth_buffers[..listed.len()].copy_from_slice(&listed);
         let (listed_targets, target_shared) = self.channel.as_mut().map(|c| c.targets()).unwrap_or_default();
-        let mut targets = [Default::default(); monaka_core::debug_draw::DEPTH_CANDIDATES];
+        let mut targets = [Default::default(); monaka_contract::debug_draw::DEPTH_CANDIDATES];
         targets[..listed_targets.len()].copy_from_slice(&listed_targets);
         Status {
             offered,
@@ -208,31 +217,39 @@ impl<'s> DebugViews<'s> {
         self.menu.open()
     }
 
+    /// Opens the debug menu now (asked from Monaka's home), ahead of `head`; the pad drives it.
+    pub fn open_menu(&mut self, head: Option<(Quat, Vec3)>) {
+        let status = self.status();
+        self.menu.open_now(head, &status);
+        self.focus = 0;
+    }
+
     /// The pad before anything else reads it ([`HeadsetMenu::pad`]): the buzzes to give, and
     /// whether a capture (of the eyes as drawn, the menu on them) was asked for.
-    pub fn pad(&mut self, pad: &mut Gamepad, head: Option<(Quat, Vec3)>, now: Instant) -> (Vec<Buzz>, bool) {
+    pub fn pad(&mut self, pad: &mut Gamepad, head: Option<(Quat, Vec3)>, hands: &[HandPose; 2], now: Instant) -> (Vec<Buzz>, bool) {
         // Read even while closed: the first opening with a game page goes to it.
         let status = self.status();
-        let before = self.settings;
         let was_open = self.menu.open();
-        let mut asked = self.menu.pad(pad, head, now, &mut self.settings, &status, self.focus == 0);
-        // Opened again: the pad drives the menu; LB / RB step through the row.
-        let row = 1 + self.settings.panels.iter().count();
+        let mut asked = self.menu.pad(pad, head, now, &status);
+        // Opened again: the menu where it opened; LB / RB slide the row.
+        let ids: Vec<PanelId> = self.settings.panels.iter().collect();
         if self.menu.open() && !was_open {
             self.focus = 0;
         }
-        self.focus = (self.focus as i32 + asked.focus_step).rem_euclid(row as i32) as usize;
-        if self.focus.checked_sub(1).and_then(|n| self.settings.panels.iter().nth(n)) == Some(PanelId::Console) {
-            for press in asked.panel_presses.drain(..) {
-                if let Some(command) = self.console.press(press) {
-                    self.asked = Some(panels::Asked::Console(command));
-                }
-            }
-            self.console.scroll(asked.scroll);
+        self.focus = (self.focus as i32 + asked.focus_step).rem_euclid(1 + ids.len() as i32) as usize;
+        self.events.resize_with(1 + ids.len(), Vec::new);
+        if self.menu.open() {
+            let points = |pixels: [u32; 2]| egui::vec2(pixels[0] as f32, pixels[1] as f32) / PIXELS_PER_POINT;
+            let pages = std::iter::once(points(monaka_overlay::menu::panel::PIXELS)).chain(ids.iter().map(|id| points(id.pixels())));
+            let targets: Vec<Target> = self.places.iter().zip(pages).map(|(place, points)| Target { orientation: place.orientation, centre: place.centre, size: place.size, points }).collect();
+            asked.buzzes.extend(self.pointer.step(pad, hands, &targets, &mut self.events, 0));
+            *pad = Gamepad::default();
+        } else if was_open {
+            self.pointer.leave(&mut self.events);
         }
-        let capture = self.act(before, asked.command, now);
+        let capture = std::mem::take(&mut self.capture_asked);
         if capture {
-            asked.buzzes.extend([monaka_core::protocol::LEFT_HAND, monaka_core::protocol::RIGHT_HAND].map(|hand| (hand, 0.6, 0.15)));
+            asked.buzzes.extend([monaka_contract::protocol::LEFT_HAND, monaka_contract::protocol::RIGHT_HAND].map(|hand| (hand, 0.6, 0.15)));
         }
         (asked.buzzes, capture)
     }
@@ -329,16 +346,28 @@ impl<'s> DebugViews<'s> {
         let places = debug_panels::strip(&anchor, &sizes, focus);
         self.menu.set_shown(places[0]);
         self.panels.follow(self.settings.panels, &places[1..], open);
-        // Outlined while the pad drives it, beside others.
-        let driven = if open && !ids.is_empty() { Some(focus) } else { None };
-        let console = self.console;
-        self.panels.show(session, device, context, content, now, |id| HeadsetFocus { active: driven.is_some_and(|f| f > 0 && ids[f - 1] == id), console });
+        // What the pointer did on each, the menu first.
+        let mut events = std::mem::take(&mut self.events);
+        events.resize_with(places.len(), Vec::new);
+        self.places = places;
+        let asked = self.panels.show(session, device, context, content, now, |id| ids.iter().position(|i| *i == id).map(|at| std::mem::take(&mut events[at + 1])).unwrap_or_default());
+        if asked.is_some() {
+            self.asked = asked;
+        }
         if !open {
             return;
         }
         let status = self.status();
         let settings = self.settings;
-        self.menu.show(session, device, context, &settings, &status, driven == Some(0));
+        let menu_events = std::mem::take(&mut events[0]);
+        if let Some(click) = self.menu.show(session, device, context, &settings, &status, menu_events) {
+            let before = self.settings;
+            let (menu, settings) = (self.menu.model(), &mut self.settings);
+            let command = menu.click(click, settings, &status);
+            if self.act(before, command, now) {
+                self.capture_asked = true;
+            }
+        }
     }
 
     /// The menu's layer while it is open, and the panels'.

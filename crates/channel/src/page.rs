@@ -1,11 +1,11 @@
-//! The game page beside a channel ([`monaka_core::page`]). The producer writes its rows and reads
+//! The game page beside a channel ([`monaka_contract::page`]). The producer writes its rows and reads
 //! the presses; the viewer (and the 2D window) reads the rows and leaves presses. Either side may
 //! create it. Every access waits at most a couple of milliseconds; a miss is not an error.
 
 use crate::shared::SharedBlock;
 use crate::{ChannelName, Error, Result};
-use monaka_core::page::{Page, PageBlock, Press};
-use monaka_core::protocol::Block;
+use monaka_contract::page::{Page, PageBlock, Press};
+use monaka_contract::protocol::Block;
 
 const WAIT_MS: u32 = 2;
 

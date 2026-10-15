@@ -14,7 +14,7 @@ use super::{PAIRS, Settings};
 use crate::pairs::d3d12::{PairPublisher12, Step};
 use crate::publish::record_first;
 use monaka_channel::{ChannelName, d3d, d3d12, fence11::FenceProducer11};
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_producer::log;
 use std::ffi::c_void;
@@ -160,7 +160,7 @@ fn half(eye: u32, size: (u32, u32)) -> [u32; 4] {
 
 /// Checks a side-by-side back buffer (`width` x `height`, `samples`, `format`): one eye's size.
 fn eye_size(width: u32, height: u32, samples: u32, format: u32) -> Result<(u32, u32), String> {
-    if samples != 1 || !width.is_multiple_of(2) || !monaka_core::protocol::fence_format_ok(format) {
+    if samples != 1 || !width.is_multiple_of(2) || !monaka_contract::protocol::fence_format_ok(format) {
         return Err(format!("a back buffer of {width}x{height}, format {format}, {samples} samples cannot be split into eyes"));
     }
     Ok((width / 2, height))

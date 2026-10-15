@@ -29,9 +29,10 @@
 use crate::ledger::Ledger;
 use crate::{Rejection, Session, enable_hooks, log, remove_hooks};
 use monaka_core::feature::{Available, Feature, Features, Message, fault, repeated, same_str};
-use monaka_core::manifest::{EXTRA, Kind, Manifest, OTHER_BUILDS, Opt, opt};
+use monaka_contract::host;
+use monaka_contract::manifest::{EXTRA, Kind, Manifest, OTHER_BUILDS, Opt, opt};
 use monaka_core::options::{Options, Shared};
-use monaka_core::protocol::ChannelName;
+use monaka_contract::protocol::ChannelName;
 use monaka_core::situation::Situation;
 use monaka_hook::Hooks;
 use std::sync::{Arc, Mutex};
@@ -43,6 +44,10 @@ use monaka_core::sync::Locked;
 pub trait Game: Sized + 'static {
     const MANIFESTS: &'static [Manifest];
     const ADAPTER: Adapter<Self>;
+    /// The host features (`monaka_contract::host`) this game cannot work without: a Monaka without
+    /// one refuses the pack and names it. Those it does more with are worked out from its
+    /// components ([`host_uses`]).
+    const REQUIRES: &'static [&'static str] = &[];
     /// This build's facts (addresses, layouts, the engine's objects), from [`Game::prepare`].
     type Build;
     /// What the game's per-frame hook hands the components' `frame` ([`frame`]).
@@ -353,6 +358,30 @@ impl<'a, G: Game> Start<'a, G> {
     }
 }
 
+/// The host features (`monaka_contract::host`) `G` does more with, from the features its
+/// components provide in any of its games, each with whether it does: the pack's `uses`.
+pub const fn host_uses<G: Game>() -> [(&'static str, bool); 4] {
+    let mut has = Features::NONE;
+    let mut i = 0;
+    while i < G::MANIFESTS.len() {
+        let game = features::<G>(G::MANIFESTS[i].id);
+        let mut f = 0;
+        while f < Feature::ALL.len() {
+            if game.has(Feature::ALL[f]) {
+                has = has.with(Feature::ALL[f]);
+            }
+            f += 1;
+        }
+        i += 1;
+    }
+    [
+        (host::DEPTH, has.has(Feature::DepthLayer)),
+        (host::PANELS, has.has(Feature::HudPanels)),
+        (host::FINGERS, has.has(Feature::FingerRig)),
+        (host::RETICLES, has.has(Feature::Bow)),
+    ]
+}
+
 /// The features `G` provides for `game` (a manifest id): those of the components that serve it.
 pub const fn features<G: Game>(game: &str) -> Features {
     let mut has = Features::NONE;
@@ -394,7 +423,7 @@ pub const fn options_len<G: Game>(game: &str) -> usize {
 /// ```compile_fail
 /// use monaka_producer::game::*;
 /// use monaka_producer::{Rejection, Session};
-/// use monaka_core::manifest::{HUD_SIZE, Manifest, Opt};
+/// use monaka_contract::manifest::{HUD_SIZE, Manifest, Opt};
 /// use monaka_core::options::Options;
 ///
 /// struct Bad;
@@ -475,13 +504,8 @@ pub const fn adjust<const N: usize>(mut options: [Opt; N], changed: Opt) -> [Opt
     let mut i = 0;
     while i < N {
         if same_str(options[i].id, changed.id) {
-            let same_owner = match (options[i].owner, changed.owner) {
-                (Some(a), Some(b)) => a.same(b),
-                (None, None) => true,
-                _ => false,
-            };
-            if !same_owner {
-                panic!("{}", Message::new().push("adjust: `").push(changed.id).push("` changes its owner").text());
+            if options[i].shared != changed.shared {
+                panic!("{}", Message::new().push("adjust: `").push(changed.id).push("` changes whether it is shared").text());
             }
             options[i] = changed;
             return options;
@@ -690,7 +714,7 @@ pub fn start<G: Game>(session: &'static Session) -> Result<(), Rejection> {
     let timer = Timer::start::<G>(armed);
     // The probe console, with the debug menu's other tools.
     if let Some(channel) = &channel
-        && session.has(monaka_core::manifest::DEBUG_MENU_MARKER)
+        && session.has(monaka_contract::manifest::DEBUG_MENU_MARKER)
     {
         crate::console::open(channel);
     }

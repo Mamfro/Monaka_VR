@@ -12,7 +12,7 @@ use crate::alternate::d3d12::AlternatePublisher12;
 use crate::driver::{Driver, Flat, FlatPicture, Install, Publisher};
 use crate::present::PresentFn;
 use monaka_channel::pose::PoseChannel;
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_hook::Original;
 use monaka_producer::Rejection;
 use monaka_producer::game::{Component, Game, Lack, Start};

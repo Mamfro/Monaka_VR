@@ -1,5 +1,5 @@
 use super::*;
-use crate::debug_draw::{Category, RED};
+use monaka_contract::debug_draw::{Category, RED};
 
 fn frame(sequence: u64) -> Frame {
     let line = Primitive::segment(Category::Skeleton, [0.1, 1.2, -0.3], [0.2, 1.1, -0.4], RED);

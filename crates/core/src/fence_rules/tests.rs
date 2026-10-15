@@ -1,5 +1,5 @@
 use super::*;
-use crate::protocol::NO_SLOT;
+use monaka_contract::protocol::NO_SLOT;
 
 #[test]
 fn a_slot_whose_copy_failed_is_never_read_and_is_written_next() {

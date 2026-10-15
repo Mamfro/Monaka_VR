@@ -57,7 +57,7 @@ use crate::present::PresentFn;
 use monaka_channel::pose::{HeadSource, PoseChannel, Synthetic};
 use monaka_core::alternate::Schedule;
 use monaka_core::options::Shared;
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_hook::InFlight;
 use monaka_producer::{log, log_first};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
@@ -511,7 +511,7 @@ impl Driver {
             self.finish();
         }
         if let (Some(before), Some(ahead), Some(after_started)) = (before, ahead, after_started) {
-            use monaka_core::debug_draw::Cost;
+            use monaka_contract::debug_draw::Cost;
             let after = after_started.elapsed();
             monaka_producer::debug::cost(Cost::BeforePresent, before);
             monaka_producer::debug::cost(Cost::AfterPresent, after);
@@ -534,8 +534,8 @@ impl Driver {
         {
             return;
         }
-        let own = OWN_PAIRS.locked().clone();
-        if own.into_iter().any(|step| step(self, chain, n)) {
+        let own = *OWN_PAIRS.locked();
+        if own.into_iter().flatten().any(|step| step(self, chain, n)) {
             return;
         }
         let mut cell = self.state.locked();

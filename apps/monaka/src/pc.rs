@@ -9,12 +9,20 @@ use windows::Win32::UI::Controls::Dialogs::{GetOpenFileNameW, OFN_FILEMUSTEXIST,
 use windows::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
 use windows::core::{HSTRING, PCWSTR};
 
+/// What runs, from one look at the processes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Running {
+    pub steamvr: bool,
+    /// Another session's viewer (not the window's own headset view).
+    pub viewer: bool,
+    /// One of the game's executables.
+    pub game: bool,
+}
+
 pub trait Pc {
-    fn steamvr_running(&self) -> bool;
-    /// Another session's viewer is running.
-    fn viewer_running(&self) -> bool;
-    /// One of `executables` runs as the game (Steam app `steam_app`).
-    fn game_running(&self, executables: &[&str], steam_app: u32) -> bool;
+    /// SteamVR, a viewer other than `ours` (the window's headset view), and a process named one of
+    /// `game` (the game's executables).
+    fn running(&self, game: &[&str], ours: Option<u32>) -> Running;
     /// The Steam library folders; none without Steam.
     fn steam_libraries(&self) -> Vec<PathBuf>;
     fn steam_installed(&self, libraries: &[PathBuf], steam_app: u32) -> bool;
@@ -29,16 +37,15 @@ pub trait Pc {
 pub struct ThisPc;
 
 impl Pc for ThisPc {
-    fn steamvr_running(&self) -> bool {
-        system::steamvr_running()
-    }
-
-    fn viewer_running(&self) -> bool {
-        system::viewer_running()
-    }
-
-    fn game_running(&self, executables: &[&str], steam_app: u32) -> bool {
-        !system::game_processes(executables, steam_app).is_empty()
+    fn running(&self, game: &[&str], ours: Option<u32>) -> Running {
+        let mut names = vec![system::STEAMVR_EXE, system::VIEWER_EXE];
+        names.extend_from_slice(game);
+        let found = system::processes_named(&names);
+        let any = |wanted: &[&str]| found.iter().any(|p| wanted.iter().any(|w| w.eq_ignore_ascii_case(&p.executable)));
+        // Whether the game runs needs only a process of its name: which copy it is (by its Steam
+        // folder) matters at the start, not here.
+        let viewer = found.iter().any(|p| p.executable.eq_ignore_ascii_case(system::VIEWER_EXE) && Some(p.pid) != ours);
+        Running { steamvr: any(&[system::STEAMVR_EXE]), viewer, game: any(game) }
     }
 
     fn steam_libraries(&self) -> Vec<PathBuf> {

@@ -3,7 +3,8 @@
 //! a right-stick flick ([`flick_right_stick`]) and a last rewrite of every pad ([`rewrite`]).
 
 use crate::actions;
-use monaka_core::pad::{Gamepad, merge};
+use monaka_core::pad::merge;
+use monaka_contract::gamepad::Gamepad;
 use monaka_core::sync::Locked;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering::*};

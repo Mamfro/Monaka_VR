@@ -12,7 +12,7 @@ pub mod d3d12;
 pub mod present12;
 
 use monaka_core::feature::Feature;
-use monaka_core::manifest::{HUD_DISTANCE, HUD_SIZE, Opt};
+use monaka_contract::manifest::{HUD_DISTANCE, HUD_SIZE, Opt};
 use monaka_producer::game::{Component, Game, On, Run};
 
 /// The HUD's size (`size` the game's default, 1 its size on a monitor) and distance options.

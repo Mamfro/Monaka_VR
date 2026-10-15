@@ -18,6 +18,7 @@
 pub mod attach;
 pub mod check;
 pub mod games;
+pub mod headset;
 pub mod packs;
 pub mod run_log;
 pub mod session;

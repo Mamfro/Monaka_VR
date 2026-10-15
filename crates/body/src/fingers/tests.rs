@@ -1,17 +1,29 @@
 use super::*;
 
+/// Binary fingers clench and open with a gap between the two, and move there over
+/// [`CLENCH_SECONDS`] rather than jumping. One test, as the state is the process's.
 #[test]
-fn binary_fingers_snap_with_a_gap() {
+fn binary_fingers_clench_with_a_gap_and_move_there() {
     set_binary(true);
     let pose = |bend: f32| FingerPose { valid: 1, fingers: [[bend, bend, bend, 0.2]; 5], ..FingerPose::default() };
-    // 0.55 rad per knuckle: 38% of the index's fist, past the 35% that clenches.
-    let half = shape(1, pose(0.55));
-    assert_eq!(half.fingers[1], [FIST[1][0], FIST[1][1], FIST[1][2], 0.0], "clenched");
-    // Easing off to 28% keeps it clenched; 14%, below a fifth, opens it.
-    assert_eq!(shape(1, pose(0.4)).fingers[1][0], FIST[1][0], "still clenched");
-    assert_eq!(shape(1, pose(0.2)).fingers[1], [OPEN[1][0], OPEN[1][1], OPEN[1][2], 0.0], "open");
+    let start = Instant::now();
+    let at = |seconds: f32| start + std::time::Duration::from_secs_f32(seconds);
+    let fist = [FIST[1][0], FIST[1][1], FIST[1][2], 0.0];
+    let open = [OPEN[1][0], OPEN[1][1], OPEN[1][2], 0.0];
+    // First seen, the hand is where it is at once: open.
+    assert_eq!(shape_at(1, pose(0.1), at(0.0)).fingers[1], open);
+    // 0.55 rad per knuckle: 38% of the index's fist, past the 35% that clenches. A third of the way
+    // through the clench the finger is part way, and by the end it is a fist.
+    let part = shape_at(1, pose(0.55), at(CLENCH_SECONDS / 3.0)).fingers[1][1];
+    assert!(part > OPEN[1][1] && part < FIST[1][1], "on its way: {part}");
+    assert_eq!(shape_at(1, pose(0.55), at(CLENCH_SECONDS * 1.2)).fingers[1], fist, "clenched");
+    // Easing off to 28% keeps it clenched; 14%, below a fifth, opens it, again over time.
+    assert_eq!(shape_at(1, pose(0.4), at(0.3)).fingers[1], fist, "still clenched");
+    let part = shape_at(1, pose(0.2), at(0.3 + CLENCH_SECONDS / 2.0)).fingers[1][1];
+    assert!(part > OPEN[1][1] && part < FIST[1][1], "opening: {part}");
+    assert_eq!(shape_at(1, pose(0.2), at(0.3 + CLENCH_SECONDS * 1.2)).fingers[1], open, "open");
     // The other hand keeps its own state.
-    assert_eq!(shape(0, pose(0.4)).fingers[1][0], OPEN[1][0], "the left hand never clenched");
+    assert_eq!(shape_at(0, pose(0.4), at(1.0)).fingers[1], open, "the left hand never clenched");
     set_binary(false);
     assert_eq!(shape(1, pose(0.4)).fingers[1], [0.4, 0.4, 0.4, 0.2], "off: as tracked");
 }

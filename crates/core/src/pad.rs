@@ -3,39 +3,9 @@
 //! input, merged with a real pad when one is plugged in ([`merge`]). A producer that turns the
 //! player itself with the right stick does it through [`StickTurn`].
 
-use crate::manifest::Manifest;
 use crate::options::Options;
-
-/// XInput's `XINPUT_GAMEPAD`: buttons, triggers 0..255, sticks -32768..32767 (up positive).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Gamepad {
-    pub buttons: u16,
-    pub left_trigger: u8,
-    pub right_trigger: u8,
-    pub thumb_lx: i16,
-    pub thumb_ly: i16,
-    pub thumb_rx: i16,
-    pub thumb_ry: i16,
-}
-
-/// XInput button bits.
-pub mod button {
-    pub const DPAD_UP: u16 = 0x0001;
-    pub const DPAD_DOWN: u16 = 0x0002;
-    pub const DPAD_LEFT: u16 = 0x0004;
-    pub const DPAD_RIGHT: u16 = 0x0008;
-    pub const START: u16 = 0x0010;
-    pub const BACK: u16 = 0x0020;
-    pub const LEFT_THUMB: u16 = 0x0040;
-    pub const RIGHT_THUMB: u16 = 0x0080;
-    pub const LEFT_SHOULDER: u16 = 0x0100;
-    pub const RIGHT_SHOULDER: u16 = 0x0200;
-    pub const A: u16 = 0x1000;
-    pub const B: u16 = 0x2000;
-    pub const X: u16 = 0x4000;
-    pub const Y: u16 = 0x8000;
-}
+use monaka_contract::gamepad::Gamepad;
+use monaka_contract::manifest::Manifest;
 
 /// Below this a VR stick reads as centred, so a resting controller's drift never moves the game.
 pub const STICK_DEADZONE: f32 = 0.12;
@@ -77,7 +47,7 @@ impl StickTurn {
     /// A 30 degree snap past seven tenths of the stick's travel, again once it is back within three.
     pub const SNAP: Self = Self::Snap { degrees: 30.0, at: 0.7, release: 0.3 };
 
-    /// The turn the `turn` option asks for ([`crate::manifest::TURN`]; the game's default when
+    /// The turn the `turn` option asks for ([`monaka_contract::manifest::TURN`]; the game's default when
     /// unset): `smooth` or `snap`.
     pub fn from_options(options: &Options, manifest: &Manifest, smooth: StickTurn, snap: StickTurn) -> StickTurn {
         let snapping = options.choice("turn", &[("smooth", false), ("snap", true)], manifest.choice_default("turn") == Some("snap"));

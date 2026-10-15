@@ -1,7 +1,7 @@
 //! Eyes taking turns on the same-frame loop ([`Turns`]): one eye per frame, the left eye's frame
 //! starting a pair and the right eye's ending it, both drawn from the head the left eye was.
 
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};

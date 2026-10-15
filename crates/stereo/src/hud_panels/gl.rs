@@ -8,7 +8,7 @@
 use super::{PanelOut, Piece};
 use crate::hud_panels::panel::Panel;
 use monaka_channel::{ChannelName, d3d};
-use monaka_core::protocol::LEFT_HAND;
+use monaka_contract::protocol::LEFT_HAND;
 use monaka_core::sync::Locked;
 use monaka_gl::{Bridge, Canvas};
 use monaka_producer::log;

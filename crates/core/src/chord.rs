@@ -4,7 +4,7 @@
 //! game's pause menu), then goes to the game as usual; one let go within it still reaches the game,
 //! as a tap of [`TAP`].
 
-use crate::pad::{Gamepad, button};
+use monaka_contract::{gamepad::Gamepad, gamepad::button};
 use std::time::{Duration, Instant};
 
 /// How long both are held before the chord counts.

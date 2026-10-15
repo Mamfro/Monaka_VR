@@ -7,7 +7,7 @@
 use crate::skeleton::Skeleton;
 use monaka_core::camera::{Mat34, position};
 use monaka_core::math::Vec3;
-use monaka_core::protocol::LEFT_HAND;
+use monaka_contract::protocol::LEFT_HAND;
 use monaka_core::sync::Locked;
 use monaka_producer::log;
 use std::sync::Mutex;

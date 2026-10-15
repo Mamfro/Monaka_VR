@@ -204,3 +204,15 @@ fn vtable_hook_swaps_one_method() {
     hooks.disable().unwrap();
     assert_eq!(table[1], identity_address);
 }
+
+#[test]
+fn hooks_near_each_other_share_a_region_of_slots() {
+    let target = code(&[0xc3]);
+    let first = slot_near(target).unwrap();
+    let second = slot_near(target).unwrap();
+    assert_ne!(first, second, "a slot is never handed out twice");
+    assert_eq!(first % SLOT, 0);
+    assert_eq!(second % SLOT, 0);
+    assert!(first.abs_diff(second) < REGION, "both from one region");
+    assert!(first.abs_diff(target) < REACH && second.abs_diff(target) < REACH);
+}

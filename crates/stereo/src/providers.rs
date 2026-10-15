@@ -20,7 +20,7 @@
 use crate::driver::Pending;
 use crate::hud_layer::d3d12::Params;
 use monaka_core::camera::Frustum;
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_ffx::{Size2, state};
 use monaka_framegen::ffx_imports;

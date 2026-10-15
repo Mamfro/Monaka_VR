@@ -1,4 +1,4 @@
-//! The hand rig's debug views (`monaka_core::debug_draw`), drawn for the frame the game is drawing
+//! The hand rig's debug views (`monaka_contract::debug_draw`), drawn for the frame the game is drawing
 //! (`monaka_producer::debug::drawing`):
 //!
 //! - Skeleton: every bone to its parent as the rig left it, the bones it wrote orange, the rest
@@ -16,8 +16,8 @@ use super::{HandRig, Hands, Inputs};
 use crate::skeleton::subtree;
 use crate::{Frames, Placed, Skeleton};
 use monaka_core::camera::{Mat34, compose, position, rigid_inverse};
-use monaka_core::debug_draw::{self, Category, GREEN, ORANGE, Primitive, WHITE, YELLOW, axes, rgba};
-use monaka_core::protocol::{LEFT_HAND, RIGHT_HAND};
+use monaka_contract::debug_draw::{self, Category, GREEN, ORANGE, Primitive, WHITE, YELLOW, axes, rgba};
+use monaka_contract::protocol::{LEFT_HAND, RIGHT_HAND};
 use monaka_producer::debug;
 
 const BONE_AXES: f32 = 0.025;

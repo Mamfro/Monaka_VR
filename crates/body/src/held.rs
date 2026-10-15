@@ -16,7 +16,7 @@ use crate::Skeleton;
 use crate::hand_rig::HandRig;
 use monaka_core::camera::Mat34;
 use monaka_core::math::{Vec3, unit};
-use monaka_core::protocol::{LEFT_HAND, RIGHT_HAND};
+use monaka_contract::protocol::{LEFT_HAND, RIGHT_HAND};
 use monaka_core::sync::Locked;
 use std::sync::Mutex;
 

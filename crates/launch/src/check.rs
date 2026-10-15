@@ -63,7 +63,7 @@ pub fn run(game: &Game, values: &Values, paths: &Paths, check: &Check, delay_sec
             return Err(format!("{} is missing. Build first: cargo build --release -p monaka_channel --examples", path.display()));
         }
     }
-    if system::viewer_running() {
+    if system::viewer_running(None) {
         return Err("A VR session is running (a Monaka VR viewer is open). Stop it first.".into());
     }
     // The game, or when it is not running another on the same producer (one Wolfenstein DLL serves
@@ -103,9 +103,10 @@ pub fn run(game: &Game, values: &Values, paths: &Paths, check: &Check, delay_sec
     let channel = format!(r"Local\monaka-{version}");
     let plan = games::plan(values, game, eye);
     let write = |name: &str, contents: &str| std::fs::write(folder.join(name), contents).map_err(|e| format!("cannot write {name}: {e}"));
-    write("live-channel.txt", &channel)?;
+    write(monaka_contract::protocol::LIVE_CHANNEL_FILE, &channel)?;
+    write(monaka_contract::host::FEATURES_FILE, &monaka_contract::host::features_text())?;
     // A check is research: the probe console is in.
-    write(monaka_core::manifest::DEBUG_MENU_MARKER, "")?;
+    write(monaka_contract::manifest::DEBUG_MENU_MARKER, "")?;
     for (name, contents) in &plan.files {
         write(name, contents)?;
         report(Event::Detail(format!("{name}: {}", contents.replace('\n', " "))));

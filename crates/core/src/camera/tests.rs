@@ -15,7 +15,7 @@ fn row_vector_rows_become_columns_and_the_nearest_axis_is_signed() {
 
 #[test]
 fn an_eye_view_is_the_eye_beside_the_view_centre_with_its_frustum() {
-    let shared = Shared::from_options(&crate::options::Options::parse("eye_separation=0.064"), &crate::manifest::MONAKA);
+    let shared = Shared::from_options(&crate::options::Options::parse("eye_separation=0.064"), &monaka_contract::manifest::MONAKA);
     let game = [1.0, 0.0, 0.0, 10.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, -5.0];
     // No head pose: the game's camera is the view centre, its own field of view the frustum.
     let [left, right] = [0, 1].map(|eye| EyeView::of(&game, Base::Game, &HeadPose::default(), eye, &shared, true, [1.5, 1.0]).unwrap());
@@ -355,4 +355,31 @@ fn the_tracking_origin_turns_the_baked_yaw_out() {
     let origin = tracking_origin(&pitched, yaw).unwrap();
     assert!((origin[10] - 1.0).abs() < 1e-4 && origin[6].abs() < 1e-6, "{origin:?}");
     assert_eq!((origin[3], origin[7], origin[11]), (5.0, 1.0, 2.0));
+}
+
+#[test]
+fn synthetic_pose_and_ipd() {
+    let fov = [[-0.9, 0.8, 0.8, -0.9]; 2];
+    let pose = monaka_contract::protocol::HeadPose::synthetic(30.0, 0.0, fov, 0.064);
+    assert!((crate::math::yaw(pose.orientation) - 30f32.to_radians()).abs() < 1e-5);
+    let (yaw, pitch) = crate::camera::head_yaw_pitch(monaka_contract::protocol::HeadPose::synthetic(30.0, 20.0, fov, 0.064).orientation);
+    assert!((yaw - 30f32.to_radians()).abs() < 1e-5 && (pitch - 20f32.to_radians()).abs() < 1e-5);
+    assert_eq!(pose.ipd_or(0.07), 0.064);
+    assert_eq!(monaka_contract::protocol::HeadPose { ipd: 0.2, ..pose }.ipd_or(0.07), 0.07);
+    assert_eq!(monaka_contract::protocol::HeadPose { valid: 0, ..pose }.ipd_or(0.07), 0.07);
+}
+
+#[test]
+fn three_by_three_rotations_compose_turn_vectors_and_split_from_frames() {
+    let a = rotation(yaw_rotation(0.4));
+    let b = rotation(yaw_rotation(-0.1));
+    let both = rotation(crate::math::multiply(yaw_rotation(0.4), yaw_rotation(-0.1)));
+    let close = |x: &[f32], y: &[f32]| x.iter().zip(y).all(|(p, q)| (p - q).abs() < 1e-5);
+    assert!(close(&mul3(&a, &b), &both), "the product is the rotations in turn");
+    assert!(close(&mul3(&a, &transpose3(&a)), &rotation(IDENTITY)), "a rotation's transpose undoes it");
+    let v = [0.3, -1.0, 2.0];
+    assert!(close(&apply3(&a, v), &crate::math::rotate(yaw_rotation(0.4), v)));
+    let frame = from_rotation(&a, [1.0, 2.0, 3.0]);
+    assert_eq!(rotation_part(&frame), a);
+    assert_eq!(position(&frame), [1.0, 2.0, 3.0]);
 }

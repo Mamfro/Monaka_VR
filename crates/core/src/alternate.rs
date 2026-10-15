@@ -59,7 +59,7 @@ impl Schedule {
 
     /// The debug frame keys (left, right) of the pair completed by right-eye present `n`: each
     /// frame's [`Schedule::chosen_at`] plus one, which is what the driver's drawing present number
-    /// reads while that frame is drawn (`monaka_core::debug_draw`; 0 stays "no frame").
+    /// reads while that frame is drawn (`monaka_contract::debug_draw`; 0 stays "no frame").
     pub fn pair_keys(&self, n: u64) -> [u64; 2] {
         [self.chosen_at(n.wrapping_sub(1)).wrapping_add(1), self.chosen_at(n).wrapping_add(1)]
     }

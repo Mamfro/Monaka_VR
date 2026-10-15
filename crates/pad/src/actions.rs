@@ -23,7 +23,7 @@
 //! that does not list it, the standard layout answers.
 
 use crate::{hold as hold_pad, let_go, press as press_pad};
-use monaka_core::pad::{Gamepad, button};
+use monaka_contract::{gamepad::Gamepad, gamepad::button};
 use monaka_core::sync::Locked;
 use monaka_producer::game::Game;
 use monaka_producer::log;

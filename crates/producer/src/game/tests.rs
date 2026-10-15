@@ -1,5 +1,5 @@
 use super::*;
-use monaka_core::manifest::{AIM_MOTION, AIM_MOUSE, EYE_SEPARATION, FINGER_TRACKING, aim, aims};
+use monaka_contract::manifest::{AIM_MOTION, AIM_MOUSE, EYE_SEPARATION, FINGER_TRACKING, aim, aims};
 
 struct Toy;
 
@@ -60,7 +60,7 @@ fn calls() -> Vec<String> {
 
 struct Lived;
 
-const LIVED_GAME: Manifest = Manifest { id: "lived", options: &[], options_file: "lived-options.txt", ..monaka_core::manifest::MONAKA };
+const LIVED_GAME: Manifest = Manifest { id: "lived", options: &[], options_file: "lived-options.txt", ..monaka_contract::manifest::MONAKA };
 
 /// A game setting that notes when it is put back (to 0).
 struct Noted(&'static str);
@@ -198,4 +198,9 @@ fn a_run_starts_in_order_stops_in_phases_and_undoes_a_failed_start() {
     FATAL.store(false, Relaxed);
     assert_eq!(calls(), ["video install", "hands install", "hands release", "video setting back", "video release"]);
     assert!(!on::<Lived>(VIDEO_AT));
+
+    // The copy done, its log thread ends; a line logged after that is on the disk at once.
+    session.close();
+    session.log(format_args!("after the close"));
+    assert!(std::fs::read_to_string(&log).unwrap().contains("after the close"));
 }

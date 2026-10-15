@@ -12,7 +12,7 @@
 //! keeps what it was as it went down until it is let go, so a remap that starts or stops applying
 //! while a button is held never lets one control go and presses another under the player's thumb.
 
-use monaka_core::pad::Gamepad;
+use monaka_contract::gamepad::Gamepad;
 use monaka_core::sync::Locked;
 use monaka_producer::game::Game;
 use monaka_producer::log;
@@ -21,7 +21,7 @@ use std::sync::Mutex;
 /// One of the controllers' buttons reaching the game as another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Remap {
-    /// The controllers' button (one XInput button bit, `monaka_core::pad::button`).
+    /// The controllers' button (one XInput button bit, `monaka_contract::gamepad::button`).
     pub from: u16,
     /// What the game gets instead (XInput button bits).
     pub to: u16,

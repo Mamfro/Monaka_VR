@@ -19,3 +19,10 @@ fn versions_sort_and_differ() {
     assert_eq!(a.len(), "20261006T1122330000000-1a2b3c4d".len());
     assert_ne!(a, b);
 }
+
+#[test]
+fn the_viewers_stated_failure_is_the_runs() {
+    let said = format!("{FAILURE_LINE} the game's head pose block is version 4, this Monaka reads version 3");
+    assert_eq!(failure(&said).as_deref(), Some("the game's head pose block is version 4, this Monaka reads version 3"));
+    assert_eq!(failure("Live stereo; update cadence set by the producer."), None);
+}

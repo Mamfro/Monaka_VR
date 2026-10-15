@@ -7,7 +7,7 @@ static TURNS: Mutex<()> = Mutex::new(());
 
 fn state(pieces: &'static [Piece], boxes: Option<Boxes>) -> State {
     let channel = ChannelName::new("monaka-hud-panels-test".to_string()).unwrap();
-    State { channel, pieces, masked: false, margin: MARGIN, boxes, shown: vec![None; pieces.len()], _declared: None }
+    State { channel: Arc::new(channel), pieces, masked: false, margin: MARGIN, boxes, shown: vec![None; pieces.len()], _declared: None }
 }
 
 #[test]

@@ -3,7 +3,7 @@
 //! came from, and the poses sent back, counted over stretches of a quarter second; the game's side
 //! (its frames, what Monaka costs it) comes from its producer.
 
-use monaka_core::debug_draw::GameReport;
+use monaka_contract::debug_draw::GameReport;
 use monaka_overlay::stats::{EyeAges, GameView, PoseFlow, StatsView};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};

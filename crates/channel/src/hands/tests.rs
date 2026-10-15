@@ -1,5 +1,5 @@
 use super::*;
-use monaka_core::protocol::RIGHT_HAND;
+use monaka_contract::protocol::RIGHT_HAND;
 
 #[test]
 fn hands_travel_and_go_stale() {

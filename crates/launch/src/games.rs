@@ -11,11 +11,11 @@
 //! ([`Values::producer_lines`]), so the producer reads the launcher's own ids; the game's
 //! `config.rs` says what each means to it.
 
-pub use monaka_core::manifest::{HowTo, Kind, Launch, MONAKA, Manifest, Opt, PLAY_WITH, Shown, Status, SteamFiles, TABS, Values, describe, number_text};
+pub use monaka_contract::manifest::{HowTo, Kind, Launch, MONAKA, Manifest, Opt, PLAY_WITH, Shown, Status, SteamFiles, TABS, Values, describe, number_text};
 use crate::Paths;
 use crate::packs::{self, Pack};
-use monaka_core::manifest::LIVE;
-use monaka_core::manifest::aims;
+use monaka_contract::manifest::{DEBUG_MENU, DEBUG_MENU_ARG, OPTION_ARG};
+use monaka_contract::manifest::aims;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -41,13 +41,10 @@ pub struct Plan {
     pub licences: Vec<&'static str>,
     /// Shown to the player when the run starts.
     pub hints: Vec<String>,
-    /// The options the headset's Monaka menu offers, `id=value` ([`LIVE`]): those of the game and of
-    /// Monaka that the viewer can change while VR runs.
-    pub live: Vec<String>,
 }
 
 /// One game: its manifest, and the pack its producer comes from. Everything the launcher does for
-/// a game comes from the manifest, so a game is what its pack declares (`monaka_core::pack`).
+/// a game comes from the manifest, so a game is what its pack declares (`monaka_contract::pack`).
 pub struct Game {
     pub manifest: &'static Manifest,
     pub origin: Origin,
@@ -132,6 +129,8 @@ pub struct Catalogue {
     /// The packs left out because they were made for a newer Monaka, by what the player knows
     /// them as.
     pub too_new: Vec<String>,
+    /// The pack folders whose pack cannot run, for the list.
+    pub left_out: Vec<packs::LeftOut>,
 }
 
 /// The games on offer with `paths`: the dev list's local builds in its order, then the packs in
@@ -177,10 +176,11 @@ fn catalogue_with(paths: &Paths, read: impl Fn(&Path) -> Result<Pack, String>, s
     let scan = scan(&paths.packs);
     problems.extend(scan.problems);
     too_new.extend(scan.too_new);
+    let left_out = scan.left_out;
     for pack in scan.packs {
         offer(pack, false, &mut games, &mut problems, &mut too_new);
     }
-    Catalogue { games: Box::leak(games.into_boxed_slice()), problems, too_new }
+    Catalogue { games: Box::leak(games.into_boxed_slice()), problems, too_new, left_out }
 }
 
 /// The DLLs a dev list names: one per line, a file name beside the launcher or a full path;
@@ -251,7 +251,7 @@ pub fn eye_size(values: &Values, game: &Manifest) -> EyeSize {
     match values.text(game, "render_size").as_str() {
         "headset" => EyeSize::Headset,
         "game" => EyeSize::GameOwn,
-        size => monaka_core::options::parse_size(size).map_or(EyeSize::Headset, |(w, h)| EyeSize::Fixed(w, h)),
+        size => monaka_contract::manifest::parse_size(size).map_or(EyeSize::Headset, |(w, h)| EyeSize::Fixed(w, h)),
     }
 }
 
@@ -282,14 +282,25 @@ pub fn options_file(game: &Manifest, values: &Values) -> String {
     text
 }
 
-/// The viewer's arguments for a run of `game` with `args`, without the held d-pad menus (checked
-/// on their own): for a game crate's launch tests.
+/// The viewer's arguments for a run of `game` with `args` but the options' lines (the rings and
+/// switches): for a game crate's launch tests.
 pub fn viewer_args_of(game: &Manifest, args: &[&str]) -> Vec<String> {
-    let mut v = plan(&values_of(game, args), game, None).viewer_args;
-    if let Some(at) = v.iter().position(|a| a == "--dpad-hold") {
-        v.drain(at..at + 2);
+    let mut out = Vec::new();
+    let mut words = plan(&values_of(game, args), game, None).viewer_args.into_iter();
+    while let Some(word) = words.next() {
+        if word == OPTION_ARG {
+            words.next();
+        } else {
+            out.push(word);
+        }
     }
-    v
+    out
+}
+
+/// The `id=value` lines a run of `game` with `args` sends the viewer from the game's own options
+/// (Monaka's own, the same in every game, left out): for a game crate's launch tests.
+pub fn viewer_lines_of(game: &Manifest, args: &[&str]) -> Vec<String> {
+    viewer_lines(game, &values_of(game, args))
 }
 
 /// Panics unless every line the defaults of each of `manifests` write is one of its options: for
@@ -304,7 +315,8 @@ pub fn defaults_are_options(manifests: &[Manifest]) {
 /// [`plan`] with `find` in place of looking through the Steam libraries for another game's files
 /// (for tests, the game crates' own among them).
 pub fn plan_with(values: &Values, game: &Manifest, eye: Option<(u32, u32)>, find: impl Fn(&SteamFiles) -> Option<std::path::PathBuf>) -> Plan {
-    let mut values = values.clone();
+    // Developer options hidden from the player are at their defaults.
+    let mut values = values.for_run(&[game, &MONAKA]);
     let mut plan = Plan { licences: game.licences.to_vec(), ..Plan::default() };
     let mut found = Vec::new();
     for opt in game.options.iter().filter(|o| matches!(o.kind, Kind::Switch { .. })) {
@@ -332,10 +344,11 @@ pub fn plan_with(values: &Values, game: &Manifest, eye: Option<(u32, u32)>, find
     }
     lines.extend(found);
     plan.viewer_args = reticles(game, &values);
+    if values.switch(&MONAKA, DEBUG_MENU.id) {
+        plan.viewer_args.push(DEBUG_MENU_ARG.to_owned());
+    }
     for owner in [game, &MONAKA] {
-        plan.viewer_args.extend(viewer_args(owner, &values));
-        let live = owner.options.iter().filter(|o| LIVE.iter().any(|l| l.id == o.id) && values.applies(owner, o));
-        plan.live.extend(live.map(|o| format!("{}={}", o.id, values.text(owner, o.id))));
+        plan.viewer_args.extend(viewer_lines(owner, &values).into_iter().flat_map(|line| [OPTION_ARG.to_owned(), line]));
     }
     for opt in game.options {
         if let (Some(note), Some((w, h))) = (opt.eye_size_note, eye) {
@@ -346,22 +359,23 @@ pub fn plan_with(values: &Values, game: &Manifest, eye: Option<(u32, u32)>, find
     plan
 }
 
-/// The viewer arguments `owner`'s options ask for with `values` (a game's, or Monaka's own).
-fn viewer_args(owner: &Manifest, values: &Values) -> Vec<String> {
-    let mut out = Vec::new();
-    for opt in owner.options {
-        if let Some((value, args)) = opt.viewer
-            && values.applies(owner, opt)
+/// The `id=value` lines `owner`'s options send the viewer with `values` (a game's, or Monaka's
+/// own), each to go after [`OPTION_ARG`]: an option's own value ([`Opt::to_viewer`]) and the
+/// lines it sends at a value ([`Opt::viewer_lines`]).
+fn viewer_lines(owner: &Manifest, values: &Values) -> Vec<String> {
+    let mut lines = Vec::new();
+    for opt in owner.options.iter().filter(|opt| values.applies(owner, opt)) {
+        let current = values.text(owner, opt.id);
+        if opt.to_viewer {
+            lines.push(format!("{}={current}", opt.id));
+        }
+        if let Some((value, sent)) = opt.viewer
+            && (value == "*" || current == value)
         {
-            let current = values.text(owner, opt.id);
-            if value == "*" && current != opt.default_text() {
-                out.extend(args.iter().map(|a| (*a).to_owned()).chain([current]));
-            } else if current == value {
-                out.extend(args.iter().map(|a| (*a).to_owned()));
-            }
+            lines.extend(sent.iter().map(|line| (*line).to_owned()));
         }
     }
-    out
+    lines
 }
 
 /// The folder in some Steam library that holds `files`.

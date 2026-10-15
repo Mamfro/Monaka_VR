@@ -18,7 +18,7 @@ use monaka_core::camera::{self, Mat34, compose, position, rigid_inverse};
 use monaka_core::feature::Feature;
 use monaka_core::gesture::reach_share;
 use monaka_core::math::{Vec3, add, distance, scale, sub};
-use monaka_core::protocol::{FingerPose, HandPose, HeadPose, LEFT_HAND, RIGHT_HAND};
+use monaka_contract::protocol::{FingerPose, HandPose, HeadPose, LEFT_HAND, RIGHT_HAND};
 use monaka_core::reach::{elbow, turn_about};
 use monaka_core::sync::Locked;
 use monaka_producer::game::{Component, Game, Lack, On, Start};
@@ -44,8 +44,9 @@ pub enum Method {
     /// animated ([`crate::follow`]): a skeleton named as [`crate::follow`] expects, in the moment's
     /// space. `bones`: its bone axes against Dying Light 1's; `mirror`: how its left bones mirror
     /// the right ones, where that is a known fact ([`crate::declare_mirror`]; none: measured);
-    /// `melee_holder`: a melee weapon locked to the aim controller ([`Pose::melee_holder`]).
-    Carried { bones: BoneAxes, mirror: Option<[f32; 9]>, melee_holder: Option<Mat34> },
+    /// `melee_holder`: a melee weapon's holder in the aim palm ([`Pose::melee_holder`]), the weapon
+    /// locked to the aim controller while that hand holds one ([`Kind::Melee`] or [`Kind::Blade`]).
+    Carried { bones: BoneAxes, mirror: Option<[f32; 9]>, melee_holder: Option<fn() -> Mat34> },
     /// A skeleton hung from the hands (each hand's attach joint carries the wrist, the fingers and
     /// a chain back up the arm to the shoulder), found by its shape ([`crate::skeleton::find_arm`]):
     /// each attach joint and all under it goes onto its target ([`Hands::Attached`], the
@@ -53,11 +54,12 @@ pub enum Method {
     /// shoulder stays at `shoulders`. A free left hand takes `left_grip` (the wrist in its attach
     /// joint's frame) on its target; a left hand holding the other gun of two reaches across to
     /// it when the game moves it there.
-    /// `right_melee_grip`: the right wrist in the right attach joint's frame as the game holds its
-    /// melee weapon the way that sits right on a controller (measured once): the game turns the
-    /// weapon in the hand between grips (a knife forward, then reversed), and the hand keeps this
-    /// one, the weapon hanging in it as the game holds it. None: the hand follows the game's hold.
-    HandRooted { shoulders: [Vec3; 2], poles: [Vec3; 2], left_grip: Mat34, right_melee_grip: Option<Mat34> },
+    /// `right_melee_grip`: the right wrist in the right attach joint's frame at the game's resting
+    /// hold of its melee weapon now (measured: the grip it holds longest, see the end-of-run
+    /// summary). The right target is then where the weapon goes, and the hand holds it there at
+    /// that grip whatever the game's animation does (a knife twirled forward, then reversed),
+    /// keeping its resting fingers meanwhile. None: the hand follows the game's hold.
+    HandRooted { shoulders: [Vec3; 2], poles: [Vec3; 2], left_grip: Mat34, right_melee_grip: fn() -> Option<Mat34> },
 }
 
 /// Whether the game holds anything with both hands.
@@ -260,7 +262,7 @@ pub fn pose<G: HandRig>(skeleton: &dyn Skeleton, animated: &Snapshot, inputs: &I
     let started = monaka_producer::debug::timing().then(std::time::Instant::now);
     let posed = posing::<G>(skeleton, animated, inputs);
     if let Some(at) = started {
-        monaka_producer::debug::cost(monaka_core::debug_draw::Cost::HandRig, at.elapsed());
+        monaka_producer::debug::cost(monaka_contract::debug_draw::Cost::HandRig, at.elapsed());
     }
     posed
 }
@@ -277,6 +279,7 @@ fn posing<G: HandRig>(skeleton: &dyn Skeleton, animated: &Snapshot, inputs: &Inp
     }
     let (placed, carried) = match (G::RIG.method, inputs.hands) {
         (Method::Carried { bones, melee_holder, .. }, Hands::Palms(p)) => {
+            let melee = matches!(inputs.held[p.aim_side.min(1)], Kind::Melee | Kind::Blade);
             let pose = Pose {
                 game: p.game,
                 origin: p.origin,
@@ -285,7 +288,7 @@ fn posing<G: HandRig>(skeleton: &dyn Skeleton, animated: &Snapshot, inputs: &Inp
                 aim_side: p.aim_side,
                 hold: p.hold,
                 gun: inputs.held[p.aim_side.min(1)] == Kind::Gun,
-                melee_holder,
+                melee_holder: melee_holder.filter(|_| melee).map(|holder| holder()),
                 bones: p.bones.unwrap_or(bones),
             };
             let placed = crate::carry(skeleton, animated, &pose, &mut frames)?;
@@ -297,7 +300,7 @@ fn posing<G: HandRig>(skeleton: &dyn Skeleton, animated: &Snapshot, inputs: &Inp
             (placed, Some(p.aim_side))
         }
         (Method::HandRooted { shoulders, poles, left_grip, right_melee_grip }, Hands::Attached { right, targets, .. }) => {
-            let rooted = HandRooted { shoulders, poles, left_grip, right_melee_grip, held: inputs.held };
+            let rooted = HandRooted { shoulders, poles, left_grip, right_melee_grip: right_melee_grip(), held: inputs.held };
             (rooted.place(skeleton, &mut frames, right, targets)?, None)
         }
         _ => return Err("the moment does not fit the hand rig's method"),
@@ -313,7 +316,7 @@ fn posing<G: HandRig>(skeleton: &dyn Skeleton, animated: &Snapshot, inputs: &Inp
         }
     }
     // The debug view of the game's own arms: everything worked out, nothing written.
-    let left_to_game = monaka_producer::debug::on(monaka_core::debug_draw::Category::SkipHandRig);
+    let left_to_game = monaka_producer::debug::on(monaka_contract::debug_draw::Category::SkipHandRig);
     let written = if left_to_game { frames.changed(skeleton) } else { frames.flush(skeleton) };
     debug::draw::<G>(skeleton, &frames, &written, inputs, &placed, left_to_game);
     if left_to_game {
@@ -359,6 +362,7 @@ pub const fn hand_rig<G: HandRig>() -> Component<G> {
         on: |run| On::when(run.shared.aim.rig, "aim is not motion controls"),
         install: install::<G>,
         release: crate::controllers::close,
+        summary: Some(melee_grips_summary),
         ..Component::NONE
     }
 }
@@ -388,6 +392,18 @@ static MELEE_GRIP_LOGGED: Mutex<(Option<Mat34>, u32)> = Mutex::new((None, 0));
 const MELEE_GRIP_LOGS: u32 = 12;
 /// Whether the game's right-hand gun grip was logged (once a run: a game's grips are measured from it).
 static GUN_GRIP_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The game's melee grips of the right hand and the moments each was held (grips within
+/// [`SAME_GRIP`] count as one): the one held longest is the weapon's resting grip, the value a
+/// game's `right_melee_grip` is measured from.
+static MELEE_GRIPS: Mutex<Vec<(Mat34, u64)>> = Mutex::new(Vec::new());
+/// Two grips within this turn (radians) and this distance (the skeleton's units) are one.
+const SAME_GRIP: (f32, f32) = (0.26, 0.5);
+/// The game holds a melee weapon at its resting grip within this turn (radians): its fingers are
+/// then taken as the hand's resting fingers; further off (a twirl), the hand keeps those.
+const AT_REST: f32 = 0.35;
+/// The right hand's resting fingers on a melee weapon: by skeleton, each finger joint in the
+/// wrist's frame as the game posed it at the resting grip.
+static REST_FINGERS: Mutex<Vec<(usize, Vec<(usize, Mat34)>)>> = Mutex::new(Vec::new());
 
 fn side_name(side: usize) -> &'static str {
     if side == RIGHT_HAND { "right" } else { "left" }
@@ -451,7 +467,10 @@ impl HandRooted {
         let game = frames.animated;
         let game_grip = compose(&rigid_inverse(&game[right_arm.root]), &game[right_arm.wrist]);
         match self.held[RIGHT_HAND] {
-            Kind::Melee | Kind::Blade => note_melee_grip(&game_grip),
+            Kind::Melee | Kind::Blade => {
+                note_melee_grip(&game_grip);
+                tally_melee_grip(&game_grip);
+            }
             Kind::Gun if !GUN_GRIP_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) => {
                 log!("hand rig: the game's gun grip of the right hand: {:?}", game_grip.map(|v| (v * 1000.0).round() / 1000.0));
             }
@@ -480,13 +499,19 @@ impl HandRooted {
         }
         // A melee weapon's grip changes with its animation (a knife held forward, then reversed),
         // its attach joint turning in the hand: on the attach joint the hand would turn with it.
-        // The hand keeps the game's gun grip on its controller instead, the weapon hanging in it
-        // as the game holds it now.
+        // The hand holds the target at the weapon's resting grip instead (the game places the
+        // weapon's model at the target), and away from that grip keeps its resting fingers.
         if matches!(self.held[RIGHT_HAND], Kind::Melee | Kind::Blade)
             && let Some(grip) = self.right_melee_grip
         {
             let d_hand = move_between(&joints[right_arm.wrist], &compose(&right_target, &grip));
             move_rigid(joints, &right_arm.subtree, &d_hand);
+            let fingers = fingers_of(&parents, right_arm);
+            if turned_by(&game_grip, &grip) < AT_REST {
+                keep_rest_fingers(skeleton.id(), game, right_arm.wrist, &fingers);
+            } else {
+                rest_fingers(skeleton.id(), joints, right_arm.wrist);
+            }
         }
         for side in [LEFT_HAND, RIGHT_HAND] {
             if let Some(arm) = &arms[side] {
@@ -514,6 +539,74 @@ fn note_melee_grip(grip: &Mat34) {
         let at = logged.0.map_or(String::new(), |last| format!(" (turned {:.0} degrees in the hand)", turned_by(&last, grip).to_degrees()));
         log!("hand rig: the game's melee grip of the right hand{at}: {:?}", grip.map(|v| (v * 1000.0).round() / 1000.0));
         logged.0 = Some(*grip);
+    }
+}
+
+/// Counts a moment of the game holding its melee weapon at `grip` (the wrist in the attach joint's
+/// frame) against the grips seen so far.
+fn tally_melee_grip(grip: &Mat34) {
+    let mut grips = MELEE_GRIPS.locked();
+    if let Some((_, moments)) = grips.iter_mut().find(|(seen, _)| same_grip(seen, grip)) {
+        *moments += 1;
+    } else if grips.len() < 64 {
+        grips.push((*grip, 1));
+    }
+}
+
+fn same_grip(a: &Mat34, b: &Mat34) -> bool {
+    turned_by(a, b) < SAME_GRIP.0 && distance(position(a), position(b)) < SAME_GRIP.1
+}
+
+/// The grips the game held its melee weapon at longest (the first is the resting grip), each with
+/// its share of the moments.
+pub fn melee_grips_held_longest(count: usize) -> Vec<(Mat34, f32)> {
+    let mut grips = MELEE_GRIPS.locked().clone();
+    let total = grips.iter().map(|(_, n)| n).sum::<u64>().max(1) as f32;
+    grips.sort_by(|a, b| b.1.cmp(&a.1));
+    grips.into_iter().take(count).map(|(grip, n)| (grip, n as f32 / total)).collect()
+}
+
+/// The end-of-run lines for the melee grips held longest (none without a melee weapon held).
+fn melee_grips_summary() -> String {
+    let lines: Vec<String> = melee_grips_held_longest(3)
+        .iter()
+        .enumerate()
+        .map(|(rank, (grip, share))| format!("hand rig: melee grip held longest #{}: {:.0}% of the moments, {:?}", rank + 1, share * 100.0, grip.map(|v| (v * 1000.0).round() / 1000.0)))
+        .collect();
+    lines.join("\n")
+}
+
+/// The finger joints of `arm`: under the wrist, but not the forearm's chain.
+fn fingers_of(parents: &[i32], arm: &Arm) -> Vec<usize> {
+    subtree(parents, arm.wrist).into_iter().filter(|j| *j != arm.wrist && !arm.forearm.contains(j)).collect()
+}
+
+/// Keeps the game's `fingers` of skeleton `skeleton` in its pose `game` (each in the frame of the
+/// wrist `wrist`) as the hand's resting fingers.
+fn keep_rest_fingers(skeleton: usize, game: &[Mat34], wrist: usize, fingers: &[usize]) {
+    let in_wrist = rigid_inverse(&game[wrist]);
+    let kept: Vec<(usize, Mat34)> = fingers.iter().map(|&j| (j, compose(&in_wrist, &game[j]))).collect();
+    let mut rest = REST_FINGERS.locked();
+    match rest.iter_mut().find(|(s, _)| *s == skeleton) {
+        Some((_, fingers)) => *fingers = kept,
+        None => {
+            if rest.len() >= 16 {
+                rest.clear();
+            }
+            rest.push((skeleton, kept));
+        }
+    }
+}
+
+/// Puts skeleton `skeleton`'s resting fingers (if any were kept) on the wrist `wrist` in `joints`.
+fn rest_fingers(skeleton: usize, joints: &mut [Mat34], wrist: usize) {
+    let rest = REST_FINGERS.locked();
+    let Some((_, fingers)) = rest.iter().find(|(s, _)| *s == skeleton) else { return };
+    let at = joints[wrist];
+    for &(j, in_wrist) in fingers {
+        if let Some(joint) = joints.get_mut(j) {
+            *joint = compose(&at, &in_wrist);
+        }
     }
 }
 

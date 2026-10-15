@@ -13,7 +13,7 @@ use monaka_channel::fence11::LazyProducer11;
 use monaka_channel::pose::HeadSource;
 use monaka_channel::{ChannelName, d3d};
 use monaka_core::alternate::{POSE_RING, Schedule};
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_producer::log;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::IDXGISwapChain;

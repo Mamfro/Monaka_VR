@@ -5,9 +5,10 @@
 use super::*;
 use eframe::egui;
 use egui_kittest::Harness;
+use pc::Running;
 use egui_kittest::kittest::{NodeT, Queryable};
-use monaka_core::manifest::{Kind, Manifest, opt};
-use monaka_core::pack::{self, CONTRACT};
+use monaka_contract::manifest::{Kind, Manifest, opt};
+use monaka_contract::pack::{self, CONTRACT, Contract};
 use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
@@ -42,14 +43,8 @@ struct PcState {
 struct FakePc(Rc<PcState>);
 
 impl Pc for FakePc {
-    fn steamvr_running(&self) -> bool {
-        self.0.steamvr.get()
-    }
-    fn viewer_running(&self) -> bool {
-        self.0.viewer.get()
-    }
-    fn game_running(&self, _: &[&str], _: u32) -> bool {
-        self.0.game.get()
+    fn running(&self, _: &[&str], _: Option<u32>) -> Running {
+        Running { steamvr: self.0.steamvr.get(), viewer: self.0.viewer.get(), game: self.0.game.get() }
     }
     fn steam_libraries(&self) -> Vec<PathBuf> {
         Vec::new()
@@ -92,7 +87,7 @@ fn one_window() -> std::sync::MutexGuard<'static, ()> {
 /// The window over `dir`'s settings and games, asking `pc`.
 fn window(dir: &Path, pc: &Rc<PcState>) -> Harness<'static, App> {
     let (paths, settings, pc) = (paths_in(dir), Settings::load_from(dir.join("settings.txt")), FakePc(pc.clone()));
-    let mut harness = Harness::builder().with_size(egui::vec2(1100.0, 760.0)).build_eframe(move |cc| App::with(&cc.egui_ctx, None, paths, settings, Box::new(pc), None));
+    let mut harness = Harness::builder().with_size(egui::vec2(1100.0, 760.0)).build_eframe(move |cc| App::with(&cc.egui_ctx, None, paths, settings, Box::new(pc), None, false));
     harness.run();
     harness
 }
@@ -169,7 +164,7 @@ fn dll_exporting(exports: &[(&str, Vec<u8>)]) -> Vec<u8> {
 
 /// Writes a pack of [`KIT`] as `file` (`monaka_kit.dll`, as its producer is named).
 fn write_kit(file: &Path) {
-    let mut text = pack::text(&[KIT], "Tester", "https://example.invalid/kit", "1.0.0").into_bytes();
+    let mut text = pack::text(&[KIT], "Tester", "https://example.invalid/kit", "1.0.0", &pack::Needs::NONE).into_bytes();
     text.push(0);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(file, dll_exporting(&[("MONAKA_CONTRACT", CONTRACT.packed().to_le_bytes().to_vec()), ("MONAKA_MANIFEST", text)])).unwrap();
@@ -197,8 +192,8 @@ fn with_no_game_only_a_pack_can_be_added() {
     pc.steamvr.set(true);
     let harness = window(&dir, &pc);
     assert!(shows(&harness, "No games yet"));
-    assert!(disabled(&harness, "Start VR"));
-    assert!(disabled(&harness, "Remove pack"));
+    assert!(!shows(&harness, "Play"), "nothing to play");
+    assert!(!shows(&harness, "Remove pack"), "nothing to remove");
     assert!(!disabled(&harness, "Add game pack..."));
 }
 
@@ -248,21 +243,21 @@ fn a_pack_is_added_after_its_warning_and_removed_after_asking() {
 }
 
 #[test]
-fn start_vr_waits_for_steamvr_and_for_no_other_session() {
+fn play_waits_for_steamvr_and_for_no_other_session() {
     let _one = one_window();
     let dir = folder("start");
     install_kit(&dir);
     let pc = Rc::new(PcState::default());
     let mut harness = window(&dir, &pc);
-    assert!(disabled(&harness, "Start VR"), "SteamVR is not running");
+    assert!(disabled(&harness, "Play"), "SteamVR is not running");
     pc.steamvr.set(true);
     harness.state_mut().refresh_checks();
     harness.run();
-    assert!(!disabled(&harness, "Start VR"), "a game started with the window needs only SteamVR");
+    assert!(!disabled(&harness, "Play"), "a game started with the window needs only SteamVR");
     pc.viewer.set(true);
     harness.state_mut().refresh_checks();
     harness.run();
-    assert!(disabled(&harness, "Start VR"), "another session's viewer runs");
+    assert!(disabled(&harness, "Play"), "another session's viewer runs");
 }
 
 #[test]
@@ -291,4 +286,25 @@ fn a_setting_from_the_headset_is_saved_where_its_control_would_save_it() {
     let saved = Settings::load_from(dir.join("settings.txt"));
     assert!(saved.values.get("kit").is_some_and(|v| v.switch(&KIT, "kit_switch")), "the game's own option");
     assert!(saved.monaka.switch(&MONAKA, DIAGNOSTIC_LOGGING.id), "Monaka's own, for every game");
+}
+
+#[test]
+fn a_pack_that_cannot_run_is_listed_with_why_and_can_be_removed() {
+    let _one = one_window();
+    let dir = folder("left-out");
+    let old = paths_in(&dir).packs.join("old_kit").join("monaka_kit.dll");
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    let contract = Contract { major: CONTRACT.major - 1 }.packed().to_le_bytes().to_vec();
+    std::fs::write(&old, dll_exporting(&[("MONAKA_CONTRACT", contract)])).unwrap();
+    let pc = Rc::new(PcState::default());
+    let mut harness = window(&dir, &pc);
+    harness.get_by_label("old_kit").click();
+    harness.run();
+    assert!(shows(&harness, "Made for an older Monaka. Get a newer version of this game pack."));
+    harness.get_by_label("Remove pack").click();
+    harness.run();
+    harness.get_by_label("Remove").click();
+    harness.run();
+    assert!(!old.parent().unwrap().exists());
+    assert!(!shows(&harness, "old_kit"));
 }

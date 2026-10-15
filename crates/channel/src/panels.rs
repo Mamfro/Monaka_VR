@@ -1,11 +1,11 @@
-//! The HUD panels block beside a stereo channel ([`monaka_core::panels`]): a producer declares the
+//! The HUD panels block beside a stereo channel ([`monaka_contract::panels`]): a producer declares the
 //! pieces it puts on the hands and keeps the block open while it runs; the viewer reads it. Either
 //! side may create it. Every access waits at most a couple of milliseconds; a miss is not an error.
 
 use crate::shared::SharedBlock;
 use crate::{ChannelName, Result};
-use monaka_core::panels::{PanelsBlock, Place};
-use monaka_core::protocol::{Block, Versioned};
+use monaka_contract::panels::{PanelsBlock, Place};
+use monaka_contract::protocol::{Block, Versioned};
 
 const WAIT_MS: u32 = 2;
 

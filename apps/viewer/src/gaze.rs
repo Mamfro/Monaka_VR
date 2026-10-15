@@ -3,7 +3,7 @@
 //! Meta's eye tracker (both eyes combined). Head-relative: +X right, +Y up, forward -Z.
 
 use monaka_core::math::{self, Quat, Vec3};
-use monaka_core::protocol::EyeGaze;
+use monaka_contract::protocol::EyeGaze;
 use monaka_openxr::{Action, EyeTracker, Session, Space, Time};
 
 /// The eye gaze interaction profile and its one pose.

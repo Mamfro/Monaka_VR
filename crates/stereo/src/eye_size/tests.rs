@@ -1,5 +1,5 @@
 use super::*;
-use monaka_core::manifest::Manifest;
+use monaka_contract::manifest::Manifest;
 use monaka_core::options::Options;
 use monaka_producer::game::Adapter;
 use monaka_producer::{Rejection, Session};

@@ -6,13 +6,15 @@
 //! hook swaps one entry of a module's import address table.
 //!
 //! Relays and trampolines are never freed: a thread may still be inside one after a hook is
-//! removed.
+//! removed. Many hooks share one region of executable memory near their code ([`slot_near`]).
 
 use crate::module::Module;
 use crate::threads::Frozen;
 use crate::{Error, Result, mem};
+use monaka_core::sync::Locked;
 use std::marker::PhantomData;
 use std::ops::Range;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use windows::Win32::System::Diagnostics::Debug::FlushInstructionCache;
 use windows::Win32::System::Memory::{
@@ -120,15 +122,43 @@ impl Instruction {
 
 use crate::arch::{RELAY_SIZE, absolute_jump, relative32};
 const TRAMPOLINE_OFFSET: usize = 32;
-const BLOCK_SIZE: usize = 4096;
+/// One hook's relay and trampoline: the relay, then at [`TRAMPOLINE_OFFSET`] the replaced
+/// instructions (at most a jump's worth plus one, 20 bytes) and the jump back.
+const SLOT: usize = 128;
+/// The executable memory reserved at once: the allocation granularity, so nothing is left over.
+const REGION: usize = 0x10000;
+/// How far from its code a hook's slot may be (a rel32 jump reaches 2 GiB).
+const REACH: usize = 0x7000_0000;
 
-/// Commits a block of executable memory within a rel32 jump of `target`.
+/// A region of executable memory and how much of it is handed out.
+struct Region {
+    base: usize,
+    used: usize,
+}
+
+static REGIONS: Mutex<Vec<Region>> = Mutex::new(Vec::new());
+
+/// A fresh [`SLOT`] of executable memory within a rel32 jump of `target`, from a region already
+/// near it, or a new one. Never handed out again.
+fn slot_near(target: usize) -> Option<usize> {
+    let mut regions = REGIONS.locked();
+    if let Some(region) = regions.iter_mut().find(|r| r.used + SLOT <= REGION && r.base.abs_diff(target) < REACH - REGION) {
+        let slot = region.base + region.used;
+        region.used += SLOT;
+        return Some(slot);
+    }
+    let base = allocate_near(target)?;
+    regions.push(Region { base, used: SLOT });
+    Some(base)
+}
+
+/// Commits a [`REGION`] of executable memory within a rel32 jump of `target`.
 fn allocate_near(target: usize) -> Option<usize> {
     let mut info = SYSTEM_INFO::default();
     // SAFETY: fills a local.
     unsafe { GetSystemInfo(&mut info) };
     let granularity = info.dwAllocationGranularity.max(0x10000) as usize;
-    let reach = 0x7000_0000usize;
+    let reach = REACH;
     let origin = target & !(granularity - 1);
     for step in 1..(reach / granularity) {
         for candidate in [origin.checked_sub(step * granularity), origin.checked_add(step * granularity)].into_iter().flatten() {
@@ -139,7 +169,7 @@ fn allocate_near(target: usize) -> Option<usize> {
                 continue;
             }
             // SAFETY: reserves and commits fresh pages at a free address.
-            let block = unsafe { VirtualAlloc(Some(candidate as *const _), BLOCK_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE) };
+            let block = unsafe { VirtualAlloc(Some(candidate as *const _), REGION, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE) };
             if !block.is_null() {
                 return Some(block as usize);
             }
@@ -220,7 +250,7 @@ impl InlineHook {
     fn prepare(name: &str, target: usize, parts: &[(&[u8], Option<usize>)], detour: usize) -> Result<(Self, usize)> {
         let actual: Vec<u8> = parts.iter().flat_map(|(bytes, _)| bytes.iter().copied()).collect();
         let length = actual.len();
-        let block = allocate_near(target).ok_or_else(|| Error::NoNearMemory(name.to_owned()))?;
+        let block = slot_near(target).ok_or_else(|| Error::NoNearMemory(name.to_owned()))?;
 
         let mut trampoline = Vec::with_capacity(length + RELAY_SIZE);
         let mut source = target;
@@ -243,11 +273,12 @@ impl InlineHook {
         patch[0] = 0xe9;
         patch[1..5].copy_from_slice(&relative.to_le_bytes());
 
-        // SAFETY: the block is fresh RWX memory of BLOCK_SIZE bytes that nothing else uses yet.
+        assert!(TRAMPOLINE_OFFSET + trampoline.len() <= SLOT, "{name}: the trampoline is longer than a slot");
+        // SAFETY: the block is a fresh RWX slot of SLOT bytes that nothing else uses.
         unsafe {
             std::ptr::copy_nonoverlapping(absolute_jump(detour).as_ptr(), block as *mut u8, RELAY_SIZE);
             std::ptr::copy_nonoverlapping(trampoline.as_ptr(), (block + TRAMPOLINE_OFFSET) as *mut u8, trampoline.len());
-            let _ = FlushInstructionCache(GetCurrentProcess(), Some(block as *const _), BLOCK_SIZE);
+            let _ = FlushInstructionCache(GetCurrentProcess(), Some(block as *const _), SLOT);
         }
         let hook = Self { name: name.to_owned(), target, original: actual, patch, enabled: false };
         Ok((hook, block + TRAMPOLINE_OFFSET))

@@ -1,7 +1,7 @@
 use super::*;
 use monaka_core::depth::DepthMapping;
 use monaka_core::math::Vec3;
-use monaka_core::protocol::DepthParams;
+use monaka_contract::protocol::DepthParams;
 use monaka_ffx::Float2;
 use monaka_framegen::inputs::Place;
 use monaka_ffx::upscale::{GameDispatch, GameResource, create};

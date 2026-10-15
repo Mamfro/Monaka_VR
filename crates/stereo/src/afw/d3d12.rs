@@ -73,7 +73,7 @@ use monaka_channel::ChannelName;
 use monaka_channel::pose::HeadSource;
 use monaka_channel::d3d12::{self, Recorder, barrier};
 use monaka_core::camera::{Frustum, Mat44};
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_ffx::{Camera, Size2};
 use monaka_framegen::inputs::{self, Motion, Rendering};

@@ -6,11 +6,11 @@ use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 struct Pressing;
 impl Game for Pressing {
-    const MANIFESTS: &'static [monaka_core::manifest::Manifest] = &[];
+    const MANIFESTS: &'static [monaka_contract::manifest::Manifest] = &[];
     const ADAPTER: Adapter<Self> = Adapter { components: &[] };
     type Build = ();
     type Frame = ();
-    fn prepare(_: &'static monaka_producer::Session, _: &'static monaka_core::manifest::Manifest, _: &monaka_core::options::Options) -> Result<(), monaka_producer::Rejection> {
+    fn prepare(_: &'static monaka_producer::Session, _: &'static monaka_contract::manifest::Manifest, _: &monaka_core::options::Options) -> Result<(), monaka_producer::Rejection> {
         Ok(())
     }
 }

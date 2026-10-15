@@ -14,7 +14,7 @@ use monaka_channel::pose::PoseChannel;
 use monaka_channel::reader::{self, FenceReader};
 use monaka_channel::{ChannelName, tick};
 use monaka_core::bmp;
-use monaka_core::protocol::{HandPose, HeadPose, RenderedPair};
+use monaka_contract::protocol::{HandPose, HeadPose, RenderedPair};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
@@ -87,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if arg == "--pad-walk" {
             pad_walk = true;
         } else if arg == "--pad-hold" {
-            use monaka_core::pad::button;
+            use monaka_contract::gamepad::button;
             pad_hold = Some(match args.next().ok_or(usage)?.as_str() {
                 "none" => 0,
                 "a" => button::A,
@@ -151,12 +151,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let (Some(channel), true) = (hands.as_mut(), pad_walk || pad_hold.is_some() || hand_swing) {
             // Pulsed, not held: games ignore input already held when they get focus.
             let phase = started.elapsed().as_millis() % 2000;
-            let gamepad = monaka_core::pad::Gamepad {
+            let gamepad = monaka_contract::gamepad::Gamepad {
                 buttons: if phase < 500 { pad_hold.unwrap_or(0) } else { 0 },
                 thumb_ly: if pad_walk && phase < 1500 { i16::MAX } else { 0 },
                 ..Default::default()
             };
-            channel.write_pad(&monaka_core::protocol::PadState { gamepad, valid: 1, received_tick: tick() });
+            channel.write_pad(&monaka_contract::protocol::PadState { gamepad, valid: 1, received_tick: tick() });
         }
         if let (Some(channel), Some(yaw)) = (hands.as_mut(), hand_yaw) {
             let swung = if hand_swing {

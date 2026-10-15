@@ -22,7 +22,7 @@ use crate::skeleton::finger_chains;
 use crate::{Frames, Skeleton, Snapshot};
 use monaka_core::camera::{self, IDENTITY_MATRIX, Mat34, position};
 use monaka_core::math::{Vec3, cross, distance, dot, sub, unit};
-use monaka_core::protocol::{FingerPose, LEFT_HAND, RIGHT_HAND};
+use monaka_contract::protocol::{FingerPose, LEFT_HAND, RIGHT_HAND};
 use monaka_core::sync::Locked;
 use monaka_producer::game::Game;
 use monaka_producer::log;

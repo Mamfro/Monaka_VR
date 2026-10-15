@@ -581,7 +581,7 @@ fn d3d12_device(luid: Option<[u8; 8]>) -> Result<ID3D12Device, String> {
         Some(bytes) => {
             let low = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
             let high = i32::from_le_bytes(bytes[4..8].try_into().unwrap());
-            let adapter = monaka_channel::d3d::find_adapter(monaka_core::protocol::Luid { low, high }).map_err(|e| format!("the game's GPU: {e}"))?;
+            let adapter = monaka_channel::d3d::find_adapter(monaka_contract::protocol::Luid { low, high }).map_err(|e| format!("the game's GPU: {e}"))?;
             Some(adapter.cast::<windows::core::IUnknown>().map_err(|e| e.to_string())?)
         }
         None => None,

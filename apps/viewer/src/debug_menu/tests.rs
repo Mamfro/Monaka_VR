@@ -1,5 +1,5 @@
 use super::*;
-use monaka_core::debug_draw::{Categories, Category};
+use monaka_contract::debug_draw::Categories;
 use std::time::Duration;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM;
 
@@ -9,10 +9,9 @@ fn pad_with(buttons: u16) -> Gamepad {
 
 /// Feeds `buttons` at `ms` after `start`; the pad the game gets and what was asked.
 fn step(menu: &mut HeadsetMenu<'_>, buttons: u16, start: Instant, ms: u64) -> (Gamepad, Asked) {
-    let (mut settings, status) = (Settings::default(), Status::default());
     let mut pad = pad_with(buttons);
     let head = Some(([0.0, 0.0, 0.0, 1.0], [0.0, 1.6, 0.0]));
-    let asked = menu.pad(&mut pad, head, start + Duration::from_millis(ms), &mut settings, &status, true);
+    let asked = menu.pad(&mut pad, head, start + Duration::from_millis(ms), &Status::default());
     (pad, asked)
 }
 
@@ -24,7 +23,7 @@ fn select_held_opens_the_menu_and_a_short_press_is_a_tap() {
     assert_eq!(pad.buttons, 0, "held back while it may be long");
     let (pad, asked) = step(&mut menu, button::BACK, start, 520);
     assert!(menu.open() && asked.buzzes.len() == 2);
-    assert_eq!(pad, Gamepad::default(), "the game gets an idle pad while it is open");
+    assert_eq!(pad.buttons, 0, "Select is not the game's while it opens the menu");
     step(&mut menu, button::BACK, start, 1200);
     assert!(menu.open(), "held on: it does not close again");
     let (pad, _) = step(&mut menu, 0, start, 1300);
@@ -58,42 +57,28 @@ fn start_is_left_alone_and_select_with_it_is_the_capture_chord() {
 }
 
 #[test]
-fn an_open_menu_moves_switches_and_closes() {
+fn an_open_menu_leaves_the_triggers_and_sticks_to_the_pointer_and_b_closes_it() {
     let mut menu = HeadsetMenu::new(DXGI_FORMAT_R8G8B8A8_UNORM);
     menu.menu.open = true;
-    let mut settings = Settings::default();
     let status = Status { offered: Categories(u64::MAX), ..Status::default() };
     let now = Instant::now();
-    menu.pad(&mut Gamepad { thumb_ly: -30000, ..Gamepad::default() }, None, now, &mut settings, &status, true);
-    menu.pad(&mut Gamepad::default(), None, now + Duration::from_millis(50), &mut settings, &status, true);
-    menu.pad(&mut pad_with(button::A), None, now + Duration::from_millis(100), &mut settings, &status, true);
-    assert!(settings.wanted.has(Category::Skeleton), "down one line, then A");
-    menu.pad(&mut pad_with(button::A), None, now + Duration::from_millis(150), &mut settings, &status, true);
-    assert!(settings.wanted.has(Category::Skeleton), "A held: one press");
-    menu.pad(&mut Gamepad { right_trigger: 255, ..Gamepad::default() }, None, now + Duration::from_millis(200), &mut settings, &status, true);
-    assert_eq!(menu.menu.tab, 1);
-    menu.pad(&mut pad_with(button::B), None, now + Duration::from_millis(250), &mut settings, &status, true);
+    let mut pulled = Gamepad { right_trigger: 255, thumb_ry: 20000, ..Gamepad::default() };
+    menu.pad(&mut pulled, None, now, &status);
+    assert_eq!((pulled.right_trigger, pulled.thumb_ry, menu.menu.tab), (255, 20000, 0), "the pointer's, not a tab");
+    menu.pad(&mut pad_with(button::B), None, now + Duration::from_millis(50), &status);
     assert!(!menu.open());
 }
 
 #[test]
-fn lb_rb_step_the_row_and_a_panel_driven_gets_the_presses() {
+fn lb_rb_slide_the_row() {
     let mut menu = HeadsetMenu::new(DXGI_FORMAT_R8G8B8A8_UNORM);
-    let (mut settings, status) = (Settings::default(), Status::default());
+    let status = Status::default();
     let now = Instant::now();
     menu.menu.open = true;
-    let asked = menu.pad(&mut pad_with(button::RIGHT_SHOULDER), None, now, &mut settings, &status, true);
+    let asked = menu.pad(&mut pad_with(button::RIGHT_SHOULDER), None, now, &status);
     assert_eq!(asked.focus_step, 1);
-    let asked = menu.pad(&mut pad_with(button::RIGHT_SHOULDER), None, now + Duration::from_millis(50), &mut settings, &status, true);
+    let asked = menu.pad(&mut pad_with(button::RIGHT_SHOULDER), None, now + Duration::from_millis(50), &status);
     assert_eq!(asked.focus_step, 0, "held: no new step");
-    let asked = menu.pad(&mut pad_with(button::RIGHT_SHOULDER | button::LEFT_SHOULDER), None, now + Duration::from_millis(75), &mut settings, &status, true);
+    let asked = menu.pad(&mut pad_with(button::RIGHT_SHOULDER | button::LEFT_SHOULDER), None, now + Duration::from_millis(75), &status);
     assert_eq!(asked.focus_step, -1, "LB: back a step");
-    menu.pad(&mut Gamepad::default(), None, now + Duration::from_millis(100), &mut settings, &status, false);
-    // A panel driven: the D-pad and A go to it, B still closes the menu.
-    let asked = menu.pad(&mut pad_with(button::DPAD_DOWN | button::A), None, now + Duration::from_millis(150), &mut settings, &status, false);
-    assert_eq!(asked.panel_presses, vec![Press::Down, Press::Switch]);
-    let asked = menu.pad(&mut Gamepad { thumb_ry: 30000, ..Gamepad::default() }, None, now + Duration::from_millis(200), &mut settings, &status, false);
-    assert_eq!(asked.scroll, SCROLL_LINES, "the right stick scrolls up");
-    menu.pad(&mut pad_with(button::B), None, now + Duration::from_millis(250), &mut settings, &status, false);
-    assert!(!menu.open(), "B closes whatever the pad drives");
 }

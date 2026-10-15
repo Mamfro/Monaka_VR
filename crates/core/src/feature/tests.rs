@@ -1,5 +1,5 @@
 use super::*;
-use crate::manifest::{AIM_LOOK, AIM_MOTION, AIM_MOUSE, AIM_POINT, FINGER_TRACKING, HUD_SIZE, aim, aims, opt};
+use monaka_contract::manifest::{AIM_LOOK, AIM_MOTION, AIM_MOUSE, AIM_POINT, FINGER_TRACKING, HUD_SIZE, aim, aims, opt};
 
 const FINGERS: &[Feature] = &[Feature::FingerRig];
 
@@ -31,6 +31,18 @@ fn aim_choices_follow_the_features() {
     assert!(wrong.text().contains("choice `head` needs a feature"), "{}", wrong.text());
     const RIG: Opt = aim(&[AIM_MOTION, AIM_MOUSE], aims::HAND_RIG);
     assert!(fault("arms", &[Feature::HandRig], &[RIG], rig_only).is_none());
+}
+
+#[test]
+fn every_shared_option_has_one_owner() {
+    use monaka_contract::manifest::SHARED;
+    for opt in SHARED {
+        assert!(opt.shared, "{} is in SHARED but not marked shared", opt.id);
+        assert!(owner(opt.id).is_some(), "{} has no owner in OWNERS", opt.id);
+    }
+    for (id, _) in OWNERS {
+        assert!(SHARED.iter().any(|o| o.id == *id), "{id} is owned but not in SHARED");
+    }
 }
 
 #[test]

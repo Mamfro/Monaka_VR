@@ -16,7 +16,7 @@ use crate::launch::{self, HandThrow, Leaving, Thrower, Throws, Thrown, Way};
 use monaka_core::feature::Feature;
 use monaka_core::gesture::{ReleaseRules, ThrowSpeed};
 use monaka_core::math::{Vec3, length};
-use monaka_core::protocol::{LEFT_HAND, RIGHT_HAND};
+use monaka_contract::protocol::{LEFT_HAND, RIGHT_HAND};
 use monaka_core::sync::Locked;
 use monaka_producer::game::{Component, Lack, On, Run, Start, Switch};
 use monaka_producer::log;

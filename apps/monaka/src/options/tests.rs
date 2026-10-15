@@ -1,9 +1,28 @@
 use super::*;
-use monaka_core::manifest::{choice, opt};
+use monaka_contract::manifest::{choice, opt};
 
 const MODE: Opt = opt("mode", "Mode", "How it runs.", choice(&[("fast", "Fast"), ("sharp", "Sharp")], "fast")).turns_off("sharp", "boost", "Sharp has its own.");
 const BOOST: Opt = opt("boost", "Boost", "More frames.", Kind::Switch { default: true });
 const GAME: Manifest = Manifest { id: "g", name: "G", options: &[MODE, BOOST], ..Manifest::GAME };
+
+#[test]
+fn settings_for_testers_show_only_in_developer_mode() {
+    const TRIAL: Opt = opt("trial", "Trial", "For testers.", Kind::Switch { default: false }).dev();
+    const TRIED: Manifest = Manifest { options: &[MODE, TRIAL], ..GAME };
+    let pack = Box::leak(Box::new(monaka_launch::packs::Pack {
+        dll: "monaka_g.dll".into(),
+        contract: monaka_contract::pack::CONTRACT,
+        about: Default::default(),
+        requires: Vec::new(),
+        uses: Vec::new(),
+        manifests: Vec::new(),
+    }));
+    let game = Game { manifest: &TRIED, origin: monaka_launch::games::Origin::Pack(pack) };
+    let ids = |dev: bool| rows(&game, false, dev).iter().map(|r| r.opt.id).collect::<Vec<_>>();
+    assert!(!ids(false).contains(&"trial") && ids(true).contains(&"trial"));
+    // The switch itself is always there, among Monaka's own.
+    assert!(ids(false).contains(&monaka_contract::manifest::DEV_MODE.id));
+}
 
 #[test]
 fn values_are_named_as_the_window_shows_them() {

@@ -2,7 +2,8 @@ use super::*;
 use crate::TEST_PRESSES;
 use crate::actions::{self, Action};
 use crate::presses::pressed;
-use monaka_core::pad::{button, merge};
+use monaka_core::pad::merge;
+use monaka_contract::gamepad::button;
 use monaka_producer::game::Adapter;
 
 /// The controllers' B as the d-pad's down.
@@ -47,11 +48,11 @@ fn applies_is_asked_only_as_a_remapped_button_goes_down() {
 
 struct Layout;
 impl Game for Layout {
-    const MANIFESTS: &'static [monaka_core::manifest::Manifest] = &[];
+    const MANIFESTS: &'static [monaka_contract::manifest::Manifest] = &[];
     const ADAPTER: Adapter<Self> = Adapter { components: &[] };
     type Build = ();
     type Frame = ();
-    fn prepare(_: &'static monaka_producer::Session, _: &'static monaka_core::manifest::Manifest, _: &monaka_core::options::Options) -> Result<(), monaka_producer::Rejection> {
+    fn prepare(_: &'static monaka_producer::Session, _: &'static monaka_contract::manifest::Manifest, _: &monaka_core::options::Options) -> Result<(), monaka_producer::Rejection> {
         Ok(())
     }
 }

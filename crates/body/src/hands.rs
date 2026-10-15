@@ -12,7 +12,7 @@
 use crate::hand_rig::HandRig;
 use monaka_core::camera::{Mat34, position, quaternion};
 use monaka_core::math::Vec3;
-use monaka_core::protocol::HandPose;
+use monaka_contract::protocol::HandPose;
 use monaka_core::sync::Locked;
 use std::sync::Mutex;
 

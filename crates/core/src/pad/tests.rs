@@ -1,4 +1,5 @@
 use super::*;
+use monaka_contract::gamepad::button;
 
 #[test]
 fn turning_has_a_deadzone_and_eases_in() {
@@ -27,17 +28,11 @@ fn a_snap_turns_once_per_push_and_a_straight_smooth_turn_is_linear() {
 
 #[test]
 fn the_turn_option_picks_smooth_or_snap() {
-    let manifest = Manifest { options: &[crate::manifest::TURN], ..Manifest::GAME };
+    let manifest = Manifest { options: &[monaka_contract::manifest::TURN], ..Manifest::GAME };
     let pick = |text: &str| StickTurn::from_options(&Options::parse(text), &manifest, StickTurn::smooth(150.0), StickTurn::SNAP);
     assert_eq!(pick(""), StickTurn::smooth(150.0));
     assert_eq!(pick("turn=snap"), StickTurn::SNAP);
     assert_eq!(pick("turn=Smooth"), StickTurn::smooth(150.0));
-}
-
-#[test]
-fn layout_is_xinputs() {
-    assert_eq!(size_of::<Gamepad>(), 12);
-    assert_eq!(std::mem::offset_of!(Gamepad, thumb_lx), 4);
 }
 
 #[test]

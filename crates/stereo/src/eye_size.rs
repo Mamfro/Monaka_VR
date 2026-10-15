@@ -6,7 +6,7 @@
 //! asks [`ready`] (or [`chain_ready`], or the loop step [`hold`]) before publishing.
 
 use crate::driver::Driver;
-use monaka_core::manifest::{OWN_EYE_SIZE, Opt, RENDER_SIZE};
+use monaka_contract::manifest::{OWN_EYE_SIZE, Opt, RENDER_SIZE};
 use monaka_core::sync::Locked;
 use monaka_producer::game::{Component, Game, Lack, On, Run, Start};
 use monaka_producer::log;

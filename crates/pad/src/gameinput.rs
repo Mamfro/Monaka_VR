@@ -379,7 +379,7 @@ unsafe extern "system" fn reading_gamepad(_this: *mut c_void, out: *mut [u32; 8]
     }
     PAD_READS.fetch_add(1, Relaxed);
     let pad = crate::virtual_pad().unwrap_or_default();
-    if pad != monaka_core::pad::Gamepad::default() {
+    if pad != monaka_contract::gamepad::Gamepad::default() {
         PAD_INPUT.fetch_add(1, Relaxed);
     }
     let axis = |v: i16| f32::from(v) / 32767.0;

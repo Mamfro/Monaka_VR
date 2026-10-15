@@ -14,17 +14,17 @@ fn the_weapon_point_is_aimed_at_from_where_following_walked_the_camera() {
 }
 
 /// A manifest without an `aim` option: the older switches decide.
-const TEST_MANIFEST: monaka_core::manifest::Manifest = monaka_core::manifest::Manifest {
+const TEST_MANIFEST: monaka_contract::manifest::Manifest = monaka_contract::manifest::Manifest {
     id: "t",
     name: "Test",
-    status: monaka_core::manifest::Status::Experimental,
+    status: monaka_contract::manifest::Status::Experimental,
     executables: &["T.exe"],
     steam_app: 0,
     producer: "monaka_t",
     log: "monaka_t.log",
     options_file: "t-options.txt",
     run_prefix: "t",
-    launch: monaka_core::manifest::Launch::Manual,
+    launch: monaka_contract::manifest::Launch::Manual,
     refused_arguments: &[],
     before: "",
     options: &[],

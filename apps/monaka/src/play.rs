@@ -126,7 +126,7 @@ fn check(kind: &str, args: &[String]) -> ExitCode {
     while let Some(arg) = rest.next() {
         let outcome: Result<(), String> = match arg.as_str() {
             "--script" => rest.next().map(|s| script = Some(PathBuf::from(s))).ok_or("--script takes a file".to_owned()),
-            "--eye" => rest.next().and_then(|s| monaka_core::options::parse_size(s)).map(|size| eye = Some(size)).ok_or("--eye takes WxH (256 to 8192 each)".to_owned()),
+            "--eye" => rest.next().and_then(|s| monaka_contract::manifest::parse_size(s)).map(|size| eye = Some(size)).ok_or("--eye takes WxH (256 to 8192 each)".to_owned()),
             "--delay" => number("--delay", rest.next()).map(|n| delay = n),
             "--seconds" => number("--seconds", rest.next()).map(|n| seconds = n),
             "--save" => number("--save", rest.next()).map(|n| probe_args.extend(["--save".to_owned(), n.to_string()])),
@@ -318,7 +318,7 @@ fn console(words: &[String], view: bool) -> ExitCode {
         .flatten()
         .flatten()
         .filter_map(|entry| {
-            let file = entry.path().join("live-channel.txt");
+            let file = entry.path().join(monaka_contract::protocol::LIVE_CHANNEL_FILE);
             Some((file.metadata().ok()?.modified().ok()?, file))
         })
         .max_by_key(|(when, _)| *when);
@@ -326,7 +326,7 @@ fn console(words: &[String], view: bool) -> ExitCode {
         eprintln!("No run found in {}: start one first.", runs.display());
         return ExitCode::from(1);
     };
-    let Some(name) = std::fs::read_to_string(&file).ok().and_then(|text| monaka_core::protocol::ChannelName::new(text.trim())) else {
+    let Some(name) = std::fs::read_to_string(&file).ok().and_then(|text| monaka_contract::protocol::ChannelName::new(text.trim())) else {
         eprintln!("{}: no channel name in it", file.display());
         return ExitCode::from(1);
     };
@@ -412,6 +412,6 @@ fn main() -> ExitCode {
     println!("Ctrl+C here stops VR; quitting the game ends it.");
     let mut failed = false;
     let shows = if desktop { session::Shows::Desktop } else { session::Shows::Headset };
-    session::run(game, &values, &Paths::locate(), Console::Shared, shows, stop, &mut |event| report_line(event, &mut failed));
+    session::run(game, &values, &Paths::locate(), Console::Shared, shows, None, stop, &mut |event| report_line(event, &mut failed));
     if failed { ExitCode::from(2) } else { ExitCode::SUCCESS }
 }

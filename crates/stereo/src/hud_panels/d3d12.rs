@@ -12,7 +12,7 @@ pub(super) mod take_out;
 
 pub use take_out::take_out;
 
-use super::PanelOut;
+use super::{PANEL_PIECES, PanelOut, Rects};
 use crate::framepass12::Lazy;
 use monaka_channel::ChannelName;
 use monaka_channel::d3d12::compute::{self, DescriptorHeap, Table, srv_desc, uav_desc};
@@ -44,6 +44,9 @@ struct Panel {
     producer: Option<FenceProducer>,
     failures: u64,
 }
+
+/// What goes out for each piece at a present (shown, just cleared, or nothing).
+type Outs = [Option<PanelOut>; PANEL_PIECES];
 
 struct Panels {
     device: ID3D12Device,
@@ -97,25 +100,25 @@ impl Panels {
 
     /// Records this present's panels from `layer` (in COMMON, of `size`) for the shown pieces'
     /// rectangles `rects` (by piece, the layer's pixels): which panels to publish and how (shown
-    /// ones and ones just cleared). `None` when no command list was free.
-    fn record(&mut self, layer: &ID3D12Resource, size: (u32, u32), rects: &[Option<[f32; 4]>]) -> windows::core::Result<Option<Vec<(usize, PanelOut)>>> {
+    /// ones and ones just cleared), by piece. `None` when no command list was free.
+    fn record(&mut self, layer: &ID3D12Resource, size: (u32, u32), rects: &[Option<[f32; 4]>; PANEL_PIECES]) -> windows::core::Result<Option<Outs>> {
         let Some(list) = self.recorder.begin()? else { return Ok(None) };
         self.view(layer);
-        let mut cropped: Vec<(usize, [f32; 4])> = Vec::new();
-        let mut cleared: Vec<usize> = Vec::new();
-        for i in 0..self.panels.len() {
-            let rect = rects.get(i).copied().flatten();
-            match (rect, self.states.out(i, rect.is_some())) {
-                (Some(rect), _) => cropped.push((i, rect)),
-                (None, Some(PanelOut::Cleared)) => cleared.push(i),
-                _ => {}
-            }
+        let mut outs: Outs = [None; PANEL_PIECES];
+        for (i, out) in outs.iter_mut().enumerate().take(self.panels.len()) {
+            let rect = rects[i];
+            *out = match (rect, self.states.out(i, rect.is_some())) {
+                (Some(_), _) => Some(PanelOut::Shown),
+                (None, Some(PanelOut::Cleared)) => Some(PanelOut::Cleared),
+                _ => None,
+            };
         }
+        let cropped = || outs.iter().enumerate().filter(|(_, out)| **out == Some(PanelOut::Shown)).filter_map(|(i, _)| Some((i, rects[i]?)));
+        let cleared = || outs.iter().enumerate().filter(|(_, out)| **out == Some(PanelOut::Cleared)).map(|(i, _)| i);
+        let touched = || outs.iter().enumerate().filter(|(_, out)| out.is_some()).map(|(i, _)| i);
         const SRV: D3D12_RESOURCE_STATES = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
         let constants = |panel: &Panel, source: [f32; 4]| Constants { out_width: panel.size.0, out_height: panel.size.1, ui_width: size.0, ui_height: size.1, source };
-        let touched: Vec<usize> = cropped.iter().map(|(i, _)| *i).chain(cleared.iter().copied()).collect();
-        let outs = cropped.iter().map(|&(i, _)| (i, PanelOut::Shown)).chain(cleared.iter().map(|&i| (i, PanelOut::Cleared))).collect();
-        if touched.is_empty() {
+        if touched().next().is_none() {
             return Ok(Some(outs));
         }
         // SAFETY: records compute work on our own list with our own heap, root signature and
@@ -124,12 +127,12 @@ impl Panels {
             list.SetDescriptorHeaps(&[Some(self.heap.heap().clone())]);
             list.SetComputeRootSignature(&self.root);
             list.SetComputeRootDescriptorTable(1, self.heap.gpu(0));
-            for &i in &touched {
+            for i in touched() {
                 barrier(&list, &self.panels[i].texture, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             }
             barrier(&list, layer, D3D12_RESOURCE_STATE_COMMON, SRV);
             list.SetPipelineState(&self.crop);
-            for &(i, rect) in &cropped {
+            for (i, rect) in cropped() {
                 let panel = &self.panels[i];
                 let c = constants(panel, rect);
                 list.SetComputeRoot32BitConstants(0, 8, &c as *const Constants as *const c_void, 0);
@@ -138,14 +141,14 @@ impl Panels {
             }
             barrier(&list, layer, SRV, D3D12_RESOURCE_STATE_COMMON);
             list.SetPipelineState(&self.clear);
-            for &i in &cleared {
+            for i in cleared() {
                 let panel = &self.panels[i];
                 let c = constants(panel, [0.0; 4]);
                 list.SetComputeRoot32BitConstants(0, 8, &c as *const Constants as *const c_void, 0);
                 list.SetComputeRootDescriptorTable(2, self.heap.gpu(1 + i as u32));
                 list.Dispatch(panel.size.0.div_ceil(8), panel.size.1.div_ceil(8), 1);
             }
-            for &i in &touched {
+            for i in touched() {
                 barrier(&list, &self.panels[i].texture, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
             }
         }
@@ -154,13 +157,13 @@ impl Panels {
 
     /// Publishes the panels `touched` (each shown or cleared) on `channel`'s panel channels (each
     /// made at its first publish).
-    fn publish(&mut self, queue: &ID3D12CommandQueue, channel: &ChannelName, touched: Vec<(usize, PanelOut)>, tick: u64) {
+    fn publish(&mut self, queue: &ID3D12CommandQueue, channel: &ChannelName, touched: Outs, tick: u64) {
         let device = self.device.clone();
-        for (i, out) in touched {
+        for (i, out) in touched.into_iter().enumerate().filter_map(|(i, out)| Some((i, out?))) {
             let panel = &mut self.panels[i];
             if panel.producer.is_none() {
                 let made = channel.panel(panel.name).ok_or_else(|| "bad channel name".to_owned()).and_then(|name| {
-                    FenceProducer::create(&name, &device, queue, panel.size.0, panel.size.1, DXGI_FORMAT_R8G8B8A8_UNORM).map_err(|e| e.to_string())
+                    FenceProducer::create_mono(&name, &device, queue, panel.size.0, panel.size.1, DXGI_FORMAT_R8G8B8A8_UNORM).map_err(|e| e.to_string())
                 });
                 match made {
                     Ok(producer) => {
@@ -177,7 +180,7 @@ impl Panels {
                 }
             }
             let Some(producer) = panel.producer.as_mut() else { continue };
-            match producer.publish((&panel.texture, D3D12_RESOURCE_STATE_COMMON), (&panel.texture, D3D12_RESOURCE_STATE_COMMON), tick) {
+            match producer.publish_one((&panel.texture, D3D12_RESOURCE_STATE_COMMON), tick) {
                 Ok(true) => {
                     self.states.went_out(i, out);
                     self.published += 1;
@@ -198,16 +201,16 @@ impl Panels {
 /// game says they lie now, each shown piece's panel cut out of the layer and published. Returns the
 /// shown pieces' rectangles of the layer (x, y, width, height in its pixels), to be left out of
 /// the eyes; none while the dynamic HUD is not taking pieces.
-pub fn publish(queue: &ID3D12CommandQueue, layer: &ID3D12Resource) -> Vec<[f32; 4]> {
+pub fn publish(queue: &ID3D12CommandQueue, layer: &ID3D12Resource) -> Rects {
     if !super::active() {
-        return Vec::new();
+        return Rects::default();
     }
     // SAFETY: reads a resource descriptor.
     let desc = unsafe { layer.GetDesc() };
     let size = (desc.Width as u32, desc.Height);
     super::take_boxes(size);
-    let Some(frame) = super::frame() else { return Vec::new() };
-    let rects: Vec<Option<[f32; 4]>> = frame.rects.iter().map(|r| r.map(|r| super::pixels(r, size))).collect();
+    let Some(frame) = super::frame() else { return Rects::default() };
+    let rects = frame.rects.map(|r| r.map(|r| super::pixels(r, size)));
     let make = |device: &ID3D12Device| {
         let made = Panels::new(device, frame.pieces)?;
         log!("dynamic HUD: layer crops ready ({} pieces)", made.panels.len());
@@ -229,7 +232,7 @@ pub fn publish(queue: &ID3D12CommandQueue, layer: &ID3D12Resource) -> Vec<[f32; 
         panels.publish(queue, &frame.channel, touched, monaka_channel::tick());
         true
     });
-    if recorded == Some(true) { rects.into_iter().flatten().collect() } else { Vec::new() }
+    if recorded == Some(true) { Rects::of(rects) } else { Rects::default() }
 }
 
 /// The end of a run: the channels go away with the producers, once the GPU is done with the panels.

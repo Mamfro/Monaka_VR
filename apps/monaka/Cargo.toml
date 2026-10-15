@@ -17,6 +17,7 @@ path = "src/play.rs"
 
 [dependencies]
 monaka_channel.workspace = true
+monaka_contract.workspace = true
 monaka_core.workspace = true
 monaka_launch.workspace = true
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "accesskit"] }

@@ -23,7 +23,7 @@
 
 use super::{Delivery, Looks, Share};
 use monaka_core::aim::Levelling;
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_producer::game::{Lack, Start};
 use monaka_producer::{log, wait_until};

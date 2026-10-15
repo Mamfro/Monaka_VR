@@ -5,7 +5,7 @@
 use super::{Driver, Publisher};
 use monaka_core::alternate::Schedule;
 use monaka_core::math::Vec3;
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use std::sync::atomic::Ordering::*;
 

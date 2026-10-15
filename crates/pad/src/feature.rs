@@ -14,7 +14,7 @@
 use crate::actions::Actions;
 use crate::remap::Remaps;
 use monaka_core::feature::Feature;
-use monaka_core::manifest::{CONTROLLER_PAD, CONTROLLER_PROXY};
+use monaka_contract::manifest::{CONTROLLER_PAD, CONTROLLER_PROXY};
 use monaka_producer::game::{Component, Game, Lack, On, Start};
 use std::sync::atomic::{AtomicBool, Ordering::*};
 

@@ -37,7 +37,7 @@ fn the_default_report_runs_while_the_state_is_held() {
     // The publisher calls the report inside the state lock: the report must not take it again
     // (that deadlocks the present thread at the first published pair, freezing the game).
     let driver = Driver::new();
-    use monaka_core::manifest::{Launch, Manifest, Status};
+    use monaka_contract::manifest::{Launch, Manifest, Status};
     let manifest = Manifest {
         id: "test",
         name: "Test",

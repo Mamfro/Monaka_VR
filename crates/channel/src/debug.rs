@@ -1,12 +1,12 @@
-//! The debug block beside a stereo channel ([`monaka_core::debug_draw`]). The producer writes
+//! The debug block beside a stereo channel ([`monaka_contract::debug_draw`]). The producer writes
 //! each game frame's primitives, which frames each published pair's eyes were drawn in, and what
 //! it can draw. The viewer writes what its menu wants and reads the rest. Either side may create
 //! it. Every access waits at most a couple of milliseconds; a miss is not an error.
 
 use crate::shared::SharedBlock;
 use crate::{ChannelName, Result};
-use monaka_core::protocol::Block;
-use monaka_core::debug_draw::{COSTS, Categories, CostTime, DEPTH_CANDIDATES, DebugBlock, DebugDepth, DepthCandidate, GameReport, Primitive};
+use monaka_contract::protocol::Block;
+use monaka_contract::debug_draw::{COSTS, Categories, CostTime, DEPTH_CANDIDATES, DebugBlock, DebugDepth, DepthCandidate, GameReport, Primitive};
 
 const WAIT_MS: u32 = 2;
 /// A side that has not said what it wants or offers for this long (ms) is taken to want or offer
@@ -35,7 +35,7 @@ impl DebugChannel {
         Ok(Self { block: SharedBlock::<DebugBlock>::open_versioned(&name, &lock, WAIT_MS)? })
     }
 
-    /// Producer: frame `key`'s primitives (at most [`monaka_core::debug_draw::DEBUG_PRIMITIVES`]).
+    /// Producer: frame `key`'s primitives (at most [`monaka_contract::debug_draw::DEBUG_PRIMITIVES`]).
     pub fn write_frame(&mut self, key: u64, primitives: &[Primitive]) -> bool {
         let Some(mut record) = self.block.lock(WAIT_MS).tolerant() else { return false };
         record.write_frame(key, primitives, crate::tick());

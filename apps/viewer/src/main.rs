@@ -5,11 +5,16 @@
 //! ```text
 //! monaka_viewer --gpu-map <channel> --loader <openxr_loader.dll> [--runtime <manifest.json>]
 //!             [--seconds N] [--pixel-aspect A] [--screen-width M] [--reticle left|right]... [--reticle-from head|palm]
-//!             [--dpad-hold left,right] [--menu-reach same|other|off] [--menu-pick buttons|stick] [--menu-reach-depth CM] [--act-like touch|index]
-//!             [--controller-smoothing 0-10] [--stop-event <name>] [--captures <folder>]
+//!             [--option id=value]... [--stop-event <name>] [--captures <folder>]
 //! monaka_viewer --info --loader <openxr_loader.dll> [--runtime <manifest.json>]
 //! monaka_viewer --gpu-map <channel> --desktop [--seconds N] [--captures <folder>] [--stop-event <name>]
+//! monaka_viewer --home --run-folder <folder> --loader <openxr_loader.dll> [--runtime <manifest.json>] [--seconds N] [--stop-event <name>]
 //! ```
+//!
+//! `--home` is the Monaka window's own headset view: Monaka's home with no game, open from the
+//! window's start. A run links its game in through the folder's link file (its channel and the
+//! viewer's arguments for it, `monaka_core::home`) and lets it go by emptying it; the home stays
+//! up in between.
 //!
 //! Pairs that come with the head poses they were rendered from go out as a projection layer, so
 //! the runtime reprojects them. Pairs without poses (menus, maps, loading screens) go on a flat
@@ -20,8 +25,13 @@
 //! ([`gaze`]), and each eye's depth goes with the projection layer when the producer sends it and
 //! the runtime takes it ([`depth`]). Start and Back held together save what the headset shows
 //! ([`chord`], [`capture`]).
+//!
+//! The game's and Monaka's settings the viewer acts on come as `--option id=value`
+//! ([`apply_option`]): an id it does not know (one a newer game pack sends) is skipped and said in
+//! the log, as is an argument it does not know.
 #![deny(unsafe_code)]
 
+mod ahead;
 mod capture;
 mod clipboard;
 mod console;
@@ -32,37 +42,49 @@ mod debug_views;
 mod depth;
 mod desktop;
 mod gaze;
+mod home;
+mod link;
 mod menu_quad;
 mod meter;
-mod monaka_menu;
 mod pad;
 mod panel;
+mod pointer;
 mod recorder;
 mod smooth;
 mod view_commands;
 
-use monaka_channel::d3d::{self, create_texture, find_adapter, simple_texture_desc};
-use monaka_channel::fingers::FingerChannel;
-use monaka_channel::reticles::ReticleChannel;
-use monaka_channel::hands::HandChannel;
+use monaka_channel::d3d::{self, find_adapter, simple_texture_desc};
 use monaka_channel::pose::PoseChannel;
 use monaka_channel::reader::{self, FenceReader};
 use monaka_channel::{ChannelName, tick};
 use monaka_core::chord;
 use monaka_core::menu_reach as reach;
 use monaka_core::math;
-use monaka_core::protocol::{FingerPose, HandPose, HeadPose, LEFT_HAND, PadState, RIGHT_HAND, RenderedPair, dxgi_format};
+use monaka_contract::protocol::{FingerPose, HandPose, HeadPose, LEFT_HAND, PadState, RIGHT_HAND, dxgi_format};
 use monaka_openxr::{Event, Extent2Df, Fovf, Instance, Layer, Loader, Posef, ProjectionView, sys};
 use std::error::Error;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use windows::Win32::Graphics::Direct3D11::D3D11_BIND_SHADER_RESOURCE;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 
 /// Distance of the flat menu screen in front of the head, in metres.
 const SCREEN_DISTANCE: f32 = 2.0;
 /// A producer that publishes nothing for this long has stopped; the viewer ends.
 const PRODUCER_SILENCE_MS: u64 = 15_000;
+
+/// While the link is made again (settings applied in the home), how often the channel is looked
+/// for, and how long before the home says the game is slow to come back.
+const RELINK_EVERY: Duration = Duration::from_millis(100);
+/// After the runtime says the room's origin moves (a recentre), when what hangs in the room is
+/// placed again: the head pose is in the new origin by then.
+const RECENTRE_AFTER: Duration = Duration::from_millis(300);
+/// A head that turns this far (radians) or moves this far (metres) between two reads was
+/// recentred, not moved: no head turns 25 degrees in a frame.
+const RECENTRE_TURN: f32 = 0.44;
+const RECENTRE_STEP: f32 = 0.3;
+/// How often the home's viewer reads the window's files again (what it shows, and the game linked).
+const HOME_SYNC_EVERY: Duration = Duration::from_millis(250);
+const RELINK_PATIENCE: Duration = Duration::from_secs(20);
 
 /// The producer's channel once it is made (with its first frame), waiting up to `seconds`; a stop
 /// asked for meanwhile (the game gone, the player) ends the wait.
@@ -83,7 +105,7 @@ pub(crate) fn wait_for_producer(name: &ChannelName, seconds: u64) -> Result<read
     }
 }
 
-/// What the viewer changes for a [`monaka_core::manifest::LIVE`] option set in the headset's Monaka
+/// What the viewer changes for a [`monaka_contract::manifest::LIVE`] option set in the headset's Monaka
 /// menu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Live {
@@ -95,29 +117,40 @@ enum Live {
 
 /// The viewer's part in live option `id`, if it has one.
 fn live_setting(id: &str) -> Option<Live> {
-    use monaka_core::manifest::{CONTROLLER_PROXY, CONTROLLER_SMOOTHING, MENU_REACH_DEPTH, menu_reach};
+    use monaka_contract::manifest::{CONTROLLER_PROXY, CONTROLLER_SMOOTHING, MENU_REACH_DEPTH, menu_reach};
     [(CONTROLLER_SMOOTHING.id, Live::Smoothing), (menu_reach("").id, Live::Reach), (MENU_REACH_DEPTH.id, Live::ReachDepth), (CONTROLLER_PROXY.id, Live::Proxy)]
         .into_iter()
         .find_map(|(live, what)| (live == id).then_some(what))
 }
 
-/// A block beside the stereo channel, opened for this run: `None` when it could not be (said in
-/// the log, and the run goes on without it), an error when the game pack speaks another version of
-/// it (nothing it carries would be read right).
-pub(crate) fn side_channel<T>(what: &str, opened: monaka_channel::Result<T>) -> Result<Option<T>, String> {
+/// A block beside the stereo channel, opened for this run: `None` when it could not be, even when
+/// the game pack speaks another major version of it (said in the log; the run goes on without
+/// what it carries, as `monaka_contract::protocol` has it).
+pub(crate) fn side_channel<T>(what: &str, opened: monaka_channel::Result<T>) -> Option<T> {
     match opened {
-        Ok(channel) => Ok(Some(channel)),
-        Err(monaka_channel::Error::Version(mismatch)) => Err(mismatch.to_string()),
+        Ok(channel) => Some(channel),
         Err(e) => {
             println!("No {what}: {e}");
-            Ok(None)
+            None
         }
     }
 }
 
+/// [`side_channel`] for the head pose block, which a run cannot do without: another major version
+/// of it is an error (a VR run without the head would be no run).
+pub(crate) fn pose_channel(opened: monaka_channel::Result<PoseChannel>) -> Result<Option<PoseChannel>, String> {
+    match opened {
+        Err(monaka_channel::Error::Version(mismatch)) => Err(mismatch.to_string()),
+        opened => Ok(side_channel("head pose channel (no head tracking)", opened)),
+    }
+}
+
+#[derive(Clone)]
 struct Args {
     channel: Option<ChannelName>,
     info: bool,
+    /// Monaka's home with no game yet (`--home`), a game linked in later.
+    home: bool,
     seconds: u64,
     /// How long to wait for the producer's first frame (`--producer-wait`): longer for a game
     /// joined as it starts, which reaches its first frame later.
@@ -140,9 +173,9 @@ struct Args {
     menu_reach: Option<reach::Pick>,
     /// How a pick from those menus reaches the game: a face button, or the game's right stick.
     menu_pick: reach::PickWith,
-    /// How far behind the head a hand reaches to open one (metres; `--menu-reach-depth` in cm).
+    /// How far behind the head a hand reaches to open one (metres; `menu_reach_depth` in cm).
     menu_reach_depth: f32,
-    /// The controllers act like another kind (`--act-like touch|index`, a layout test).
+    /// The controllers act like another kind (`controller_proxy` touch or index, a layout test).
     proxy: pad::Proxy,
     /// How hard the controllers' poses are steadied ([`smooth`]; 0 off, 10 strongest).
     controller_smoothing: f32,
@@ -150,38 +183,171 @@ struct Args {
     captures: Option<PathBuf>,
     /// Back held opens the debug menu (`--debug-menu`); without it Back is a plain button.
     debug_menu: bool,
-    /// The options the Monaka menu (Start held) offers, `id=value,id=value` (`--live`).
-    live: String,
+    /// The run's folder, where the launcher leaves what the home shows (`--run-folder`).
+    run_folder: Option<PathBuf>,
     /// The 2D window instead of the headset (`--desktop`, [`desktop`]).
     desktop: bool,
 }
 
-/// The launcher passes `--controller-smoothing` only away from Monaka's default, so that is ours too.
+/// Monaka's default controller smoothing, for a run started without the option.
 fn smoothing_default() -> f32 {
-    match monaka_core::manifest::CONTROLLER_SMOOTHING.kind {
-        monaka_core::manifest::Kind::Number { default, .. } => default as f32,
+    match monaka_contract::manifest::CONTROLLER_SMOOTHING.kind {
+        monaka_contract::manifest::Kind::Number { default, .. } => default as f32,
         _ => 0.0,
     }
 }
 
+/// The arguments that take a value; any other (besides `--info`, `--desktop` and `--debug-menu`)
+/// is skipped with its value.
+const VALUE_FLAGS: &[&str] = &[
+    "--gpu-map",
+    "--seconds",
+    "--producer-wait",
+    "--pixel-aspect",
+    "--screen-width",
+    monaka_contract::manifest::OPTION_ARG,
+    monaka_core::home::RUN_FOLDER_ARG,
+    "--loader",
+    "--runtime",
+    "--reticle",
+    "--reticle-from",
+    "--stop-event",
+    "--captures",
+    "--gaze-log",
+];
+
+/// Acts on one `--option id=value`: a game's or Monaka's setting for the viewer. An id this viewer
+/// does not know is skipped (a newer game pack's); a value it cannot read for an id it knows is an
+/// error, as the launcher checked it.
+fn apply_option(args: &mut Args, id: &str, value: &str) -> Result<(), String> {
+    use monaka_contract::manifest::{CONTROLLER_PROXY, CONTROLLER_SMOOTHING, DPAD_MENUS, MENU_PICK, MENU_REACH_DEPTH, PANEL_NEAREST, menu_reach};
+    const MENU_REACH: &str = menu_reach("").id;
+    const REACH_DEPTH: &str = MENU_REACH_DEPTH.id;
+    const PROXY: &str = CONTROLLER_PROXY.id;
+    const SMOOTHING: &str = CONTROLLER_SMOOTHING.id;
+    let number = || value.parse::<f64>().map_err(|_| format!("{id} must be a number"));
+    match id {
+        // Directions of a choice held open with the d-pad (`left,right`).
+        DPAD_MENUS => args.dpad_hold = pad::dpad_directions(value)?,
+        // Those menus by reaching over a shoulder: picked with the same hand's stick, the other's,
+        // or off.
+        MENU_REACH => args.menu_reach = reach::parse(value)?,
+        MENU_PICK => args.menu_pick = reach::parse_with(value)?,
+        REACH_DEPTH => {
+            let cm = number()?;
+            if !(5.0..=40.0).contains(&cm) {
+                return Err(format!("{id} is 5 to 40 (cm)"));
+            }
+            args.menu_reach_depth = cm as f32 / 100.0;
+        }
+        SMOOTHING => {
+            let strength = number()?;
+            if !(0.0..=10.0).contains(&strength) {
+                return Err(format!("{id} is 0 to 10"));
+            }
+            args.controller_smoothing = strength as f32;
+        }
+        // A layout test: the controllers act like Quest's or Index's.
+        PROXY => args.proxy = pad::Proxy::parse(value)?,
+        // The hand panels sit no nearer the head than this (metres; 0: on the hand as it is).
+        PANEL_NEAREST => args.panel_nearest = number()? as f32,
+        _ => println!("Viewer: option {id} is not one this viewer acts on; skipped"),
+    }
+    Ok(())
+}
+
+impl Args {
+    fn defaults() -> Self {
+        Args {
+            channel: None,
+            info: false,
+            home: false,
+            seconds: 30,
+            producer_wait: 30,
+            pixel_aspect: 1.0,
+            screen_width: 2.4,
+            loader: PathBuf::new(),
+            runtime: None,
+            reticles: [false; 2],
+            reticle_palm: false,
+            panel_nearest: 0.0,
+            dpad_hold: 0,
+            menu_reach: Some(reach::Pick::Same),
+            menu_pick: reach::PickWith::Buttons,
+            menu_reach_depth: reach::DEPTH,
+            proxy: pad::Proxy::None,
+            controller_smoothing: smoothing_default(),
+            captures: None,
+            debug_menu: false,
+            run_folder: None,
+            desktop: false,
+        }
+    }
+}
+
 fn parse_args() -> Result<Args, String> {
-    let mut args =
-        Args { channel: None, info: false, seconds: 30, producer_wait: 30, pixel_aspect: 1.0, screen_width: 2.4, loader: PathBuf::new(), runtime: None, reticles: [false; 2], reticle_palm: false, panel_nearest: 0.0, dpad_hold: 0, menu_reach: Some(reach::Pick::Same), menu_pick: reach::PickWith::Buttons, menu_reach_depth: reach::DEPTH, proxy: pad::Proxy::None, controller_smoothing: smoothing_default(), captures: None, debug_menu: false, live: String::new(), desktop: false };
-    let mut words = std::env::args().skip(1);
+    let mut args = Args::defaults();
+    read_words(&mut args, std::env::args().skip(1))?;
+    if !(1..=86_400).contains(&args.seconds) {
+        return Err("--seconds must be 1..86400".into());
+    }
+    if !(0.25..=4.0).contains(&args.pixel_aspect) {
+        return Err("--pixel-aspect must be 0.25..4".into());
+    }
+    if !args.desktop && !args.loader.is_absolute() {
+        return Err("provide an absolute --loader path".into());
+    }
+    if let Some(runtime) = &args.runtime
+        && (!runtime.is_absolute() || !runtime.is_file())
+    {
+        return Err("--runtime must be an existing absolute path".into());
+    }
+    if [args.info, args.channel.is_some(), args.home].into_iter().filter(|given| *given).count() != 1 {
+        return Err("give one of --info, --gpu-map or --home".into());
+    }
+    if args.home && args.run_folder.is_none() {
+        return Err("--home needs --run-folder".into());
+    }
+    Ok(args)
+}
+
+/// The arguments for a game linked into the home's viewer: `base`'s for the headset (the command
+/// line's), the game's own from `words` (the link file's), the rest as they start.
+fn link_args(base: &Args, words: &[String]) -> Result<Args, String> {
+    let mut args = Args { loader: base.loader.clone(), runtime: base.runtime.clone(), seconds: base.seconds, home: true, ..Args::defaults() };
+    read_words(&mut args, words.iter().cloned())?;
+    Ok(args)
+}
+
+/// Reads `words`, flags and their values, into `args`: every `--option` acted on once the rest
+/// are read.
+fn read_words(args: &mut Args, words: impl IntoIterator<Item = String>) -> Result<(), String> {
+    let mut words = words.into_iter().peekable();
+    let mut options = Vec::new();
     while let Some(flag) = words.next() {
         if flag == "--info" {
             args.info = true;
             continue;
         }
-        if flag == monaka_core::manifest::DESKTOP_ARG {
+        if flag == monaka_core::home::HOME_ARG {
+            args.home = true;
+            continue;
+        }
+        if flag == monaka_contract::manifest::DESKTOP_ARG {
             args.desktop = true;
             continue;
         }
-        if flag == monaka_core::manifest::DEBUG_MENU_ARG {
+        if flag == monaka_contract::manifest::DEBUG_MENU_ARG {
             args.debug_menu = true;
             continue;
         }
-        let value = words.next().ok_or_else(|| format!("{flag} needs a value"))?;
+        // What follows a flag, unless it is the next flag.
+        let value = words.next_if(|word| !word.starts_with("--"));
+        if !VALUE_FLAGS.contains(&flag.as_str()) {
+            println!("Viewer: {flag} is not an argument this viewer knows; skipped");
+            continue;
+        }
+        let value = value.ok_or_else(|| format!("{flag} needs a value"))?;
         let number = |what: &str| value.parse::<f64>().map_err(|_| format!("{what} must be a number"));
         match flag.as_str() {
             "--gpu-map" => args.channel = Some(ChannelName::new(value.clone()).ok_or("bad channel name")?),
@@ -189,32 +355,10 @@ fn parse_args() -> Result<Args, String> {
             "--producer-wait" => args.producer_wait = number("--producer-wait")? as u64,
             "--pixel-aspect" => args.pixel_aspect = number("--pixel-aspect")? as f32,
             "--screen-width" => args.screen_width = number("--screen-width")? as f32,
-            // The hand panels sit no nearer the head than this (metres; 0: on the hand as it is).
-            "--panel-nearest" => args.panel_nearest = number("--panel-nearest")? as f32,
-            // Directions of a choice held open with the d-pad (`left,right`).
-            "--dpad-hold" => args.dpad_hold = pad::dpad_directions(&value)?,
-            // Those menus by reaching over a shoulder: picked with the same hand's stick, the
-            // other's, or off.
-            "--menu-reach" => args.menu_reach = reach::parse(&value)?,
-            "--menu-pick" => args.menu_pick = reach::parse_with(&value)?,
-            "--menu-reach-depth" => {
-                let cm = number("--menu-reach-depth")?;
-                if !(5.0..=40.0).contains(&cm) {
-                    return Err("--menu-reach-depth is 5 to 40 (cm)".into());
-                }
-                args.menu_reach_depth = cm as f32 / 100.0;
-            }
-            "--controller-smoothing" => {
-                let strength = number("--controller-smoothing")?;
-                if !(0.0..=10.0).contains(&strength) {
-                    return Err("--controller-smoothing is 0 to 10".into());
-                }
-                args.controller_smoothing = strength as f32;
-            }
-            // A layout test: the controllers act like Quest's or Index's.
-            "--act-like" => args.proxy = pad::Proxy::parse(&value)?,
-            // The options the Monaka menu offers, with their values.
-            monaka_core::manifest::LIVE_ARG => args.live = value,
+            // A setting the viewer acts on, from the game's or Monaka's options.
+            monaka_contract::manifest::OPTION_ARG => options.push(value.split_once('=').map(|(id, v)| (id.to_owned(), v.to_owned())).ok_or_else(|| format!("--option {value}: not id=value"))?),
+            // The run folder, where the launcher left what the home shows.
+            monaka_core::home::RUN_FOLDER_ARG => args.run_folder = Some(PathBuf::from(&value)),
             "--loader" => args.loader = PathBuf::from(&value),
             "--runtime" => args.runtime = Some(PathBuf::from(&value)),
             "--reticle" => {
@@ -238,27 +382,13 @@ fn parse_args() -> Result<Args, String> {
             // Accepted and ignored for launch scripts that pass it: the gaze goes to the game with
             // every head pose when the headset tracks the eyes.
             "--gaze-log" => {}
-            _ => return Err(format!("unknown argument {flag}")),
+            _ => unreachable!("every flag in VALUE_FLAGS has its arm"),
         }
     }
-    if !(1..=86_400).contains(&args.seconds) {
-        return Err("--seconds must be 1..86400".into());
+    for (id, value) in &options {
+        apply_option(args, id, value)?;
     }
-    if !(0.25..=4.0).contains(&args.pixel_aspect) {
-        return Err("--pixel-aspect must be 0.25..4".into());
-    }
-    if !args.desktop && !args.loader.is_absolute() {
-        return Err("provide an absolute --loader path".into());
-    }
-    if let Some(runtime) = &args.runtime
-        && (!runtime.is_absolute() || !runtime.is_file())
-    {
-        return Err("--runtime must be an existing absolute path".into());
-    }
-    if args.info == args.channel.is_some() {
-        return Err("give either --info or --gpu-map".into());
-    }
-    Ok(args)
+    Ok(())
 }
 
 /// The stereo channel `name` opened on `device`, tried for five seconds: the producer may still be
@@ -294,6 +424,19 @@ fn swapchain_format(offered: &[i64], producer: &Producer) -> Option<u32> {
         return [producer.format, srgb].into_iter().find(|&f| has(f));
     }
     [R8G8B8A8_UNORM, R8G8B8A8_UNORM_SRGB].into_iter().find(|&f| has(f))
+}
+
+/// Whether the head went from `before` to `now` by a recentre rather than by moving: too far a
+/// turn or step between two reads.
+fn recentred(before: &HeadPose, now: &HeadPose) -> bool {
+    math::angle_between(before.orientation, now.orientation) > RECENTRE_TURN || math::distance(before.position, now.position) > RECENTRE_STEP
+}
+
+/// The image format of the home's panels and the reticles before any game is linked: what a game
+/// in the usual format would get.
+fn home_format(offered: &[i64]) -> Option<u32> {
+    use dxgi_format::*;
+    [R8G8B8A8_UNORM, R8G8B8A8_UNORM_SRGB].into_iter().find(|&f| offered.contains(&(f as i64)))
 }
 
 fn fov_angles(f: Fovf) -> [f32; 4] {
@@ -369,7 +512,7 @@ fn reticle_image(size: u32) -> Vec<u8> {
     pixels
 }
 
-fn run(args: Args) -> Result<i32, Box<dyn Error>> {
+fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
     if args.desktop {
         let name = args.channel.as_ref().ok_or("the 2D window needs --gpu-map")?;
         return desktop::run(name, args.seconds, args.producer_wait, args.captures.clone());
@@ -406,27 +549,35 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
     for line in eye_tracking_report(&instance, system) {
         println!("{line}");
     }
-    let Some(producer) = producer else {
+    if producer.is_none() && !args.home {
         // --info: the DL2 launcher renders the game at this size.
         if let Some(width) = views.iter().map(|v| v.recommendedImageRectWidth).max() {
             let height = views.iter().map(|v| v.recommendedImageRectHeight).max().unwrap_or(0);
             println!("Eye image size: {width} {height}");
         }
         return Ok(0);
-    };
-    let name = args.channel.as_ref().expect("checked by parse_args");
+    }
+    let name = args.channel.clone();
 
     if headset.max_layers < 2 {
         return Err("runtime cannot submit two eye-specific layers".into());
     }
-    if producer.width > headset.max_image_width || producer.height > headset.max_image_height {
-        return Err("eye images exceed the runtime's image limit".into());
-    }
     if !instance.supports_opaque_stereo(system)? {
         return Err("runtime has no opaque stereo mode".into());
     }
-    if producer.adapter != runtime_adapter {
-        return Err("the game renders on a different GPU than the headset runtime".into());
+    // Whether a game's images can be shown here: checked as it starts, and for each one linked
+    // into the home.
+    let fits = |producer: &Producer| -> Result<(), String> {
+        if producer.width > headset.max_image_width || producer.height > headset.max_image_height {
+            return Err("eye images exceed the runtime's image limit".into());
+        }
+        if producer.adapter != runtime_adapter {
+            return Err("the game renders on a different GPU than the headset runtime".into());
+        }
+        Ok(())
+    };
+    if let Some(producer) = &producer {
+        fits(producer)?;
     }
     let adapter = find_adapter(runtime_adapter)?;
     println!("GPU: {}", d3d::describe_adapter(&adapter));
@@ -447,12 +598,12 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
     }
     let pad_actions = actions.as_ref().and_then(|set| pad::PadActions::create(set, args.dpad_hold, args.proxy).map_err(|e| println!("No controller buttons: {e}")).ok());
     // The held menus by reaching over a shoulder, and the buzz that says one opened or picked.
-    // Made again when the Monaka menu changes how it picks or how deep the reach is.
-    let make_reach = |pick: Option<reach::Pick>, depth: f32| {
-        pick.map(|pick| reach::Reach::new(pick, args.dpad_hold, depth).picking_with(args.menu_pick)).filter(|r| r.active() && pad_actions.is_some())
+    // Made again when the home changes how it picks or how deep the reach is.
+    let make_reach = |pick: Option<reach::Pick>, depth: f32, hold: u16, with: reach::PickWith| {
+        pick.map(|pick| reach::Reach::new(pick, hold, depth).picking_with(with)).filter(|r| r.active() && pad_actions.is_some())
     };
     let (mut reach_pick, mut reach_depth) = (args.menu_reach, args.menu_reach_depth);
-    let mut reach = make_reach(reach_pick, reach_depth);
+    let mut reach = make_reach(reach_pick, reach_depth, args.dpad_hold, args.menu_pick);
     if let (Some(pick), true) = (args.menu_reach, reach.is_some()) {
         println!("Menus by reach: rest a hand over its shoulder to open its menu; flick {} stick to pick", if pick == reach::Pick::Same { "that hand's" } else { "the other hand's" });
     }
@@ -535,10 +686,6 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
             None => "No eye gaze (the headset or runtime offers none)",
         }
     );
-    let mut hands_out = match controllers {
-        Some(_) => side_channel("hand channel", HandChannel::open(name))?,
-        None => None,
-    };
     // Fingers, where the headset tracks them (from the controllers' finger sensing, or cameras).
     let finger_trackers: Option<[_; 2]> = instance
         .hand_tracking(system)
@@ -550,34 +697,28 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
             }
         })
         .flatten();
-    let mut fingers_out = match finger_trackers {
-        Some(_) => side_channel("finger channel", FingerChannel::open(name))?,
-        None => None,
-    };
-    println!("{}", if fingers_out.is_some() { "Finger tracking on" } else { "No finger tracking (the headset or runtime offers none)" });
+    let wants = link::Wants { hands: controllers.is_some(), fingers: finger_trackers.is_some() };
     let mut fingers_seen = [false; 2];
     let mut hands_seen = [false; 2];
     let mut smoother = smooth::Smoother::new(args.controller_smoothing);
     if controllers.is_some() {
         println!("Controller smoothing {}", args.controller_smoothing);
     }
-    let mut poses = side_channel("head pose channel (no head tracking)", PoseChannel::open(name))?;
-    // Where the producer says a reticle points, when not along the palm (a bow at an angle in it).
-    let mut reticle_aims = if args.reticles.contains(&true) { side_channel("reticle channel", ReticleChannel::open(name))? } else { None };
     println!("Forward follows the headset: use its centre/recentre control.");
 
     let offered_formats = session.swapchain_formats()?;
-    let format = swapchain_format(&offered_formats, &producer).ok_or("runtime has no image format matching the game's")?;
-    let swapchains = [
-        debug_views::eye_swapchain(&session, format as i64, producer.width, producer.height)?,
-        debug_views::eye_swapchain(&session, format as i64, producer.width, producer.height)?,
-    ];
+    let format = match &producer {
+        Some(producer) => swapchain_format(&offered_formats, producer).ok_or("runtime has no image format matching the game's")?,
+        None => home_format(&offered_formats).ok_or("runtime has no image format for Monaka's home")?,
+    };
     // The hand-aim reticles, one swapchain per hand: filled once; a layer keeps showing the last
     // image released.
     let mut reticles = [None, None];
-    if args.reticles.contains(&true) {
+    // The home's viewer makes both: a game linked later says which it shows.
+    let reticles_made = if args.home { [true; 2] } else { args.reticles };
+    if reticles_made.contains(&true) {
         let image = d3d::create_texture_with(&device, &simple_texture_desc(RETICLE_PIXELS, RETICLE_PIXELS, DXGI_FORMAT(format as i32)), &reticle_image(RETICLE_PIXELS))?;
-        for (reticle, _) in reticles.iter_mut().zip(args.reticles).filter(|(_, on)| *on) {
+        for (reticle, _) in reticles.iter_mut().zip(reticles_made).filter(|(_, on)| *on) {
             let swapchain = session.create_swapchain(format as i64, RETICLE_PIXELS, RETICLE_PIXELS)?;
             swapchain.fill(|target| {
                 d3d::copy_texture(&context, target, &image);
@@ -586,47 +727,55 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
             *reticle = Some(swapchain);
         }
     }
-    // HUD pieces the game publishes on their own, on the hands where it says.
-    let declared = side_channel("HUD panels block", monaka_channel::panels::PanelsChannel::open(name))?;
-    let mut hand_panels = panel::HandPanels::new(name, format, declared);
-    let mut source_desc = simple_texture_desc(producer.width, producer.height, DXGI_FORMAT(producer.format as i32));
-    source_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32;
-    let sources = [create_texture(&device, &source_desc)?, create_texture(&device, &source_desc)?];
-    let eyes = [&sources[0], &sources[1]];
-    let mut debug_views = debug_views::DebugViews::new(name, DXGI_FORMAT(format as i32), args.captures.clone());
-    let mut console_feed = console_feed::ConsoleFeed::new(name);
-    let mut monaka_menu = monaka_menu::MonakaMenu::new(DXGI_FORMAT(format as i32), &args.live);
-    if !args.live.is_empty() && pad_actions.is_some() {
-        println!("Monaka menu: hold Start");
+    // The home's viewer: its files' folder (the window's), and the command line's arguments, which
+    // a game linked in replaces with its own and which come back when it is let go.
+    let home_folder = if args.home { args.run_folder.take() } else { None };
+    let base_args = args.clone();
+    let mut home = home::HomeView::new(DXGI_FORMAT(format as i32), home_folder.as_deref().or(args.run_folder.as_deref()), args.debug_menu);
+    if args.home {
+        home.for_window();
     }
+    if pad_actions.is_some() {
+        println!("Monaka home: hold Start");
+    }
+    // The player stopped VR from the home: the launcher stops the session, as for Stop VR.
+    let mut closed_by_player = false;
 
-    let mut input = open_channel(name, &device).map_err(|e| format!("{e} on the runtime adapter"))?;
-    let ready_by = Instant::now() + Duration::from_secs(10);
-    let mut seen = loop {
-        if let Some(pair) = input.read(&context, eyes, 0)? {
-            break pair.sequence;
+    let mut link = match (&name, producer) {
+        (Some(name), Some(producer)) => {
+            let input = open_channel(name, &device).map_err(|e| format!("{e} on the runtime adapter"))?;
+            let mut made = link::Link::new(name, producer, input, &session, &device, &offered_formats, &args, wants)?;
+            made.first_pair(&context, 10)?;
+            Some(made)
         }
-        if Instant::now() >= ready_by {
-            return Err("the producer has not published a stereo pair".into());
-        }
-        std::thread::sleep(Duration::from_millis(20));
+        _ => None,
     };
+    let fingers_on = link.as_ref().map_or(finger_trackers.is_some(), |l| l.fingers_out.is_some());
+    println!("{}", if fingers_on { "Finger tracking on" } else { "No finger tracking (the headset or runtime offers none)" });
+    // The channel the link is on: the run's, then each one the launcher names for a producer
+    // started again (settings applied in the home).
+    let mut channel = name.clone();
+    // While the link is made (again, when settings are applied in the home; or a game linked into
+    // the home's viewer): since when, when it was last tried, whether a long wait was said, and
+    // whether it is a game's first link.
+    let mut relinking: Option<(Instant, Instant, bool, bool)> = None;
+    // The home's viewer: the game linked in (its link file's channel), and when the window's files
+    // were last read.
+    let mut linked: Option<String> = None;
+    let mut home_read: Option<Instant> = None;
+    // When what hangs in the room is placed again, after a recentre.
+    let mut recentre_at: Option<Instant> = None;
 
     console::catch_ctrl_c();
     let mut stats = Stats { pairs: 1, ..Stats::default() };
-    let mut meter = meter::Meter::new("Headset", [producer.width, producer.height], Instant::now());
+    let mut meter = meter::Meter::new("Headset", link.as_ref().map_or([0, 0], |l| [l.producer.width, l.producer.height]), Instant::now());
+    let mut ahead = ahead::Ahead::default();
     let (mut running, mut exit, mut exit_requested) = (false, false, false);
     let deadline = Instant::now() + Duration::from_secs(args.seconds);
     let mut exit_deadline = deadline + Duration::from_secs(5);
     let mut last_pair_at = tick();
-    let mut rendered: Option<RenderedPair> = None;
     let mut last_head: Option<HeadPose> = None;
-    let mut screen: Option<Posef> = None;
-    // The newest pair's depth, read only when the runtime takes depth, and its swapchains.
     let depth_layer = instance.depth_layer();
-    let mut pair_depth: Option<monaka_channel::fence::ReadDepth> = None;
-    let mut depth_chains: Option<depth::DepthChains<'_>> = None;
-    let image_aspect = producer.height as f32 / (producer.width as f32 * args.pixel_aspect);
     println!("Live stereo; update cadence set by the producer. Ctrl+C exits.");
 
     while !exit {
@@ -644,6 +793,8 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
                     exit |= exit_requested;
                 }
                 Event::SessionState(sys::SESSION_STATE_EXITING | sys::SESSION_STATE_LOSS_PENDING) | Event::InstanceLossPending => exit = true,
+                // The player recentred: what hangs in the room comes round to where they face.
+                Event::ReferenceSpaceChanging => recentre_at = Some(Instant::now() + RECENTRE_AFTER),
                 _ => {}
             }
         }
@@ -669,7 +820,8 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
         session.begin_frame()?;
         // The actions are read once a frame, before the head pose: the gaze goes out with it.
         let synced = attached.is_some_and(|set| session.sync(set).is_ok());
-        if let Some(located) = session.locate_views(&local, frame.display_time)? {
+        // The head sent to the game is predicted for when the pair drawn with it will be shown.
+        if let Some(located) = session.locate_views(&local, ahead.time(frame.display_time, frame.display_period))? {
             let positions = [located[0].pose.position.xyz(), located[1].pose.position.xyz()];
             let fov = [fov_angles(located[0].fov), fov_angles(located[1].fov)];
             let mut head = math::head_from_views(located[0].pose.orientation.xyzw(), positions, fov);
@@ -681,11 +833,24 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
                 stats.gazes += 1;
                 meter.gaze();
             }
-            if poses.as_mut().is_some_and(|p| p.write_head(&head)) {
+            if link.as_mut().and_then(|l| l.poses.as_mut()).is_some_and(|p| p.write_head(&head)) {
                 stats.poses_written += 1;
                 meter.head(true);
             }
+            // A runtime that moves the room's origin without saying so: the head jumps.
+            if last_head.as_ref().is_some_and(|before| recentred(before, &head)) {
+                recentre_at = Some(now);
+            }
             last_head = Some(head);
+        }
+        // Recentred: the home's panels and the flat screen (menus, loading) in front again.
+        if recentre_at.is_some_and(|at| now >= at) {
+            recentre_at = None;
+            println!("Recentred: the panels and the screen come round in front");
+            home.recenter();
+            if let Some(link) = link.as_mut() {
+                link.screen = None;
+            }
         }
         let mut aiming: [Option<(HandPose, HandPose)>; 2] = [None, None];
         let mut grip_poses = [HandPose::default(); 2];
@@ -707,7 +872,9 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
                 (hands[hand], grips[hand]) = smoother.smooth(hand, frame.display_time, hands[hand], grips[hand]);
             }
             grip_poses = grips;
-            debug_views.controllers(last_head.as_ref(), &hands, &grips);
+            if let Some(link) = link.as_mut() {
+                link.debug_views.controllers(last_head.as_ref(), &hands, &grips);
+            }
             for (hand, seen) in hands_seen.iter_mut().enumerate() {
                 let tracked = hands[hand].valid != 0;
                 if tracked != *seen {
@@ -715,11 +882,11 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
                     println!("{} controller {}", ["Left", "Right"][hand], if tracked { "tracked" } else { "lost" });
                 }
             }
-            if hands_out.as_mut().is_some_and(|h| h.write(&hands, &grips)) {
+            if link.as_mut().and_then(|l| l.hands_out.as_mut()).is_some_and(|h| h.write(&hands, &grips)) {
                 stats.hands_written += 1;
                 meter.hands([hands[0].valid != 0, hands[1].valid != 0]);
             }
-            if let (Some(trackers), Some(out)) = (&finger_trackers, fingers_out.as_mut()) {
+            if let (Some(trackers), Some(out)) = (&finger_trackers, link.as_mut().and_then(|l| l.fingers_out.as_mut())) {
                 let mut fingers = [FingerPose::default(); 2];
                 for (hand, tracker) in trackers.iter().enumerate() {
                     if let Ok(Some(joints)) = tracker.orientations(&local, frame.display_time) {
@@ -736,37 +903,73 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
                     meter.fingers([fingers[0].valid != 0, fingers[1].valid != 0]);
                 }
             }
-            if let (Some(out), Some(pad)) = (hands_out.as_mut(), &pad_actions) {
+            if let Some(pad) = &pad_actions {
                 let mut gamepad = pad.read(&session);
-                if let Some(reach) = reach.as_mut() {
+                if let Some(reach) = reach.as_mut().filter(|_| !home.is_open()) {
                     let head = last_head.as_ref().map(|h| (h.orientation, h.position));
                     let at = [0, 1].map(|h| [grips[h], hands[h]].into_iter().find(|p| p.valid != 0).map(|p| p.position));
                     buzz(&session, haptic.as_ref(), &hand_paths, reach.update(&mut gamepad, head, at, Instant::now()));
                 }
                 let head = last_head.as_ref().map(|h| (h.orientation, h.position));
-                // Start held: the Monaka menu, unless the debug menu has the pad; what it changes
-                // applies at once (the launcher saves it from the line it prints).
-                let asked = monaka_menu.pad(&mut gamepad, head, Instant::now(), debug_views.menu_open());
+                // Start held: Monaka's home, unless the debug menu has the pad. A setting it
+                // changes is saved by the launcher (from the line it prints) and, when the viewer
+                // owns it, applies at once.
+                let asked = home.pad(&mut gamepad, head, &hands, Instant::now(), link.as_ref().is_some_and(|l| l.debug_views.menu_open()));
                 buzz(&session, haptic.as_ref(), &hand_paths, asked.buzzes);
-                match asked.changed.and_then(|(id, value)| Some((live_setting(id)?, value))) {
-                    Some((Live::Smoothing, value)) => smoother = smooth::Smoother::new(value.parse().unwrap_or(args.controller_smoothing)),
-                    Some((Live::Reach, value)) => {
-                        reach_pick = reach::parse(&value).unwrap_or(reach_pick);
-                        reach = make_reach(reach_pick, reach_depth);
+                for (live, value) in asked.changed.into_iter().filter_map(|(id, value)| Some((live_setting(id)?, value))) {
+                    match live {
+                        Live::Smoothing => smoother = smooth::Smoother::new(value.parse().unwrap_or(args.controller_smoothing)),
+                        Live::Reach => {
+                            reach_pick = reach::parse(&value).unwrap_or(reach_pick);
+                            reach = make_reach(reach_pick, reach_depth, args.dpad_hold, args.menu_pick);
+                        }
+                        Live::ReachDepth => {
+                            reach_depth = value.parse::<f32>().map_or(reach_depth, |cm| cm / 100.0);
+                            reach = make_reach(reach_pick, reach_depth, args.dpad_hold, args.menu_pick);
+                        }
+                        Live::Proxy => pad.set_proxy(pad::Proxy::parse(&value).unwrap_or_default()),
                     }
-                    Some((Live::ReachDepth, value)) => {
-                        reach_depth = value.parse::<f32>().map_or(reach_depth, |cm| cm / 100.0);
-                        reach = make_reach(reach_pick, reach_depth);
-                    }
-                    Some((Live::Proxy, value)) => pad.set_proxy(pad::Proxy::parse(&value).unwrap_or_default()),
-                    None => {}
+                }
+                // The home's viewer stays: the window stops the game's run.
+                if asked.stop && args.home {
+                    println!("{}", monaka_core::home::STOP_LINE);
+                } else if asked.stop {
+                    println!("Stop VR asked in the headset");
+                    closed_by_player = true;
+                    console::request_stop();
+                }
+                if asked.leave {
+                    println!("Leaving VR, asked in the headset");
+                    closed_by_player = true;
+                    console::request_stop();
+                }
+                // The debug menu's tools on the home's Log panel.
+                if asked.capture && capture::start(capture.as_mut()) {
+                    buzz(&session, haptic.as_ref(), &hand_paths, [LEFT_HAND, RIGHT_HAND].map(|hand| (hand, 0.6, 0.15)));
+                }
+                if asked.debug_menu
+                    && let Some(link) = link.as_mut()
+                {
+                    link.debug_views.open_menu(head);
+                }
+                // Settings applied: the link let go first (the producer's channel must be free for
+                // the one that replaces it), then the launcher told; the home shows meanwhile.
+                if asked.apply && link.is_some() {
+                    link = None;
+                    relinking = Some((Instant::now(), Instant::now(), false, false));
+                    println!("{}", monaka_contract::manifest::APPLY_LINE);
                 }
                 // Select held: the debug menu (its Save capture: one with the debug drawing on it).
                 // Only with the debug menu on (`--debug-menu`): otherwise Select reaches the game.
-                let (buzzes, capture_drawn) = if args.debug_menu { debug_views.pad(&mut gamepad, head, Instant::now()) } else { (Vec::new(), false) };
+                let (buzzes, capture_drawn) = match link.as_mut() {
+                    Some(link) if args.debug_menu => link.debug_views.pad(&mut gamepad, head, &hands, Instant::now()),
+                    _ => (Vec::new(), false),
+                };
                 // A console command picked on the console panel.
-                if let Some(monaka_overlay::panels::Asked::Console(command)) = debug_views.take_asked() {
-                    console_feed.ask(&command);
+                if let Some(link) = link.as_mut()
+                    && let Some(monaka_overlay::panels::Asked::Console(command)) = link.debug_views.take_asked()
+                {
+                    link.console_feed.ask(&command);
                 }
                 buzz(&session, haptic.as_ref(), &hand_paths, buzzes);
                 if capture_drawn {
@@ -775,14 +978,95 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
                 if chord.step(&mut gamepad, Instant::now()) && capture::start(capture.as_mut()) {
                     buzz(&session, haptic.as_ref(), &hand_paths, [LEFT_HAND, RIGHT_HAND].map(|hand| (hand, 0.6, 0.15)));
                 }
-                out.write_pad(&PadState { gamepad, valid: 1, received_tick: tick() });
+                if let Some(out) = link.as_mut().and_then(|l| l.hands_out.as_mut()) {
+                    out.write_pad(&PadState { gamepad, valid: 1, received_tick: tick() });
+                }
             }
             // The palm: the grip pose's position, the aim pose's direction.
             aiming = [0, 1].map(|hand| Some((hands[hand], grips[hand])).filter(|(aim, _)| args.reticles[hand] && aim.valid != 0));
         }
 
-        if !frame.should_render {
-            last_pair_at = tick(); // headset idle: pairs are not being read
+        // The home's viewer: what the window shows, read again, and the game a run links in or lets go.
+        if let Some(folder) = home_folder.as_deref()
+            && home_read.is_none_or(|at| now.duration_since(at) >= HOME_SYNC_EVERY)
+        {
+            home_read = Some(now);
+            home.sync(folder);
+            let wanted = std::fs::read_to_string(folder.join(monaka_core::home::LINK_FILE)).ok().and_then(|text| monaka_core::home::parse_link(&text));
+            let mut retuned = false;
+            match wanted {
+                None if linked.is_some() => {
+                    println!("The game was let go; the home stays");
+                    (linked, link, relinking, channel) = (None, None, None, None);
+                    args = base_args.clone();
+                    retuned = true;
+                    home.open_soon();
+                }
+                Some((named, words)) if linked.as_deref() != Some(named.as_str()) => {
+                    match link_args(&base_args, &words) {
+                        Ok(game) => {
+                            println!("A game links in on {named}");
+                            (link, channel) = (None, None);
+                            relinking = Some((now, now, false, true));
+                            args = game;
+                            retuned = true;
+                        }
+                        Err(why) => println!("{} the game's arguments: {why}", monaka_contract::manifest::FAILURE_LINE),
+                    }
+                    linked = Some(named);
+                }
+                _ => {}
+            }
+            // The controls, the captures and the home as the game linked in (or none) has them.
+            if retuned {
+                smoother = smooth::Smoother::new(args.controller_smoothing);
+                (reach_pick, reach_depth) = (args.menu_reach, args.menu_reach_depth);
+                reach = make_reach(reach_pick, reach_depth, args.dpad_hold, args.menu_pick);
+                if let Some(pad) = &pad_actions {
+                    pad.set_layers(args.dpad_hold, args.proxy);
+                }
+                capture = args.captures.clone().map(capture::Capture::new);
+                home.show_run(args.run_folder.as_deref(), args.debug_menu);
+            }
+        }
+        if !frame.should_render || relinking.is_some() || link.is_none() {
+            last_pair_at = tick(); // headset idle, the producer restarting or no game: no pairs to read
+        }
+        // Settings applied in the home, or a game linked into the home's viewer: the link made
+        // (again) once the producer publishes.
+        if let Some((since, tried, said, first)) = relinking
+            && tried.elapsed() >= RELINK_EVERY
+        {
+            relinking = Some((since, Instant::now(), said, first));
+            let named = args.run_folder.as_ref().and_then(|folder| std::fs::read_to_string(folder.join(monaka_contract::protocol::LIVE_CHANNEL_FILE)).ok()).and_then(|text| ChannelName::new(text.trim()));
+            let fresh = named.filter(|named| Some(named) != channel.as_ref());
+            let again = fresh.as_ref().and_then(|named| link::Link::again(named, &session, &device, &offered_formats, &args, wants));
+            let again = again.map(|made| made.and_then(|made| fits(&made.producer).map(|()| made)));
+            match again {
+                Some(Ok(again)) => {
+                    if first {
+                        println!("The game shows ({} s)", since.elapsed().as_secs());
+                    } else {
+                        println!("The game is back, its settings applied ({} s)", since.elapsed().as_secs());
+                    }
+                    meter = meter::Meter::new("Headset", [again.producer.width, again.producer.height], Instant::now());
+                    channel = Some(again.name.clone());
+                    link = Some(again);
+                    relinking = None;
+                    home.applied(None);
+                }
+                Some(Err(why)) => {
+                    println!("The game came back, but cannot be shown: {why}");
+                    relinking = None;
+                    home.applied(Some(format!("The game came back, but cannot be shown: {why}")));
+                }
+                // A game linked in may take minutes to its first frame (one joined as it starts).
+                None if !said && !first && since.elapsed() >= RELINK_PATIENCE => {
+                    relinking = Some((since, Instant::now(), true, first));
+                    home.applied(Some("The game has not come back yet. If it stays away, see the Log panel.".to_owned()));
+                }
+                None => {}
+            }
         }
         if tick().saturating_sub(last_pair_at) > PRODUCER_SILENCE_MS && !console::stop_requested() {
             println!("No stereo pairs for 15 seconds; stopping.");
@@ -790,112 +1074,125 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
         }
         let mut layers = Vec::new();
         if frame.should_render {
-            // A frozen frame stays: no pairs are read, and the silence check is told they need not be.
-            let read = if debug_views.frozen() {
-                last_pair_at = tick();
-                None
-            } else if depth_layer || debug_views.wants_depth() {
-                input.read_with_depth(&context, eyes, seen)?
-            } else {
-                input.read(&context, eyes, seen)?.map(|pair| (pair, None))
-            };
-            let arrived = read.is_some();
             let now = Instant::now();
-            meter.frame(now, read.as_ref().map(|(pair, _)| (pair.sequence, pair.tick)), tick());
-            if let Some(keys) = read.as_ref().and_then(|(pair, _)| debug_views.eye_keys(pair.sequence)) {
-                meter.eyes(keys);
-            }
-            if let Some((pair, depth)) = read {
-                seen = pair.sequence;
-                stats.pairs += 1;
-                last_pair_at = tick();
-                rendered = poses.as_mut().and_then(|p| p.read_pair(seen)).filter(|p| p.eyes.iter().all(|e| e.valid != 0));
-                if let Some(capture) = capture.as_mut().filter(|_| !debug_views.captures_drawn()) {
-                    capture.arrived(&device, &context, eyes, seen, rendered.as_ref());
-                }
-                pair_depth = depth;
-                if let Some(depth) = pair_depth.as_ref().filter(|_| depth_layer)
-                    && !depth_chains.as_ref().is_some_and(|chains| chains.fits(depth))
-                {
-                    depth_chains = Some(depth::DepthChains::new(&session, &offered_formats, depth));
-                }
-            }
-            hand_panels.update(&session, &device, &context);
-            let game = debug_views.game();
-            let content = monaka_overlay::panels::Content { stats: meter.view(now, game), console: console_feed.view(now), fake_vr: &monaka_overlay::fake_vr::FakeVr::HEADSET };
-            debug_views.show_in_headset(&session, &device, &context, &content, now);
-            monaka_menu.show(&session, &device, &context);
-            for (eye, (swapchain, source)) in swapchains.iter().zip(&sources).enumerate() {
-                swapchain.fill(|image| {
-                    d3d::copy_texture(&context, image, source);
-                    debug_views.draw_eye(&device, &context, image, eye, rendered.as_ref(), seen, eyes, pair_depth.as_ref().zip(input.depth_textures()));
-                    d3d::flush(&context);
-                })?;
-            }
-            // Captures that include the debug drawings take the eyes as drawn.
-            if arrived && let (Some(capture), Some(drawn)) = (capture.as_mut(), debug_views.drawn_eyes()) {
-                capture.arrived(&device, &context, drawn, seen, rendered.as_ref());
-            }
-            if let Some(pair) = &rendered {
-                screen = None;
-                // Each eye's depth, when the pair came with it and it has swapchains.
-                let depth_views = match (&pair_depth, &depth_chains, input.depth_textures()) {
-                    (Some(depth), Some(chains), Some(sources)) => chains.fill(&context, sources, depth),
-                    _ => None,
-                };
-                let mut depth_views = depth_views.map(|[left, right]| [Some(left), Some(right)]).unwrap_or([None, None]);
-                if depth_views[0].is_some() {
-                    stats.with_depth += 1;
-                }
-                let mut view = |eye: usize| {
-                    let e = &pair.eyes[eye];
-                    let [left, right, up, down] = e.fov[eye];
-                    ProjectionView {
-                        pose: Posef::new(e.orientation, math::eye_position(e, eye)),
-                        fov: Fovf { angleLeft: left, angleRight: right, angleUp: up, angleDown: down },
-                        swapchain: &swapchains[eye],
-                        depth: depth_views[eye].take(),
+            home.show(&session, &device, &context, now);
+            if let Some(link) = link.as_mut() {
+                let link::Link { input, swapchains, sources, hand_panels, debug_views, seen, depth_chains, pair_depth, rendered, screen, image_aspect, depth_refused_said, poses, reticle_aims, console_feed, .. } = link;
+                let eyes = [&sources[0], &sources[1]];
+                // A frozen frame stays: no pairs are read, and the silence check is told they need not be.
+                let read = if debug_views.frozen() {
+                    last_pair_at = tick();
+                    None
+                } else if depth_layer || debug_views.wants_depth() {
+                    let read = input.read_with_depth(&context, eyes, *seen)?;
+                    if input.depth_refused() && !*depth_refused_said {
+                        println!("No depth: the game pack's depth block is another version; the headset gets the images alone");
+                        *depth_refused_said = true;
                     }
+                    read
+                } else {
+                    input.read(&context, eyes, *seen)?.map(|pair| (pair, None))
                 };
-                layers.push(Layer::Projection { space: &local, views: [view(0), view(1)] });
-                stats.projected += 1;
-                // In play, where the game's aim ray goes: from the head along the controller, or
-                // where a weapon in the palm points.
-                for (side, (reticle, aimed)) in reticles.iter().zip(aiming).enumerate() {
-                    let (Some(swapchain), Some((hand, grip)), Some(head)) = (reticle, aimed, &last_head) else { continue };
-                    let palm = if grip.valid != 0 { grip.position } else { hand.position };
-                    let said = reticle_aims.as_mut().and_then(|r| r.read(side, RETICLE_SAID_MS));
-                    let position = math::reticle_point(head.position, hand.orientation, palm, args.reticle_palm, said);
-                    layers.push(Layer::Overlay {
-                        space: &local,
-                        swapchain,
-                        pose: Posef::new(hand.orientation, position),
-                        size: Extent2Df { width: RETICLE_SIZE, height: RETICLE_SIZE },
-                    });
+                let arrived = read.is_some();
+                meter.frame(now, read.as_ref().map(|(pair, _)| (pair.sequence, pair.tick)), tick());
+                if let Some((pair, _)) = &read {
+                    ahead.pair(tick().saturating_sub(pair.tick));
                 }
-                if controllers.is_some() {
-                    layers.extend(hand_panels.layers(&local, &grip_poses, last_head.as_ref(), args.panel_nearest));
+                if let Some(keys) = read.as_ref().and_then(|(pair, _)| debug_views.eye_keys(pair.sequence)) {
+                    meter.eyes(keys);
                 }
-            } else {
-                let (space, quad_pose, width) = match &last_head {
-                    Some(head) => {
-                        let anchored = *screen.get_or_insert_with(|| {
-                            let (orientation, position) = math::ahead_of(head.orientation, head.position, SCREEN_DISTANCE);
-                            Posef::new(orientation, position)
+                if let Some((pair, depth)) = read {
+                    *seen = pair.sequence;
+                    stats.pairs += 1;
+                    last_pair_at = tick();
+                    *rendered = poses.as_mut().and_then(|p| p.read_pair(*seen)).filter(|p| p.eyes.iter().all(|e| e.valid != 0));
+                    if let Some(capture) = capture.as_mut().filter(|_| !debug_views.captures_drawn()) {
+                        capture.arrived(&device, &context, eyes, *seen, rendered.as_ref());
+                    }
+                    *pair_depth = depth;
+                    if let Some(depth) = pair_depth.as_ref().filter(|_| depth_layer)
+                        && !depth_chains.as_ref().is_some_and(|chains| chains.fits(depth))
+                    {
+                        *depth_chains = Some(depth::DepthChains::new(&session, &offered_formats, depth));
+                    }
+                }
+                hand_panels.update(&session, &device, &context);
+                let game = debug_views.game();
+                let content = monaka_overlay::panels::Content { stats: meter.view(now, game), console: console_feed.view(now), fake_vr: &monaka_overlay::fake_vr::FakeVr::HEADSET };
+                debug_views.show_in_headset(&session, &device, &context, &content, now);
+                for (eye, (swapchain, source)) in swapchains.iter().zip(sources.iter()).enumerate() {
+                    swapchain.fill(|image| {
+                        d3d::copy_texture(&context, image, source);
+                        debug_views.draw_eye(&device, &context, image, eye, rendered.as_ref(), *seen, eyes, pair_depth.as_ref().zip(input.depth_textures()));
+                    })?;
+                }
+                // Captures that include the debug drawings take the eyes as drawn.
+                if arrived && let (Some(capture), Some(drawn)) = (capture.as_mut(), debug_views.drawn_eyes()) {
+                    capture.arrived(&device, &context, drawn, *seen, rendered.as_ref());
+                }
+                if let Some(pair) = rendered.as_ref() {
+                    *screen = None;
+                    // Each eye's depth, when the pair came with it and it has swapchains.
+                    let depth_views = match (pair_depth.as_ref(), depth_chains.as_ref(), input.depth_textures()) {
+                        (Some(depth), Some(chains), Some(sources)) => chains.fill(&context, sources, depth),
+                        _ => None,
+                    };
+                    let mut depth_views = depth_views.map(|[left, right]| [Some(left), Some(right)]).unwrap_or([None, None]);
+                    if depth_views[0].is_some() {
+                        stats.with_depth += 1;
+                    }
+                    let mut view = |eye: usize| {
+                        let e = &pair.eyes[eye];
+                        let [left, right, up, down] = e.fov[eye];
+                        ProjectionView {
+                            pose: Posef::new(e.orientation, math::eye_position(e, eye)),
+                            fov: Fovf { angleLeft: left, angleRight: right, angleUp: up, angleDown: down },
+                            swapchain: &swapchains[eye],
+                            depth: depth_views[eye].take(),
+                        }
+                    };
+                    layers.push(Layer::Projection { space: &local, views: [view(0), view(1)] });
+                    stats.projected += 1;
+                    // In play, where the game's aim ray goes: from the head along the controller, or
+                    // where a weapon in the palm points.
+                    for (side, (reticle, aimed)) in reticles.iter().zip(aiming).enumerate() {
+                        let (Some(swapchain), Some((hand, grip)), Some(head)) = (reticle, aimed, &last_head) else { continue };
+                        let palm = if grip.valid != 0 { grip.position } else { hand.position };
+                        let said = reticle_aims.as_mut().and_then(|r| r.read(side, RETICLE_SAID_MS));
+                        let position = math::reticle_point(head.position, hand.orientation, palm, args.reticle_palm, said);
+                        layers.push(Layer::Overlay {
+                            space: &local,
+                            swapchain,
+                            pose: Posef::new(hand.orientation, position),
+                            size: Extent2Df { width: RETICLE_SIZE, height: RETICLE_SIZE },
                         });
-                        (&local, anchored, args.screen_width)
                     }
-                    None => (&view_space, Posef::new(math::IDENTITY, [0.0, 0.0, -SCREEN_DISTANCE]), 4.0),
-                };
-                for (eye, swapchain) in swapchains.iter().enumerate() {
-                    let size = Extent2Df { width, height: width * image_aspect };
-                    layers.push(Layer::Quad { space, eye, swapchain, pose: quad_pose, size });
+                    if controllers.is_some() {
+                        layers.extend(hand_panels.layers(&local, &grip_poses, last_head.as_ref(), args.panel_nearest));
+                    }
+                } else {
+                    let (space, quad_pose, width) = match &last_head {
+                        Some(head) => {
+                            let anchored = *screen.get_or_insert_with(|| {
+                                let (orientation, position) = math::ahead_of(head.orientation, head.position, SCREEN_DISTANCE);
+                                Posef::new(orientation, position)
+                            });
+                            (&local, anchored, args.screen_width)
+                        }
+                        None => (&view_space, Posef::new(math::IDENTITY, [0.0, 0.0, -SCREEN_DISTANCE]), 4.0),
+                    };
+                    for (eye, swapchain) in swapchains.iter().enumerate() {
+                        let size = Extent2Df { width, height: width * *image_aspect };
+                        layers.push(Layer::Quad { space, eye, swapchain, pose: quad_pose, size });
+                    }
                 }
+                stats.visible += 1;
+                layers.extend(debug_views.layers(&local));
             }
-            stats.visible += 1;
         }
-        layers.extend(debug_views.layers(&local));
-        layers.extend(monaka_menu.layer(&local));
+        layers.extend(home.layers(&local));
+        // One flush for every swapchain filled this frame, so the compositor finds them all done.
+        d3d::flush(&context);
         session.end_frame(frame.display_time, &layers)?;
         stats.frames += 1;
         // A capture's images read back after the frame is out, one per frame.
@@ -908,17 +1205,24 @@ fn run(args: Args) -> Result<i32, Box<dyn Error>> {
         "Frame cycles: {}; stereo image submissions: {}; pairs received: {}; head poses sent: {} ({} with eye gaze); hand records sent: {}; finger records sent: {}; projection-layer frames: {} ({} with depth)",
         stats.frames, stats.visible, stats.pairs, stats.poses_written, stats.gazes, stats.hands_written, stats.fingers_written, stats.projected, stats.with_depth
     );
-    Ok(if stats.visible > 0 { 0 } else { 2 })
+    Ok(if closed_by_player {
+        monaka_contract::manifest::CLOSED_BY_PLAYER
+    } else if stats.visible > 0 {
+        0
+    } else {
+        2
+    })
 }
 
 fn main() {
+    let failure_line = monaka_contract::manifest::FAILURE_LINE;
     let code = match parse_args() {
         Err(message) => {
-            eprintln!("{message}");
+            eprintln!("{failure_line} {message}");
             1
         }
         Ok(args) => run(args).unwrap_or_else(|error| {
-            eprintln!("{error}");
+            eprintln!("{failure_line} {error}");
             1
         }),
     };
@@ -928,14 +1232,39 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use monaka_core::protocol::Luid;
+    use monaka_contract::protocol::Luid;
 
     #[test]
     fn every_live_option_has_its_part_in_the_viewer() {
-        for opt in monaka_core::manifest::LIVE {
+        for opt in monaka_contract::manifest::LIVE {
             assert!(live_setting(opt.id).is_some(), "{} changes nothing in the viewer", opt.id);
         }
         assert_eq!(live_setting("no_such_option"), None);
+    }
+
+    #[test]
+    fn a_jump_of_the_head_is_a_recentre_and_a_turn_is_not() {
+        let at = |yaw: f32, x: f32| HeadPose { orientation: math::yaw_rotation(yaw), position: [x, 1.6, 0.0], ..HeadPose::default() };
+        assert!(!recentred(&at(0.0, 0.0), &at(0.05, 0.01)), "a quick turn between frames");
+        assert!(recentred(&at(0.0, 0.0), &at(1.2, 0.0)), "the room turned under the head");
+        assert!(recentred(&at(0.0, 0.0), &at(0.0, 0.8)), "the room moved under the head");
+    }
+
+    /// A game linked into the home's viewer brings its own arguments; the headset's stay, and
+    /// nothing of the game before it is left over.
+    #[test]
+    fn a_linked_game_brings_its_own_arguments() {
+        let mut base = Args { loader: PathBuf::from(r"C:\openxr_loader.dll"), home: true, seconds: 86_400, ..Args::defaults() };
+        base.reticles = [true, false];
+        let words: Vec<String> = ["--reticle", "right", "--debug-menu", "--option", "dpad_menus=left,right", "--run-folder", r"C:\runs\g-1"].map(str::to_owned).to_vec();
+        let game = link_args(&base, &words).unwrap();
+        assert_eq!(game.loader, base.loader);
+        assert_eq!(game.seconds, 86_400);
+        assert!(game.home && game.debug_menu);
+        assert_eq!(game.reticles, [false, true], "the game's reticles, not the last ones");
+        assert_ne!(game.dpad_hold, 0);
+        assert_eq!(game.run_folder.as_deref(), Some(std::path::Path::new(r"C:\runs\g-1")));
+        assert!(link_args(&base, &["--reticle".to_owned(), "up".to_owned()]).is_err());
     }
 
     fn producer(format: u32) -> Producer {

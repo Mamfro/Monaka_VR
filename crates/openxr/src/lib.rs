@@ -197,6 +197,8 @@ pub struct SystemInfo {
 pub enum Event {
     SessionState(i32),
     InstanceLossPending,
+    /// The room's origin is about to move (the player recentred).
+    ReferenceSpaceChanging,
     Other,
 }
 
@@ -536,6 +538,7 @@ impl Instance {
                 Event::SessionState(changed.state)
             }
             sys::TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING => Event::InstanceLossPending,
+            sys::TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING => Event::ReferenceSpaceChanging,
             _ => Event::Other,
         }))
     }
@@ -552,6 +555,8 @@ impl Drop for Instance {
 #[derive(Clone, Copy, Debug)]
 pub struct FrameTiming {
     pub display_time: Time,
+    /// The time between displayed frames (ns).
+    pub display_period: i64,
     pub should_render: bool,
 }
 
@@ -669,7 +674,7 @@ impl Session<'_> {
         let mut state = sys::FrameState { ty: sys::TYPE_FRAME_STATE, next: std::ptr::null_mut(), predictedDisplayTime: 0, predictedDisplayPeriod: 0, shouldRender: 0 };
         // SAFETY: typed in and out.
         check(unsafe { (self.fns().WaitFrame)(self.handle, &info, &mut state) }, "xrWaitFrame")?;
-        Ok(FrameTiming { display_time: state.predictedDisplayTime, should_render: state.shouldRender != 0 })
+        Ok(FrameTiming { display_time: state.predictedDisplayTime, display_period: state.predictedDisplayPeriod, should_render: state.shouldRender != 0 })
     }
 
     pub fn begin_frame(&self) -> Result<()> {

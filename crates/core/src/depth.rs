@@ -4,7 +4,7 @@
 //! depth value is affine in nearness, so a shader needs only `nearness = a * depth + b`.
 
 use crate::camera::Mat44;
-use crate::protocol::DepthParams;
+use monaka_contract::protocol::DepthParams;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DepthMapping {

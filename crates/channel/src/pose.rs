@@ -1,10 +1,12 @@
 //! The pose block beside a stereo channel: the viewer writes the latest head pose, the producer
-//! writes the pose each published pair was rendered with. Either side may create it. Every access
-//! waits at most a couple of milliseconds; a miss is not an error.
+//! writes the pose each published pair was rendered with. Either side may create it (waiting
+//! at most a couple of milliseconds for its lock); after that nothing waits ([`crate::seqlock`]),
+//! and a miss is not an error.
 
+use crate::seqlock;
 use crate::shared::SharedBlock;
 use crate::{ChannelName, Result};
-use monaka_core::protocol::{Block, HeadPose, PoseBlock, RenderedPair, Versioned};
+use monaka_contract::protocol::{Block, HeadPose, PoseBlock, RenderedPair};
 use std::sync::Mutex;
 use monaka_core::sync::Locked;
 
@@ -20,27 +22,30 @@ impl PoseChannel {
         Ok(Self { block: SharedBlock::<PoseBlock>::open_versioned(&name, &lock, WAIT_MS)? })
     }
 
-    fn with<R>(&mut self, f: impl FnOnce(&mut PoseBlock) -> R) -> Option<R> {
-        let mut record = self.block.lock(WAIT_MS).tolerant()?;
-        record.is_compatible().then(|| f(&mut record))
-    }
-
     pub fn write_head(&mut self, pose: &HeadPose) -> bool {
-        self.with(|block| block.head = *pose).is_some()
+        // SAFETY: a field of the block's record.
+        seqlock::write(&self.block, |block| unsafe { &raw mut (*block).head }, pose);
+        true
     }
 
     /// The latest head pose, if the viewer has written a valid one.
     pub fn read_head(&mut self) -> Option<HeadPose> {
-        self.with(|block| block.head).filter(|head| head.valid != 0)
+        // SAFETY: a field of the block's record.
+        seqlock::read(&self.block, |block| unsafe { &raw const (*block).head }).filter(|head| head.valid != 0)
     }
 
     pub fn write_pair(&mut self, pair: &RenderedPair) -> bool {
-        self.with(|block| block.pairs[PoseBlock::pair_slot(pair.sequence)] = *pair).is_some()
+        let slot = PoseBlock::pair_slot(pair.sequence);
+        // SAFETY: a field of the block's record (the slot is in the ring).
+        seqlock::write(&self.block, |block| unsafe { &raw mut (*block).pairs[slot] }, pair);
+        true
     }
 
     /// The poses behind pair `sequence`, if its record is still in the ring.
     pub fn read_pair(&mut self, sequence: u64) -> Option<RenderedPair> {
-        self.with(|block| block.pairs[PoseBlock::pair_slot(sequence)]).filter(|pair| pair.sequence == sequence)
+        let slot = PoseBlock::pair_slot(sequence);
+        // SAFETY: a field of the block's record (the slot is in the ring).
+        seqlock::read(&self.block, |block| unsafe { &raw const (*block).pairs[slot] }).filter(|pair| pair.sequence == sequence)
     }
 }
 

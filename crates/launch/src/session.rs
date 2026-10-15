@@ -4,13 +4,19 @@
 //!
 //! A run makes a run folder, copies the producer DLL into it (so the build output stays unlocked),
 //! writes the channel name and option files beside the copy, attaches it, and runs the viewer
-//! until it ends. A run that ends while the game still runs is restarted, unless runs keep failing
+//! until it ends; or, with the window's headset view open ([`crate::headset`]), links the game into
+//! that viewer until the game ends or a stop is asked for. A run that ends while the game still runs is restarted, unless runs keep failing
 //! right away. The producer is always stopped before the session returns while the game runs.
 
 use crate::games::{EyeSize, Game, Launch, Values};
 use crate::run_log::{self, RunLog};
+use crate::headset::Linked;
 use crate::{Paths, attach, system, text};
-use monaka_core::manifest::{DEBUG_MENU_ARG, DEBUG_MENU_MARKER, DIAGNOSTIC_LOGGING, DIAGNOSTIC_MARKER, LIVE_ARG, MONAKA, SETTING_LINE};
+use monaka_contract::host;
+use monaka_contract::protocol::LIVE_CHANNEL_FILE;
+use monaka_contract::manifest::{APPLY_LINE, DEBUG_MENU_ARG, DEBUG_MENU_MARKER, DIAGNOSTIC_LOGGING, DIAGNOSTIC_MARKER, FAILURE_LINE, MONAKA, SETTING_LINE};
+use monaka_contract::pack;
+use monaka_core::home;
 use std::io::{BufRead, BufReader};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -38,7 +44,7 @@ pub enum Event {
     Detail(String),
     /// The run folder of the current run.
     RunFolder(PathBuf),
-    /// The player changed an option in the headset's Monaka menu: its id and value, to save.
+    /// The player changed an option in the headset's home: its id and value, to save.
     Setting(String, String),
 }
 
@@ -96,6 +102,11 @@ impl Stop {
     pub fn requested(&self) -> bool {
         // SAFETY: a zero-timeout check of the event this value owns.
         self.flag.load(Ordering::Relaxed) || unsafe { WaitForSingleObject(self.event.handle, 0) } == WAIT_OBJECT_0
+    }
+
+    /// The named event's name, for the viewer's `--stop-event`.
+    pub(crate) fn event_name(&self) -> &str {
+        &self.event.name
     }
 
     /// Sleeps up to `duration`, waking early on a stop. Returns whether a stop was asked for.
@@ -160,20 +171,22 @@ pub enum Shows {
     /// The headset, through SteamVR's OpenXR.
     Headset,
     /// The 2D window on the desktop, with the debug menu and its panels: no headset
-    /// ([`monaka_core::manifest::DESKTOP_ARG`]).
+    /// ([`monaka_contract::manifest::DESKTOP_ARG`]).
     Desktop,
 }
 
-/// Runs a session to its end. Blocks; call it on its own thread from a GUI.
-pub fn run(game: &Game, values: &Values, paths: &Paths, console: Console, shows: Shows, stop: &Stop, report: &mut dyn FnMut(Event)) {
-    match session(game, values, paths, console, shows, stop, report) {
+/// Runs a session to its end. Blocks; call it on its own thread from a GUI. `linked`: the window's
+/// headset view, where a run in the headset shows its game.
+pub fn run(game: &Game, values: &Values, paths: &Paths, console: Console, shows: Shows, linked: Option<Linked>, stop: &Stop, report: &mut dyn FnMut(Event)) {
+    match session(game, values, paths, console, shows, linked.as_ref(), stop, report) {
         Ok(()) => {}
         Err(failure) => report(Event::Failed(failure)),
     }
     report(Event::State(State::Stopped));
 }
 
-fn session(game: &Game, values: &Values, paths: &Paths, console: Console, shows: Shows, stop: &Stop, report: &mut dyn FnMut(Event)) -> Result<(), String> {
+#[allow(clippy::too_many_arguments)]
+fn session(game: &Game, values: &Values, paths: &Paths, console: Console, shows: Shows, linked: Option<&Linked>, stop: &Stop, report: &mut dyn FnMut(Event)) -> Result<(), String> {
     let viewer = paths.binaries.join("monaka_viewer.exe");
     let producer = game.dll(paths);
     for path in [&viewer, &producer] {
@@ -182,7 +195,7 @@ fn session(game: &Game, values: &Values, paths: &Paths, console: Console, shows:
             return Err(format!("{} is missing. {fix}", path.display()));
         }
     }
-    if system::viewer_running() {
+    if system::viewer_running(linked.map(|l| l.pid)) {
         return Err("Another VR session is already running (a Monaka VR viewer is open). Stop it first.".into());
     }
     // The 2D window needs no headset: no OpenXR runtime.
@@ -197,7 +210,9 @@ fn session(game: &Game, values: &Values, paths: &Paths, console: Console, shows:
     loop {
         let Some(pid) = find_game(game, values, stop, report)? else { return Ok(()) };
         let joined = Instant::now();
-        play(game, values, paths, console, stop, report, &viewer, &producer, openxr.as_ref(), pid)?;
+        // The headset view shows a run in the headset; the 2D window is a viewer of its own.
+        let linked = linked.filter(|_| openxr.is_some());
+        play(game, values, paths, console, stop, report, &viewer, &producer, openxr.as_ref(), linked, pid)?;
         // A game joined at its start that ends at once may have started itself again (through
         // Steam, or a launcher's own copy): it is waited for again, a few times.
         let again = game.launch == Launch::AtStart && !stop.requested() && !system::alive(pid) && joined.elapsed() < AT_START_RESTART && restarts < 3;
@@ -234,6 +249,7 @@ fn play(
     viewer: &Path,
     producer: &Path,
     openxr: Option<&system::OpenXr>,
+    linked: Option<&Linked>,
     pid: u32,
 ) -> Result<(), String> {
     // A 32-bit game takes the pack's 32-bit twin.
@@ -272,7 +288,7 @@ fn play(
     let mut quick_failures = 0;
     while system::alive(pid) && !stop.requested() {
         let started = Instant::now();
-        let ended = one_run(game, values, paths, viewer, &producer, openxr, pid, eye, console, stop, report);
+        let ended = one_run(game, values, paths, viewer, &producer, openxr, linked, pid, eye, console, stop, report);
         if stop.requested() || !system::alive(pid) {
             if let Err(RunEnd::Fatal(why) | RunEnd::Retry(why)) = ended {
                 report(Event::Warning(why));
@@ -401,6 +417,7 @@ fn one_run(
     viewer: &Path,
     producer: &Path,
     openxr: Option<&system::OpenXr>,
+    linked: Option<&Linked>,
     pid: u32,
     eye: Option<(u32, u32)>,
     console: Console,
@@ -414,8 +431,15 @@ fn one_run(
     let version = version();
     let folder = paths.runs.join(format!("{}-{version}", game.run_prefix));
     std::fs::create_dir_all(&folder).map_err(|e| fatal(format!("cannot make the run folder {}: {e}", folder.display())))?;
+    // A build tree always has developer mode, as it has the debug menu.
+    let mut values = values.clone();
+    if paths.dev_games.is_some() {
+        values.set(monaka_contract::manifest::DEV_MODE.id, "1");
+    }
+    let values = &values;
     let mut plan = crate::games::plan(values, game, eye);
-    // A build tree always has the debug menu; an install only once the player turned it on.
+    // A build tree always has the debug menu; an install only once the player turned it on
+    // (the plan gives the viewer the argument then).
     if paths.dev_games.is_some() && !plan.viewer_args.iter().any(|a| a == DEBUG_MENU_ARG) {
         plan.viewer_args.push(DEBUG_MENU_ARG.to_owned());
     }
@@ -423,10 +447,7 @@ fn one_run(
     if game.launch == Launch::AtStart {
         plan.viewer_args.extend(["--producer-wait".to_owned(), AT_START_PRODUCER_WAIT.as_secs().to_string()]);
     }
-    if !plan.live.is_empty() {
-        let live = plan.live.join(",");
-        plan.viewer_args.extend([LIVE_ARG.to_owned(), live]);
-    }
+
     let mut monaka_log = RunLog::create(&folder);
     for line in header(game, producer, pid, openxr, eye, &plan) {
         monaka_log.line(&line);
@@ -436,11 +457,22 @@ fn one_run(
         report(event);
     };
     report(Event::RunFolder(folder.clone()));
-    let dll = folder.join(format!("{}-{version}.dll", game.producer));
+    let mut dll = folder.join(format!("{}-{version}.dll", game.producer));
     std::fs::copy(producer, &dll).map_err(|e| fatal(format!("cannot copy the producer: {e}")))?;
     let channel = format!(r"Local\monaka-{version}");
     let write = |name: &str, contents: &str| std::fs::write(folder.join(name), contents).map_err(|e| fatal(format!("cannot write {name}: {e}")));
-    write("live-channel.txt", &channel)?;
+    write(LIVE_CHANNEL_FILE, &channel)?;
+    write(host::FEATURES_FILE, &host::features_text())?;
+    // What the headset's home shows: the game, every setting's value, the games on offer.
+    let about = &game.pack().about;
+    write(home::MANIFEST_FILE, &pack::text(std::slice::from_ref(game.manifest), &about.author, &about.source, &about.version, &pack::Needs::NONE))?;
+    write(home::VALUES_FILE, &home::values_text(&[game.manifest, &MONAKA], values))?;
+    let listed: Vec<home::Listed> = crate::games::list()
+        .iter()
+        .map(|g| home::Listed { id: g.id.to_owned(), name: g.name.to_owned(), status: g.status.label().to_owned(), current: g.id == game.id, playing: g.id == game.id })
+        .collect();
+    write(home::GAMES_FILE, &home::games_text(&listed))?;
+    plan.viewer_args.extend([home::RUN_FOLDER_ARG.to_owned(), folder.display().to_string()]);
     for (name, contents) in &plan.files {
         write(name, contents)?;
     }
@@ -476,7 +508,41 @@ fn one_run(
         )));
     }
 
-    let viewed = view(viewer, openxr, &channel, &plan.viewer_args, &folder.join("captures"), pid, console, stop, report);
+    let viewed = {
+        // Settings applied in the headset: the producer started again with them, in the same run
+        // folder on the same channel (a fresh copy of its DLL), the game and the viewer running on.
+        let mut restarts = 0;
+        let mut apply = |values: &Values| -> Result<(), String> {
+            let plan = crate::games::plan(values, game, eye);
+            for (name, contents) in &plan.files {
+                std::fs::write(folder.join(name), contents).map_err(|e| format!("cannot write {name}: {e}"))?;
+            }
+            let _ = std::fs::write(folder.join(home::VALUES_FILE), home::values_text(&[game.manifest, &MONAKA], values));
+            match attach::stop(pid, &dll) {
+                Ok(o) if o.code == 0 => {}
+                Ok(o) => return Err(format!("the producer did not confirm its stop (code {}); restart the game", o.code)),
+                Err(why) => return Err(format!("could not stop the producer ({why}); restart the game")),
+            }
+            restarts += 1;
+            // A channel of its own: the viewer takes it from the run folder, and can never mistake
+            // the producer that is stopping for the one that replaces it.
+            let next_channel = format!(r"Local\monaka-{version}-{restarts}");
+            std::fs::write(folder.join(LIVE_CHANNEL_FILE), &next_channel).map_err(|e| format!("cannot write {LIVE_CHANNEL_FILE}: {e}"))?;
+            let next = folder.join(format!("{}-{version}-{restarts}.dll", game.producer));
+            std::fs::copy(producer, &next).map_err(|e| format!("cannot copy the producer: {e}"))?;
+            dll = next;
+            let outcome = attach::start(pid, &dll).map_err(|why| format!("attaching again failed: {why}"))?;
+            if outcome.code != 0 {
+                return Err(format!("the producer refused to start again (code {}); see the log", outcome.code));
+            }
+            Ok(())
+        };
+        let captures = folder.join("captures");
+        match linked {
+            Some(linked) => view_linked(linked, &channel, &plan.viewer_args, &captures, pid, stop, values.clone(), &mut apply, report),
+            None => view(viewer, openxr, &channel, &plan.viewer_args, &captures, pid, console, stop, values.clone(), &mut apply, report),
+        }
+    };
     // Always stop the producer while the game runs, whatever the viewer did.
     let stopped = if system::alive(pid) {
         report(Event::State(State::Stopping));
@@ -495,7 +561,7 @@ fn one_run(
 /// What a run runs where, at the top of its log: the first thing to know about a player's report.
 fn header(game: &Game, producer: &Path, pid: u32, openxr: Option<&system::OpenXr>, eye: Option<(u32, u32)>, plan: &crate::games::Plan) -> Vec<String> {
     let mut lines = vec![
-        format!("Monaka {} (pack contract {}) on Windows {}", env!("CARGO_PKG_VERSION"), monaka_core::pack::CONTRACT, system::windows_build()),
+        format!("Monaka {} (pack contract {}) on Windows {}", env!("CARGO_PKG_VERSION"), monaka_contract::pack::CONTRACT, system::windows_build()),
         format!("game: {} ({}), process {pid} {}", game.name, game.id, system::process_path(pid).map_or_else(|| "(path unreadable)".into(), |p| p.display().to_string())),
         format!("producer: {} sha256 {}", producer.display(), file_sha256(producer).unwrap_or_else(|| "(unreadable)".into())),
         format!("pack: {}", game.credit()),
@@ -528,13 +594,15 @@ fn view(
     pid: u32,
     console: Console,
     stop: &Stop,
+    mut values: Values,
+    apply: &mut dyn FnMut(&Values) -> Result<(), String>,
     report: &mut dyn FnMut(Event),
 ) -> Result<(), String> {
     let mut command = Command::new(viewer);
-    command.args(["--gpu-map", channel, "--seconds", "86400", "--stop-event", &stop.event.name]);
+    command.args(["--gpu-map", channel, "--seconds", "86400", "--stop-event", stop.event_name()]);
     match openxr {
         Some(openxr) => command.arg("--loader").arg(&openxr.loader).arg("--runtime").arg(&openxr.runtime),
-        None => command.arg(monaka_core::manifest::DESKTOP_ARG),
+        None => command.arg(monaka_contract::manifest::DESKTOP_ARG),
     };
     command
         .arg("--captures")
@@ -553,9 +621,24 @@ fn view(
     let mut focus_at = if openxr.is_some() { &FOCUS_GAME_AT[..] } else { &[] };
     let mut stop_asked_at: Option<Instant> = None;
     let mut game_gone_at: Option<Instant> = None;
+    // Why the viewer said the run cannot go on, if it did.
+    let mut failed: Option<String> = None;
     let status = loop {
         while let Ok(line) = lines.try_recv() {
-            report(viewer_line(line));
+            failed = failure(&line).or(failed);
+            if line.trim() == APPLY_LINE {
+                // The viewer has let the channel go; the settings it changed are in `values`.
+                report(Event::Info("Applying the settings changed in the headset: VR restarts in the game.".into()));
+                if let Err(why) = apply(&values) {
+                    report(Event::Warning(format!("The settings could not be applied: {why}")));
+                }
+                continue;
+            }
+            let event = viewer_line(line);
+            if let Event::Setting(id, value) = &event {
+                values.set(id, value.clone());
+            }
+            report(event);
         }
         if let [at, rest @ ..] = focus_at
             && started.elapsed() >= *at
@@ -585,13 +668,94 @@ fn view(
         std::thread::sleep(Duration::from_millis(50));
     };
     while let Ok(line) = lines.recv_timeout(Duration::from_millis(200)) {
+        failed = failure(&line).or(failed);
         report(viewer_line(line));
     }
     // The player closed the 2D window: that is Stop VR, not a run to start again.
-    if status.code() == Some(monaka_core::manifest::CLOSED_BY_PLAYER) {
+    if status.code() == Some(monaka_contract::manifest::CLOSED_BY_PLAYER) {
         stop.request();
     }
-    if status.success() || stop.requested() { Ok(()) } else { Err(format!("the viewer stopped with exit code {}", status.code().unwrap_or(-1))) }
+    if status.success() || stop.requested() {
+        return Ok(());
+    }
+    Err(failed.unwrap_or_else(|| format!("the viewer stopped with exit code {}", status.code().unwrap_or(-1))))
+}
+
+/// Shows the game in the window's headset view until a stop is asked for, the game (`pid`) is
+/// gone or the view closes, forwarding the viewer's lines as [`view`] does; then lets the game go,
+/// the view showing the home alone again.
+#[allow(clippy::too_many_arguments)]
+fn view_linked(
+    linked: &Linked,
+    channel: &str,
+    extra: &[String],
+    captures: &Path,
+    pid: u32,
+    stop: &Stop,
+    mut values: Values,
+    apply: &mut dyn FnMut(&Values) -> Result<(), String>,
+    report: &mut dyn FnMut(Event),
+) -> Result<(), String> {
+    // Lines from before this run are another run's.
+    while linked.lines.try_recv().is_ok() {}
+    let mut args = extra.to_vec();
+    args.extend(["--captures".to_owned(), captures.display().to_string()]);
+    linked.show_game(channel, &args)?;
+    report(Event::State(State::Running));
+    let started = Instant::now();
+    let mut focus_at = &FOCUS_GAME_AT[..];
+    let ended = loop {
+        loop {
+            let line = match linked.lines.try_recv() {
+                Ok(line) => line,
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    linked.let_go();
+                    return Err("the headset view closed".into());
+                }
+            };
+            if line.trim() == APPLY_LINE {
+                report(Event::Info("Applying the settings changed in the headset: VR restarts in the game.".into()));
+                if let Err(why) = apply(&values) {
+                    report(Event::Warning(format!("The settings could not be applied: {why}")));
+                }
+                continue;
+            }
+            // The run goes on: what the viewer could not do is for the player to read.
+            if let Some(why) = failure(&line) {
+                report(Event::Warning(why));
+                continue;
+            }
+            let event = viewer_line(line);
+            if let Event::Setting(id, value) = &event {
+                values.set(id, value.clone());
+            }
+            report(event);
+        }
+        if let [at, rest @ ..] = focus_at
+            && started.elapsed() >= *at
+        {
+            focus_at = rest;
+            if !system::in_front(pid) && !system::focus(pid) && rest.is_empty() {
+                report(Event::Detail("The game's window could not be brought to the front: click it to play.".into()));
+            }
+        }
+        if stop.requested() {
+            break Ok(());
+        }
+        if !system::alive(pid) {
+            report(Event::Info("The game ended; the headset shows Monaka's home.".into()));
+            break Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    linked.let_go();
+    ended
+}
+
+/// Why the viewer says the run cannot go on, if `line` says so (a [`FAILURE_LINE`]).
+fn failure(line: &str) -> Option<String> {
+    line.strip_prefix(FAILURE_LINE).map(|why| why.trim().to_owned())
 }
 
 /// The viewer's stdout and stderr lines, read on their own threads.

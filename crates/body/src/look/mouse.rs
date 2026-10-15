@@ -25,7 +25,7 @@ use super::{Delivery, Looks, Share};
 use monaka_core::feature::Feature;
 use monaka_core::options::Options;
 use monaka_core::pad::StickTurn;
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_hook::module::Module;
 use monaka_hook::{InFlight, Original, Site, mem};

@@ -8,7 +8,7 @@
 //! opens the game's hit detection on the swing itself has swings press nothing ([`set_presses`]).
 
 use crate::held::Kind;
-use monaka_core::protocol::{HandPose, LEFT_HAND, RIGHT_HAND};
+use monaka_contract::protocol::{HandPose, LEFT_HAND, RIGHT_HAND};
 use monaka_pad::actions::{self, Action};
 use monaka_core::swing::{Swing, SwingRules};
 use monaka_producer::log;

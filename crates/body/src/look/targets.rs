@@ -16,7 +16,7 @@ use super::aim::{AimSettings, TOOL, aimed};
 use super::{Looks, Share, StandDown};
 use monaka_core::aim::{Convention, HeadAim, Look, PitchMode};
 use monaka_core::camera::{Mat34, tracking_origin as levelled_origin};
-use monaka_core::protocol::HeadPose;
+use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_hook::mem;
 use monaka_producer::game::{Lack, Start};

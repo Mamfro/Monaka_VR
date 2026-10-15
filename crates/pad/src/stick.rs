@@ -4,7 +4,7 @@
 //! [`buttons`]), and a new left trigger press held back until the producer lets it through
 //! ([`gate_left_trigger`]).
 
-use monaka_core::pad::Gamepad;
+use monaka_contract::gamepad::Gamepad;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::*};
 
 

@@ -1,5 +1,5 @@
 use super::*;
-use monaka_core::pad::Gamepad;
+use monaka_contract::gamepad::Gamepad;
 use monaka_pad::actions::Binding;
 
 #[test]

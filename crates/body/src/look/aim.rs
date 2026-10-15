@@ -14,7 +14,7 @@
 use monaka_core::camera::{direction_yaw_pitch, head_yaw_pitch, pointing_yaw_pitch};
 use monaka_core::math::{Quat, Vec3, converged};
 use monaka_core::options::Options;
-use monaka_core::protocol::{HandPose, LEFT_HAND, RIGHT_HAND};
+use monaka_contract::protocol::{HandPose, LEFT_HAND, RIGHT_HAND};
 use monaka_hook::mem;
 use monaka_producer::log;
 use std::sync::Mutex;
