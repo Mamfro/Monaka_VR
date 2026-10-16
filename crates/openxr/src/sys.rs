@@ -25,6 +25,8 @@ pub type Action = u64;
 pub const NULL_HANDLE: u64 = 0;
 pub const SUCCESS: Result = 0;
 pub const EVENT_UNAVAILABLE: Result = 4;
+pub const TIMEOUT_EXPIRED: Result = 1;
+pub const ERROR_CALL_ORDER_INVALID: Result = -37;
 pub const INFINITE_DURATION: Duration = 0x7fff_ffff_ffff_ffff;
 
 pub const fn make_version(major: u64, minor: u64, patch: u64) -> Version {
@@ -221,6 +223,7 @@ pub const TYPE_ACTION_CREATE_INFO: StructureType = 29;
 pub const TYPE_ACTION_SPACE_CREATE_INFO: StructureType = 38;
 pub const TYPE_SPACE_LOCATION: StructureType = 42;
 pub const TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING: StructureType = 51;
+pub const TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED: StructureType = 52;
 pub const TYPE_ACTION_STATE_GET_INFO: StructureType = 58;
 pub const TYPE_HAPTIC_ACTION_INFO: StructureType = 59;
 pub const TYPE_SESSION_ACTION_SETS_ATTACH_INFO: StructureType = 60;

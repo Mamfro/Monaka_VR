@@ -69,7 +69,7 @@ fn a_turn_moves_every_panel_the_same_way_and_wraps_the_last_round() {
     let rest = [0, 1, 2].map(|page| slot_angle(page, 1, 3));
     assert_eq!(rest, [-SIDE_ANGLE, 0.0, SIDE_ANGLE]);
     // RB: the ring turns left, the panel on the right (page 2) comes in front.
-    let turning = Turning::new(rest, 2, 1);
+    let turning = Turning::new(&rest, 2, 1);
     assert_eq!(turning.at(0.0), rest);
     let end = turning.at(1.0);
     let full = std::f32::consts::TAU;
@@ -79,7 +79,7 @@ fn a_turn_moves_every_panel_the_same_way_and_wraps_the_last_round() {
     let halfway = turning.at(0.5);
     assert!((0..3).all(|page| halfway[page] < rest[page]), "all moving left: {halfway:?}");
     // LB back: the mirror.
-    let back = Turning::new(rest, 0, -1).at(1.0);
+    let back = Turning::new(&rest, 0, -1).at(1.0);
     assert!((back[0] - 0.0).abs() < 1e-5 && (back[2] - (full - SIDE_ANGLE)).abs() < 1e-5, "{back:?}");
 }
 

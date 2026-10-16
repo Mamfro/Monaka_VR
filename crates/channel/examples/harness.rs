@@ -28,6 +28,9 @@
 //!   keys only with focus).
 //! - `key <name>`: a key pressed and let go on the keyboard (esc, enter, space, tab, f1..f12,
 //!   a..z, 0..9), for the window in front.
+//! - `refresh <hz>` (or `off`): the headset's refresh the harness stands in for (120 Hz unless
+//!   set): the latest point of its grid goes to the producer each loop, as a viewer's frame wait
+//!   returns on it.
 //! - `depth on` (or `off`): saved pairs also write each eye's depth the producer sent with them
 //!   (`<name>-depth-left.png`, `-right`; nearer is brighter, each image spread over its own range).
 //! - `unpause` / `pause`: the gamepad's Start pressed (a tenth of a second) only when it changes
@@ -72,6 +75,9 @@ use std::time::{Duration, Instant};
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 
+/// How long a save waits without any pair coming before the run stops (ms).
+const NO_PAIRS_MS: u64 = 5000;
+
 /// Left, right, up, down half-angles in radians (a headset's lopsided eyes).
 const LEFT_FOV: [f32; 4] = [-0.90, 0.75, 0.85, -0.90];
 const RIGHT_FOV: [f32; 4] = [-0.75, 0.90, 0.85, -0.90];
@@ -90,6 +96,8 @@ enum Step {
     /// Esc pressed only if the next pair is not what this asks: a menu up (true) or not (false).
     Menu(bool),
     Depth(bool),
+    /// The headset's refresh the harness stands in for (Hz; none: no refresh sent).
+    Refresh(Option<f64>),
     Layer(Held),
     ActLike(Proxy),
     DpadHold(u16),
@@ -275,6 +283,11 @@ fn parse_script(text: &str) -> Result<Vec<(u64, Step)>, String> {
             Some("focus") => Step::Focus(words.get(2).ok_or_else(|| bad("focus takes a program"))?.to_string()),
             Some("key") => Step::Key(words.get(2).and_then(|k| scan_code(k)).ok_or_else(|| bad("unknown key"))?),
             Some("depth") => Step::Depth(words.get(2) != Some(&"off")),
+            Some("refresh") => match words.get(2) {
+                Some(&"off") => Step::Refresh(None),
+                Some(hz) => Step::Refresh(Some(hz.parse::<f64>().map_err(|_| bad("refresh takes a rate (Hz) or off"))?).filter(|hz| *hz > 0.0)),
+                None => return Err(bad("refresh takes a rate (Hz) or off")),
+            },
             Some("unpause") => Step::Menu(false),
             Some("pause") => Step::Menu(true),
             Some("layer") => Step::Layer(match words.get(2).copied() {
@@ -484,8 +497,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut saved_panels: Vec<(String, ID3D11Texture2D)> = Vec::new();
     let mut next = 0;
     let started = Instant::now();
+    // A 120 Hz headset's refresh unless the script says otherwise (`refresh`).
+    let mut refresh = Some(120.0);
+    let refresh_start = monaka_channel::pose::now_ns();
     let (mut seen, mut pairs) = (0u64, 0u64);
     let mut ended = false;
+    // When the last pair came (ms into the run): a save waiting on none for long stops the run.
+    let mut last_pair_ms = 0u64;
     loop {
         let now = started.elapsed().as_millis() as u64;
         while next < script.len() && script[next].0 <= now {
@@ -513,6 +531,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Step::Key(scan) => press_key(*scan),
                 Step::Menu(open) => menu_wanted = Some(*open),
                 Step::Depth(on) => save_depth = *on,
+                Step::Refresh(hz) => refresh = *hz,
                 Step::Layer(held) => chain.held = *held,
                 Step::ActLike(proxy) => chain.layers.proxy = *proxy,
                 Step::DpadHold(directions) => chain.layers.hold = *directions,
@@ -531,6 +550,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
         poses.write_head(&head);
+        // A headset's refresh: the latest point of its grid, as a viewer's frame wait returns on it.
+        if let Some(hz) = refresh {
+            let period = (1e9 / hz) as u64;
+            let now_ns = monaka_channel::pose::now_ns();
+            let woke_ns = refresh_start + (now_ns.saturating_sub(refresh_start) / period) * period;
+            poses.write_display(&monaka_contract::protocol::DisplayTiming { period_ns: period, woke_ns });
+        }
         let located = hand_poses.map(|pose| {
             pose.map(|(position, yaw, pitch)| {
                 let orientation = turn(yaw, pitch);
@@ -560,6 +586,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fingers.write(&fingers_now);
         let read = if save_depth { reader.read_with_depth(&context, targets, seen)?.map(|(pair, depth)| (pair, depth.is_some())) } else { reader.read(&context, targets, seen)?.map(|pair| (pair, false)) };
         if let Some((pair, with_depth)) = read {
+            last_pair_ms = now;
             seen = pair.sequence;
             pairs += 1;
             if let Some(open) = menu_wanted.take() {
@@ -617,6 +644,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if now > 600_000 {
             return Err("script ran past ten minutes".into());
         }
+        if !wanted.is_empty() && now.saturating_sub(last_pair_ms) > NO_PAIRS_MS {
+            return Err(format!("no pair for {} s with a save waiting (the game paused, in a menu, or not drawing)", NO_PAIRS_MS / 1000).into());
+        }
         std::thread::sleep(Duration::from_millis(1));
     }
     println!("pairs read {pairs}");
@@ -630,7 +660,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             write_png(&folder.join(format!("{name}-{side}.png")), w, h, &rgba, drawn, *full)?;
         }
-        println!("saved {name} (pair {sequence}){}", if ring.is_some() && record.is_none() { " (no pose record: ring not drawn)" } else { "" });
+        // The pose the pair went out with (degrees, yaw left, pitch up), to set its image against.
+        let pose = record.map_or(String::new(), |r| {
+            let (yaw, pitch) = monaka_core::camera::pointing_yaw_pitch(r.eyes[0].orientation);
+            format!(", pose yaw {:.3} pitch {:.3}", yaw.to_degrees(), pitch.to_degrees())
+        });
+        println!("saved {name} (pair {sequence}){pose}{}", if ring.is_some() && record.is_none() { " (no pose record: ring not drawn)" } else { "" });
     }
     for (name, depths) in &saved_depths {
         for (depth, side) in depths.iter().zip(["left", "right"]) {

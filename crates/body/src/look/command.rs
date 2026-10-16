@@ -133,6 +133,18 @@ struct State {
 }
 
 static STATE: Mutex<State> = Mutex::new(State { held: Share { yaw: 0.0, pitch: 0.0 }, commands: 0, aimed: 0, last_command: None, holding_after_pause: 0, pauses: 0 });
+/// The head pose whose share the latest command carries (none: its share is not the head's now:
+/// held over a pause, another camera's view, not aiming).
+static BAKED_HEAD: Mutex<Option<HeadPose>> = Mutex::new(None);
+
+/// The head pose whose share the latest command carries: what a frame built from that command's
+/// camera is drawn from. A game that draws the eyes from it (rather than a newer head sample) sends
+/// each frame with the pose its picture follows, whichever of the camera's turn and its own the
+/// engine draws with.
+pub fn head_baked() -> Option<HeadPose> {
+    *BAKED_HEAD.locked()
+}
+
 /// Set while the share is kept for the first commands after a pause ([`PAUSE_GAP`]).
 static PAUSE_HOLD: AtomicBool = AtomicBool::new(true);
 /// No command for this long: the game was paused (a menu, a journal) or loading. On resuming it
@@ -221,7 +233,9 @@ pub fn built(pitch: f32, yaw: f32) -> Option<(f32, f32)> {
     // angles' changes, a menu meanwhile leaving the camera's angles as they were).
     let resuming = state.holding_after_pause > 0 || (game.holds)();
     state.holding_after_pause = state.holding_after_pause.saturating_sub(1);
-    let head = if aiming && !resuming && !taken { (game.head)().map(|pose| head_share(pose.orientation)) } else { None };
+    let sampled = if aiming && !resuming && !taken { (game.head)() } else { None };
+    *BAKED_HEAD.locked() = sampled;
+    let head = sampled.map(|pose| head_share(pose.orientation));
     let next = next_share(aiming, resuming, taken, state.held, head);
     let (mut pitch, yaw) = reshare(pitch, yaw, state.held, next);
     // Each view's measure is used once: the next view shows the change.

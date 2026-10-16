@@ -46,6 +46,9 @@ impl Pc for FakePc {
     fn running(&self, _: &[&str], _: Option<u32>) -> Running {
         Running { steamvr: self.0.steamvr.get(), viewer: self.0.viewer.get(), game: self.0.game.get() }
     }
+    fn processes(&self, executables: &[&str]) -> Vec<String> {
+        if self.0.game.get() { executables.iter().map(|e| (*e).to_owned()).collect() } else { Vec::new() }
+    }
     fn steam_libraries(&self) -> Vec<PathBuf> {
         Vec::new()
     }
@@ -275,6 +278,36 @@ fn an_option_changed_in_the_window_is_saved() {
 }
 
 #[test]
+fn changes_soon_after_a_save_are_saved_once_the_gap_has_passed() {
+    let _one = one_window();
+    let dir = folder("gap");
+    install_kit(&dir);
+    let pc = Rc::new(PcState::default());
+    let mut harness = window(&dir, &pc);
+    let saved = || Settings::load_from(dir.join("settings.txt")).values.get("kit").is_some_and(|v| v.switch(&KIT, "kit_switch"));
+    harness.state_mut().set_from_headset("kit_switch", "0".to_owned());
+    harness.state_mut().set_from_headset("kit_switch", "1".to_owned());
+    assert!(!saved(), "the second change waits");
+    harness.state_mut().save_pending(true);
+    assert!(saved(), "and is saved");
+}
+
+#[test]
+fn a_report_is_saved_from_the_window_and_its_folder_opened() {
+    let _one = one_window();
+    let dir = folder("report");
+    install_kit(&dir);
+    let pc = Rc::new(PcState::default());
+    let mut harness = window(&dir, &pc);
+    harness.get_by_label("Save report").click();
+    harness.run();
+    let reports = paths_in(&dir).runs.join("reports");
+    let zips: Vec<_> = std::fs::read_dir(&reports).unwrap().filter_map(|e| e.ok()).filter(|e| e.path().extension().is_some_and(|x| x == "zip")).collect();
+    assert_eq!(zips.len(), 1, "{}", harness.state().state_line);
+    assert!(pc.opened.borrow().iter().any(|o| o.ends_with("reports")), "{:?}", pc.opened.borrow());
+}
+
+#[test]
 fn a_setting_from_the_headset_is_saved_where_its_control_would_save_it() {
     let _one = one_window();
     let dir = folder("headset");
@@ -283,6 +316,8 @@ fn a_setting_from_the_headset_is_saved_where_its_control_would_save_it() {
     let mut harness = window(&dir, &pc);
     harness.state_mut().set_from_headset("kit_switch", "1".to_owned());
     harness.state_mut().set_from_headset(DIAGNOSTIC_LOGGING.id, "1".to_owned());
+    // The second came soon after the first: saved once the gap has passed (or the window closes).
+    harness.state_mut().save_pending(true);
     let saved = Settings::load_from(dir.join("settings.txt"));
     assert!(saved.values.get("kit").is_some_and(|v| v.switch(&KIT, "kit_switch")), "the game's own option");
     assert!(saved.monaka.switch(&MONAKA, DIAGNOSTIC_LOGGING.id), "Monaka's own, for every game");

@@ -26,8 +26,8 @@ pub struct Headset {
     stop: Stop,
     folder: PathBuf,
     lines: mpsc::Receiver<String>,
-    /// The home's files as last written: the manifest, the values, the games.
-    shown: [String; 3],
+    /// The home's files as last written: the manifest, the values, the games, the status.
+    shown: [String; 4],
 }
 
 /// What a run needs to show its game in the headset view: its folder, the viewer's lines while
@@ -49,8 +49,9 @@ impl Headset {
         let openxr = system::steamvr_openxr()?;
         let folder = paths.runs.join(FOLDER);
         std::fs::create_dir_all(&folder).map_err(|e| format!("cannot make {}: {e}", folder.display()))?;
-        // No game until a run links one.
+        // No game until a run links one; the eye size is this viewer's to say.
         write(&folder, home::LINK_FILE, "")?;
+        let _ = std::fs::remove_file(folder.join(home::EYE_SIZE_FILE));
         let stop = Stop::new()?;
         let mut command = Command::new(viewer);
         command
@@ -88,10 +89,11 @@ impl Headset {
     }
 
     /// Writes what the home shows: the game's manifest (its pack text; empty for none), every
-    /// setting's value and the games on offer (`monaka_core::home`). Only what changed is written.
-    pub fn show(&mut self, manifest: String, values: String, games: String) {
-        let texts = [manifest, values, games];
-        for ((name, text), shown) in [home::MANIFEST_FILE, home::VALUES_FILE, home::GAMES_FILE].into_iter().zip(texts).zip(&mut self.shown) {
+    /// setting's value, the games on offer and Play's status (`monaka_core::home`). Only what
+    /// changed is written.
+    pub fn show(&mut self, manifest: String, values: String, games: String, status: String) {
+        let texts = [manifest, values, games, status];
+        for ((name, text), shown) in [home::MANIFEST_FILE, home::VALUES_FILE, home::GAMES_FILE, home::STATUS_FILE].into_iter().zip(texts).zip(&mut self.shown) {
             if *shown != text && write(&self.folder, name, &text).is_ok() {
                 *shown = text;
             }
@@ -126,6 +128,11 @@ impl Linked {
     /// Shows the game on `channel` in the headset view, with the viewer's arguments for it.
     pub(crate) fn show_game(&self, channel: &str, args: &[String]) -> Result<(), String> {
         write(&self.folder, home::LINK_FILE, &home::link_text(channel, args))
+    }
+
+    /// The eye image size the headset view learned from the runtime at its start, once it said it.
+    pub(crate) fn eye_size(&self) -> Option<(u32, u32)> {
+        std::fs::read_to_string(self.folder.join(home::EYE_SIZE_FILE)).ok().and_then(|text| home::parse_eye_size(&text))
     }
 
     /// Lets the game go: the headset view shows the home alone again.

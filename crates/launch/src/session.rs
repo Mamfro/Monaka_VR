@@ -14,9 +14,9 @@ use crate::headset::Linked;
 use crate::{Paths, attach, system, text};
 use monaka_contract::host;
 use monaka_contract::protocol::LIVE_CHANNEL_FILE;
-use monaka_contract::manifest::{APPLY_LINE, DEBUG_MENU_ARG, DEBUG_MENU_MARKER, DIAGNOSTIC_LOGGING, DIAGNOSTIC_MARKER, FAILURE_LINE, MONAKA, SETTING_LINE};
+use monaka_contract::manifest::{DEBUG_MENU_MARKER, DIAGNOSTIC_LOGGING, DIAGNOSTIC_MARKER, MONAKA};
 use monaka_contract::pack;
-use monaka_core::home;
+use monaka_core::home::{self, APPLY_LINE, DEBUG_MENU_ARG, FAILURE_LINE, SETTING_LINE};
 use std::io::{BufRead, BufReader};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -171,7 +171,7 @@ pub enum Shows {
     /// The headset, through SteamVR's OpenXR.
     Headset,
     /// The 2D window on the desktop, with the debug menu and its panels: no headset
-    /// ([`monaka_contract::manifest::DESKTOP_ARG`]).
+    /// ([`home::DESKTOP_ARG`]).
     Desktop,
 }
 
@@ -271,8 +271,9 @@ fn play(
         EyeSize::GameOwn => None,
         EyeSize::Fixed(w, h) => Some((w, h)),
         // The 2D window: no headset to ask, so the game keeps its own resolution.
+        // The headset view knows it already; else a short-lived viewer asks the runtime.
         EyeSize::Headset => openxr.and_then(|openxr| {
-            let size = headset_eye_size(viewer, openxr, console);
+            let size = linked.and_then(Linked::eye_size).or_else(|| headset_eye_size(viewer, openxr, console));
             match size {
                 Some((w, h)) => report(Event::Info(format!("Headset eye size {w}x{h}"))),
                 None => report(Event::Warning("Headset eye size unavailable; the game keeps its own resolution.".into())),
@@ -469,7 +470,7 @@ fn one_run(
     write(home::VALUES_FILE, &home::values_text(&[game.manifest, &MONAKA], values))?;
     let listed: Vec<home::Listed> = crate::games::list()
         .iter()
-        .map(|g| home::Listed { id: g.id.to_owned(), name: g.name.to_owned(), status: g.status.label().to_owned(), current: g.id == game.id, playing: g.id == game.id })
+        .map(|g| home::Listed { id: g.id.to_owned(), name: g.name.to_owned(), status: g.status.label().to_owned(), current: g.id == game.id, in_vr: g.id == game.id, running: g.id == game.id })
         .collect();
     write(home::GAMES_FILE, &home::games_text(&listed))?;
     plan.viewer_args.extend([home::RUN_FOLDER_ARG.to_owned(), folder.display().to_string()]);
@@ -602,7 +603,7 @@ fn view(
     command.args(["--gpu-map", channel, "--seconds", "86400", "--stop-event", stop.event_name()]);
     match openxr {
         Some(openxr) => command.arg("--loader").arg(&openxr.loader).arg("--runtime").arg(&openxr.runtime),
-        None => command.arg(monaka_contract::manifest::DESKTOP_ARG),
+        None => command.arg(home::DESKTOP_ARG),
     };
     command
         .arg("--captures")
@@ -626,6 +627,13 @@ fn view(
     let status = loop {
         while let Ok(line) = lines.try_recv() {
             failed = failure(&line).or(failed);
+            // The player closed the home to play: the game in front, if something else took it.
+            if line.trim() == home::HOME_CLOSED_LINE {
+                if !system::in_front(pid) && !system::focus(pid) {
+                    report(Event::Detail("The game's window could not be brought to the front: click it to play.".into()));
+                }
+                continue;
+            }
             if line.trim() == APPLY_LINE {
                 // The viewer has let the channel go; the settings it changed are in `values`.
                 report(Event::Info("Applying the settings changed in the headset: VR restarts in the game.".into()));
@@ -672,7 +680,7 @@ fn view(
         report(viewer_line(line));
     }
     // The player closed the 2D window: that is Stop VR, not a run to start again.
-    if status.code() == Some(monaka_contract::manifest::CLOSED_BY_PLAYER) {
+    if status.code() == Some(home::CLOSED_BY_PLAYER) {
         stop.request();
     }
     if status.success() || stop.requested() {
@@ -714,6 +722,13 @@ fn view_linked(
                     return Err("the headset view closed".into());
                 }
             };
+            // The player closed the home to play: the game in front, if something else took it.
+            if line.trim() == home::HOME_CLOSED_LINE {
+                if !system::in_front(pid) && !system::focus(pid) {
+                    report(Event::Detail("The game's window could not be brought to the front: click it to play.".into()));
+                }
+                continue;
+            }
             if line.trim() == APPLY_LINE {
                 report(Event::Info("Applying the settings changed in the headset: VR restarts in the game.".into()));
                 if let Err(why) = apply(&values) {

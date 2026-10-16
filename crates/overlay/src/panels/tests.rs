@@ -15,7 +15,7 @@ fn a_set_of_panels_switches_each_on_and_off() {
 #[test]
 fn the_stats_panel_draws_in_the_headset() {
     let (device, context, _) = create_device(None).unwrap();
-    let mut canvas = Canvas::new(DXGI_FORMAT_R8G8B8A8_UNORM, PanelId::Stats.pixels());
+    let mut canvas = Canvas::new(DXGI_FORMAT_R8G8B8A8_UNORM, crate::home::place::PIXELS);
     let stats = StatsView {
         display: "Headset",
         display_fps: 90.0,
@@ -37,10 +37,10 @@ fn the_stats_panel_draws_in_the_headset() {
     let console = crate::console_view::ConsoleView::default();
     let content = Content { stats: &stats, console: &console, fake_vr: &crate::fake_vr::FakeVr::HEADSET };
     let image = canvas.draw(&device, &context, |ui| {
-        headset_page(ui, PanelId::Stats, &content);
+        ring_page(ui, PanelId::Stats, &content, true);
     }).unwrap().expect("drawn").clone();
     let (width, height, pixels) = read_image(&device, &context, &image).unwrap();
-    assert_eq!([width, height], PanelId::Stats.pixels());
+    assert_eq!([width, height], crate::home::place::PIXELS);
     let shades: std::collections::HashSet<u8> = pixels.chunks(4).map(|p| p[0]).collect();
     assert!(shades.len() > 20, "text drawn: {} shades", shades.len());
     if let Some(path) = std::env::var_os("MONAKA_STATS_PNG") {
@@ -152,7 +152,7 @@ fn the_fake_vr_panel_shows_the_head_and_hands() {
 #[test]
 fn the_console_panel_in_the_headset_shows_its_log() {
     let (device, context, _) = create_device(None).unwrap();
-    let mut canvas = Canvas::new(DXGI_FORMAT_R8G8B8A8_UNORM, PanelId::Console.pixels());
+    let mut canvas = Canvas::new(DXGI_FORMAT_R8G8B8A8_UNORM, crate::home::place::PIXELS);
     let stats = StatsView::default();
     let console = crate::console_view::ConsoleView {
         open: true,
@@ -162,7 +162,7 @@ fn the_console_panel_in_the_headset_shows_its_log() {
     let content = Content { stats: &stats, console: &console, fake_vr: &crate::fake_vr::FakeVr::HEADSET };
     let image = canvas
         .draw(&device, &context, |ui| {
-            headset_page(ui, PanelId::Console, &content);
+            ring_page(ui, PanelId::Console, &content, false);
         })
         .unwrap()
         .expect("drawn")

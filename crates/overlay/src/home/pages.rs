@@ -8,8 +8,9 @@ use super::place::PIXELS;
 use super::{Home, LogSource, PAGES, Page, Setting};
 use crate::Result;
 use crate::canvas::{Canvas, Cursor};
-use crate::menu::panel::{ACCENT, BACKGROUND, DIM, ON, ROW, TEXT};
-use egui::{Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, RichText, ScrollArea, Stroke, TextStyle, Vec2};
+use crate::ring_page::{self, style};
+use crate::menu::panel::{ACCENT, DIM, ON, ROW, TEXT};
+use egui::{Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, ScrollArea, Vec2};
 use monaka_contract::manifest::{Kind, TABS, number_text};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
@@ -56,49 +57,12 @@ impl Pages {
     }
 }
 
-/// Type and targets large enough at a metre or so.
-fn style(ui: &mut egui::Ui) {
-    let style = ui.style_mut();
-    style.text_styles.insert(TextStyle::Body, FontId::proportional(15.0));
-    style.text_styles.insert(TextStyle::Button, FontId::proportional(15.0));
-    style.text_styles.insert(TextStyle::Small, FontId::proportional(12.0));
-    style.text_styles.insert(TextStyle::Monospace, FontId::monospace(11.0));
-    style.spacing.button_padding = Vec2::new(12.0, 6.0);
-    style.spacing.item_spacing = Vec2::new(8.0, 6.0);
-    style.spacing.interact_size.y = 30.0;
-    style.spacing.scroll.bar_width = 12.0;
-    style.visuals = egui::Visuals::dark();
-    style.visuals.override_text_color = Some(TEXT);
-    style.visuals.selection.bg_fill = ROW;
-    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.5, ACCENT);
-}
+/// The keys, at the foot of each panel.
+const KEYS: &str = "Point and pull the trigger.  Right stick: scroll.  LB/RB: panels.  B or hold Start: close.";
 
-/// Space inside a panel's edge, the outline round the one in front, and the footer's height
-/// (points).
-const EDGE: i8 = 16;
-const OUTLINE: f32 = 3.0;
-const FOOTER: f32 = 22.0;
-
-/// The panel's frame: the title, `body` in the room left above the footer (clipped to it), and
-/// the footer; outlined while it is in front. All of it inside the image, whatever `body` holds.
+/// The home's frame round `body` ([`ring_page::framed`]).
 fn framed(ui: &mut egui::Ui, page: Page, front: bool, body: impl FnOnce(&mut egui::Ui)) {
-    let inside = ui.available_size() - Vec2::splat(2.0 * (EDGE as f32 + OUTLINE));
-    let outline = Stroke::new(OUTLINE, if front { ACCENT } else { Color32::TRANSPARENT });
-    Frame::new().fill(BACKGROUND).stroke(outline).corner_radius(CornerRadius::same(14)).inner_margin(Margin::same(EDGE)).show(ui, |ui| {
-        ui.set_min_size(inside);
-        ui.set_max_size(inside);
-        ui.label(RichText::new(page.title()).size(22.0).strong());
-        ui.add_space(4.0);
-        let room = Vec2::new(inside.x, (ui.available_height() - FOOTER).max(0.0));
-        ui.allocate_ui_with_layout(room, Layout::top_down(Align::Min), |ui| {
-            ui.set_min_size(room);
-            ui.set_max_size(room);
-            ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
-            body(ui);
-        });
-        ui.add_space(4.0);
-        ui.label(RichText::new("Point and pull the trigger.  Right stick: scroll.  LB/RB: panels.  B or hold Start: close.").size(11.0).color(DIM));
-    });
+    ring_page::framed(ui, page.title(), front, KEYS, body);
 }
 
 /// The Games panel: the game shown, what can be done with it, and the games on offer. In the
@@ -135,12 +99,20 @@ fn games(ui: &mut egui::Ui, home: &mut Home) {
                 if stop(ui, "Stop VR") {
                     home.ask_stop();
                 }
-            } else if home.playing().is_some() {
+            } else if home.in_vr().is_some() {
                 if stop(ui, "Stop game") {
                     home.ask_stop();
                 }
-            } else if home.game.is_some() && ui.add(egui::Button::new(RichText::new("Play").strong()).fill(ROW)).clicked() {
-                home.ask_play();
+            } else if home.game.is_some() {
+                let can = home.status.can_play;
+                // A game that runs already is joined, not started.
+                let label = if home.current_runs() { "Attach" } else { "Play" };
+                if ui.add_enabled(can, egui::Button::new(RichText::new(label).strong()).fill(if can { ROW } else { Color32::TRANSPARENT })).clicked() {
+                    home.ask_play();
+                }
+                if home.status.can_start_game && ui.button("Start game").clicked() {
+                    home.ask_start_game();
+                }
             }
             if ui.button("Recenter panels").clicked() {
                 home.ask_recenter();
@@ -149,8 +121,17 @@ fn games(ui: &mut egui::Ui, home: &mut Home) {
                 home.ask_leave();
             }
         });
-        if let Some(playing) = home.playing().filter(|p| home.window && !p.current) {
-            ui.label(RichText::new(format!("Playing now: {}", playing.name)).color(ON));
+        if let Some(in_vr) = home.in_vr().filter(|g| home.window && !g.current) {
+            ui.label(RichText::new(format!("In VR now: {}", in_vr.name)).color(ON));
+        }
+        // What Play does or why it cannot yet, then how a run goes (starting, waiting).
+        if home.window {
+            let status = &home.status;
+            for (text, colour) in [(&status.why, DIM), (&status.line, TEXT)] {
+                if !text.is_empty() {
+                    ui.add(egui::Label::new(RichText::new(text).size(14.0).color(colour)).wrap());
+                }
+            }
         }
         ui.add_space(12.0);
         if home.games.is_empty() {
@@ -159,13 +140,18 @@ fn games(ui: &mut egui::Ui, home: &mut Home) {
         ui.label(RichText::new("Your games").size(17.0).strong());
         let mut picked = None;
         for listed in &home.games {
-            let state = if listed.playing { "Playing" } else { listed.status.as_str() };
+            // In VR (its run linked in), playing (its process runs), or how far its pack is.
+            let (state, colour) = match (listed.in_vr, listed.running) {
+                (true, _) => ("Playing in VR", ON),
+                (false, true) => ("Playing", ON),
+                (false, false) => (listed.status.as_str(), DIM),
+            };
             let row = Frame::new().fill(if listed.current { ROW } else { Color32::TRANSPARENT }).corner_radius(CornerRadius::same(6)).inner_margin(Margin::symmetric(10, 4)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(&listed.name);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(RichText::new(state).color(if listed.playing { ON } else { DIM }));
+                        ui.label(RichText::new(state).color(colour));
                     });
                 });
             });

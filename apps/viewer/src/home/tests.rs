@@ -1,6 +1,6 @@
 use super::*;
 use monaka_contract::protocol::LEFT_HAND;
-use monaka_overlay::egui::Pos2;
+use monaka_overlay::egui::{self, Pos2};
 use monaka_core::hold::HOLD;
 use monaka_core::math;
 use monaka_overlay::home::Page;
@@ -27,7 +27,8 @@ fn aimed(yaw: f32) -> [HandPose; 2] {
 /// The pointer presses and releases among panel `page`'s events: true for a press, false for a release,
 /// with where.
 fn buttons(h: &HomeView<'_>, page: usize) -> Vec<(bool, Pos2)> {
-    h.events[page]
+    h.ring
+        .events(page)
         .iter()
         .filter_map(|e| match e {
             egui::Event::PointerButton { pressed, pos, .. } => Some((*pressed, *pos)),
@@ -69,8 +70,8 @@ fn the_pointer_lands_on_the_panel_in_front_and_clicks_it() {
     let t = open(&mut h, Instant::now());
     let front = h.home.front;
     assert_eq!(PAGES[front], Page::Settings);
-    assert!(matches!(h.pointer.at(), Some((page, _)) if page == front), "pointing ahead: the front panel");
-    assert!(h.events[front].iter().any(|e| matches!(e, egui::Event::PointerMoved(_))));
+    assert!(matches!(h.ring.pointer().at(), Some((page, _)) if page == front), "pointing ahead: the front panel");
+    assert!(h.ring.events(front).iter().any(|e| matches!(e, egui::Event::PointerMoved(_))));
     // The trigger pulled and let go: a click there, with a buzz.
     let mut pulled = Gamepad { right_trigger: 255, ..Default::default() };
     let asked = h.pad(&mut pulled, Some(HEAD), &ahead(), t, false);
@@ -95,7 +96,7 @@ fn a_hand_that_trembles_while_pulling_still_clicks() {
     let presses = buttons(&h, front);
     assert_eq!(presses.len(), 2);
     assert_eq!(presses[0].1, presses[1].1, "let go where it was pulled: a click");
-    assert!(!h.events[front].iter().skip_while(|e| !matches!(e, egui::Event::PointerButton { pressed: true, .. })).any(|e| matches!(e, egui::Event::PointerMoved(_))), "the pointer held still");
+    assert!(!h.ring.events(front).iter().skip_while(|e| !matches!(e, egui::Event::PointerButton { pressed: true, .. })).any(|e| matches!(e, egui::Event::PointerMoved(_))), "the pointer held still");
 }
 
 #[test]
@@ -120,7 +121,7 @@ fn the_other_hand_points_and_clicks_once_its_trigger_is_pulled() {
     let both = [ahead()[1], ahead()[1]];
     let mut pad = Gamepad { left_trigger: 255, ..Default::default() };
     let asked = h.pad(&mut pad, Some(HEAD), &both, t, false);
-    assert_eq!(h.pointer.hand(), LEFT_HAND);
+    assert_eq!(h.ring.pointer().hand(), LEFT_HAND);
     assert!(!asked.buzzes.is_empty(), "taking the pointer clicks where it points too");
 }
 
@@ -128,21 +129,21 @@ fn the_other_hand_points_and_clicks_once_its_trigger_is_pulled() {
 fn the_shoulders_turn_the_ring_round() {
     let mut h = home();
     let t = open(&mut h, Instant::now());
-    let before = h.quads[0].anchor.position.xyz();
+    let before = h.ring.rectangle(0).unwrap().position;
     let mut pad = Gamepad { buttons: button::LEFT_SHOULDER, ..Default::default() };
     h.pad(&mut pad, Some(HEAD), &ahead(), t, false);
     assert_eq!(PAGES[h.home.front], Page::Games);
     // On its way: part way round, then in front once the turn is done.
     let mut idle = Gamepad::default();
     h.pad(&mut idle, Some(HEAD), &ahead(), t + Duration::from_secs_f32(TURN_SECONDS / 2.0), false);
-    let halfway = h.quads[0].anchor.position.xyz();
+    let halfway = h.ring.rectangle(0).unwrap().position;
     assert!(halfway[0] > before[0] + 0.05 && halfway[0] < -0.05, "{before:?} -> {halfway:?}");
     let mut idle = Gamepad::default();
     h.pad(&mut idle, Some(HEAD), &ahead(), t + Duration::from_secs_f32(TURN_SECONDS + 0.05), false);
-    let settled = h.quads[0].anchor.position.xyz();
+    let settled = h.ring.rectangle(0).unwrap().position;
     assert!(settled[0].abs() < 1e-3, "Games came round to the front: {settled:?}");
     // Log left the right end and went round behind to the left.
-    assert!(h.quads[2].anchor.position.xyz()[0] < -0.5);
+    assert!(h.ring.rectangle(2).unwrap().position[0] < -0.5);
 }
 
 #[test]
@@ -163,8 +164,8 @@ fn b_closes_and_the_pointer_leaves() {
     let front = h.home.front;
     let mut pad = Gamepad { buttons: button::B, ..Default::default() };
     h.pad(&mut pad, Some(HEAD), &ahead(), t, false);
-    assert!(!h.is_open() && h.pointer.at().is_none());
-    assert!(matches!(h.events[front].last(), Some(egui::Event::PointerGone)));
+    assert!(!h.is_open() && h.ring.pointer().at().is_none());
+    assert!(matches!(h.ring.events(front).last(), Some(egui::Event::PointerGone)));
 }
 
 #[test]

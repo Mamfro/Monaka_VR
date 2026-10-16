@@ -24,6 +24,7 @@ pub mod hands;
 pub mod page;
 pub mod panels;
 pub mod pose;
+pub mod priority;
 pub mod reader;
 pub mod reticles;
 pub mod seqlock;

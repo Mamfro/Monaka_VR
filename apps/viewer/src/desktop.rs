@@ -1,4 +1,4 @@
-//! The 2D window ([`monaka_contract::manifest::DESKTOP_ARG`]): the run without a headset. The game
+//! The 2D window ([`monaka_core::home::DESKTOP_ARG`]): the run without a headset. The game
 //! renders as for the headset, from a still synthetic head; its left eye shows in a desktop
 //! window with the debug views drawn on it, and the debug menu and its panels float over it as
 //! windows used with the mouse ([`DebugViews::window_ui`]). The window never takes focus, so the
@@ -182,7 +182,7 @@ pub fn run(name: &ChannelName, seconds: u64, producer_wait: u64, captures: Optio
     println!("2D window: {frames} frames shown, {shown} pairs received");
     if closed {
         println!("2D window closed: VR stops");
-        return Ok(monaka_contract::manifest::CLOSED_BY_PLAYER);
+        return Ok(monaka_core::home::CLOSED_BY_PLAYER);
     }
     Ok(if shown > 0 { 0 } else { 2 })
 }

@@ -4,13 +4,29 @@ use monaka_contract::manifest::{HUD_SIZE, Kind, MONAKA, WORLD_HUD, opt};
 #[test]
 fn games_read_back() {
     let games = [
-        Listed { id: "dl1".into(), name: "Dying Light".into(), status: "Playable".into(), current: true, playing: false },
-        Listed { id: "tb".into(), name: "Tab\tbed".into(), status: "Alpha".into(), current: false, playing: true },
+        Listed { id: "dl1".into(), name: "Dying Light".into(), status: "Playable".into(), current: true, in_vr: false, running: true },
+        Listed { id: "tb".into(), name: "Tab\tbed".into(), status: "Alpha".into(), current: false, in_vr: true, running: false },
     ];
     let read = parse_games(&games_text(&games));
     assert_eq!(read[0], games[0]);
-    assert_eq!((read[1].name.as_str(), read[1].current, read[1].playing), ("Tab bed", false, true));
+    assert_eq!((read[1].name.as_str(), read[1].current, read[1].in_vr, read[1].running), ("Tab bed", false, true, false));
     assert!(parse_games("").is_empty());
+}
+
+#[test]
+fn a_status_reads_back_on_one_line_each() {
+    let status = Status { can_play: false, why: "Start the game first\nand load in.".into(), can_start_game: true, line: "Waiting for the game...".into() };
+    let read = parse_status(&status_text(&status));
+    assert_eq!(read, Status { why: "Start the game first and load in.".into(), ..status });
+    assert_eq!(parse_status(""), Status::default());
+}
+
+#[test]
+fn an_eye_size_reads_back_and_nothing_else_is_one() {
+    assert_eq!(parse_eye_size(&eye_size_text((2064, 2208))), Some((2064, 2208)));
+    for text in ["", "2064", "0 2208", "wide tall"] {
+        assert_eq!(parse_eye_size(text), None, "{text:?}");
+    }
 }
 
 #[test]

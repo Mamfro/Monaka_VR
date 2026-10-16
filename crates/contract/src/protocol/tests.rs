@@ -36,9 +36,11 @@ fn stamp_layout() {
 fn pose_block_layout() {
     assert_eq!(size_of::<Seq<HeadPose>>(), 128);
     assert_eq!(offset_of!(Seq<HeadPose>, value), 8);
-    assert_eq!(size_of::<PoseBlock>(), 4240);
+    assert_eq!(size_of::<PoseBlock>(), 4264);
     assert_eq!(offset_of!(PoseBlock, head), 16);
     assert_eq!(offset_of!(PoseBlock, pairs), 144);
+    // Appended in minor 1, where the record of minor 0 ended.
+    assert_eq!(offset_of!(PoseBlock, display), 4240);
 }
 
 #[test]

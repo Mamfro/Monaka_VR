@@ -5,9 +5,9 @@
 
 use crate::console_view::{self, ConsoleView};
 use crate::fake_vr::{self, FakeVr};
-use crate::menu::panel::{BACKGROUND, DIM, OUTLINE, TEXT, outline};
+use crate::menu::panel::{BACKGROUND, DIM, TEXT};
 use crate::stats::{self, StatsView};
-use egui::{CornerRadius, Frame, Margin, RichText, Vec2};
+use egui::{CornerRadius, Frame, Margin, RichText};
 
 #[cfg(test)]
 mod tests;
@@ -48,15 +48,6 @@ impl PanelId {
             PanelId::Stats => 400.0,
             PanelId::Console => 560.0,
             PanelId::FakeVr => 520.0,
-        }
-    }
-
-    /// Its image in the headset (pixels).
-    pub const fn pixels(self) -> [u32; 2] {
-        match self {
-            PanelId::Stats => [840, 1500],
-            PanelId::Console => [760, 1000],
-            PanelId::FakeVr => [700, 420],
         }
     }
 }
@@ -136,21 +127,13 @@ pub fn window_page(ui: &mut egui::Ui, id: PanelId, content: &Content<'_>, open: 
     layout(ui, id, content)
 }
 
-/// Panel `id` as the headset shows it: its title over its page, on the menu's background, used
-/// with the pointer as the 2D window's is with the mouse; what was asked on it.
-pub fn headset_page(ui: &mut egui::Ui, id: PanelId, content: &Content<'_>) -> Option<Asked> {
-    let inside = ui.available_size() - Vec2::splat(2.0 * (EDGE as f32 + OUTLINE));
-    Frame::new()
-        .fill(BACKGROUND)
-        .stroke(outline(false))
-        .corner_radius(CornerRadius::same(14))
-        .inner_margin(Margin::same(EDGE))
-        .show(ui, |ui| {
-            ui.set_min_size(inside);
-            ui.set_max_size(inside);
-            ui.label(RichText::new(id.label()).size(20.0).color(TEXT).strong());
-            ui.add_space(4.0);
-            layout(ui, id, content)
-        })
-        .inner
+/// The keys, at the foot of each panel on the debug ring.
+pub const KEYS: &str = "Point and pull the trigger.  Right stick: scroll.  LB/RB: panels.  B or hold Back: close.";
+
+/// Panel `id` as a page on the debug ring ([`crate::ring_page`]): its title over its page, which
+/// scrolls when it holds more than shows, outlined while in `front`; used with the pointer as the
+/// 2D window's is with the mouse. What was asked on it.
+pub fn ring_page(ui: &mut egui::Ui, id: PanelId, content: &Content<'_>, front: bool) -> Option<Asked> {
+    crate::ring_page::style(ui);
+    crate::ring_page::framed(ui, id.label(), front, KEYS, |ui| egui::ScrollArea::vertical().id_salt(id.label()).auto_shrink([false, false]).show(ui, |ui| layout(ui, id, content)).inner)
 }

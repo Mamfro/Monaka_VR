@@ -133,6 +133,12 @@ pub struct PairLoop<G: Game> {
     pub paused: Option<fn()>,
     /// OpenGL: frame warping for this run (the game draws one eye per frame), or none.
     pub warp: fn(&Start<'_, G>) -> Option<gl::GlWarp>,
+    /// OpenGL, both eyes side by side: each eye's depth with its pair for this run, or none.
+    pub depth: fn(&Start<'_, G>) -> Option<gl::GlPairDepth>,
+    /// The game presents each frame only once it has started drawing the next (its swap at the
+    /// start of the next frame's drawing): the frame presented is the one before the frame drawing,
+    /// whose ticket is already issued ([`monaka_core::ticket::Tickets::show_behind_drawing`]).
+    pub presents_behind_drawing: bool,
 }
 
 impl<G: Game> PairLoop<G> {
@@ -155,6 +161,8 @@ impl<G: Game> PairLoop<G> {
             rate: None,
             paused: None,
             warp: |_| None,
+            depth: |_| None,
+            presents_behind_drawing: false,
         }
     }
 }
@@ -184,6 +192,7 @@ pub(crate) struct Settings {
     pub flat: Option<fn() -> Option<Flat>>,
     pub rate: Option<fn()>,
     pub paused: Option<fn()>,
+    pub presents_behind_drawing: bool,
 }
 
 impl Settings {
@@ -247,12 +256,13 @@ fn install<G: PresentsPairs + EyeSite>(start: &mut Start<'_, G>) -> Result<(), L
         flat: game.flat,
         rate: game.rate,
         paused: game.paused,
+        presents_behind_drawing: game.presents_behind_drawing,
     });
     match output {
         // SAFETY: called at start, before the hooks are enabled.
         Output::D3D11 => unsafe { d3d11::install(start.hooks, channel)? },
         Output::D3D12 => d3d12::install(channel),
-        Output::OpenGl { side_by_side } => gl::install(channel, side_by_side, (game.warp)(start)),
+        Output::OpenGl { side_by_side } => gl::install(channel, side_by_side, (game.warp)(start), (game.depth)(start)),
         Output::SideBySide => side_by_side::install(channel),
     }
     (game.entry)(start)?;
@@ -497,7 +507,9 @@ impl Pairs {
     /// The frame being shown now: its pose, and how many built frames were waiting (1 or 2 when the
     /// pairing holds).
     pub(crate) fn shown(&self) -> (Option<HeadPose>, usize) {
-        let shown = self.tickets.locked().show();
+        let behind = self.settings().is_some_and(|s| s.presents_behind_drawing);
+        let mut tickets = self.tickets.locked();
+        let shown = if behind { tickets.show_behind_drawing() } else { tickets.show() };
         (shown.ticket.map(|ticket| ticket.pose), shown.waiting)
     }
 

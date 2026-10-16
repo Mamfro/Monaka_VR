@@ -138,6 +138,8 @@ pub struct Home {
     /// Who made its pack, as the pack says.
     pub about: About,
     pub games: Vec<Listed>,
+    /// Play as the window has it (the window's own view).
+    pub status: files::Status,
     /// Every setting's value as saved (the launcher's, then the player's changes here).
     pub values: Values,
     /// The Settings panel's tab.
@@ -162,15 +164,17 @@ pub struct Home {
     debug_menu: bool,
     select: Option<String>,
     play: bool,
+    start_game: bool,
     leave: bool,
-    /// The files' texts as last read ([`Home::sync`]): the manifest, the values, the games.
-    read: [String; 3],
+    /// The files' texts as last read ([`Home::sync`]): the manifest, the values, the games, the
+    /// status.
+    read: [String; 4],
     /// Panels whose image is out of date.
     stale: [bool; 3],
 }
 
 /// The files the home is made from, in [`Home::read`]'s order.
-const FILES: [&str; 3] = [files::MANIFEST_FILE, files::VALUES_FILE, files::GAMES_FILE];
+const FILES: [&str; 4] = [files::MANIFEST_FILE, files::VALUES_FILE, files::GAMES_FILE, files::STATUS_FILE];
 
 impl Home {
     /// The home of the run in `run_folder`, from the files the launcher left there (none: a viewer
@@ -180,6 +184,7 @@ impl Home {
             game: None,
             about: About::default(),
             games: Vec::new(),
+            status: files::Status::default(),
             values: Values::default(),
             tab: Shown::Main,
             log: LogTail::new(run_folder, None),
@@ -197,6 +202,7 @@ impl Home {
             debug_menu: false,
             select: None,
             play: false,
+            start_game: false,
             leave: false,
             read: Default::default(),
             stale: [true; 3],
@@ -235,6 +241,9 @@ impl Home {
         if texts[2] != self.read[2] {
             self.games = files::parse_games(&texts[2]);
         }
+        if texts[3] != self.read[3] {
+            self.status = files::parse_status(&texts[3]);
+        }
         self.read = texts;
         let tabs = self.tabs();
         if !tabs.contains(&self.tab) {
@@ -252,9 +261,14 @@ impl Home {
         self.stale[2] = true;
     }
 
-    /// The game that plays now, as the launcher listed it.
-    pub fn playing(&self) -> Option<&Listed> {
-        self.games.iter().find(|g| g.playing)
+    /// The game shown in the headset now, as the launcher listed it.
+    pub fn in_vr(&self) -> Option<&Listed> {
+        self.games.iter().find(|g| g.in_vr)
+    }
+
+    /// Whether the game shown here runs already: Play joins it (Attach) rather than starting it.
+    pub fn current_runs(&self) -> bool {
+        self.games.iter().any(|g| g.current && g.running)
     }
 
     /// Developer mode: the settings for testers show.
@@ -309,7 +323,7 @@ impl Home {
 
     /// Whether the settings waiting can be applied here: their game is the one that plays.
     pub fn can_apply(&self) -> bool {
-        self.game.is_some() && self.games.iter().any(|g| g.current && g.playing)
+        self.game.is_some() && self.games.iter().any(|g| g.current && g.in_vr)
     }
 
     /// The player asked for the settings waiting to apply now: the game's part of Monaka starts
@@ -365,6 +379,15 @@ impl Home {
 
     pub fn take_play(&mut self) -> bool {
         std::mem::take(&mut self.play)
+    }
+
+    /// The player asked to start the game shown through Steam.
+    pub fn ask_start_game(&mut self) {
+        self.start_game = true;
+    }
+
+    pub fn take_start_game(&mut self) -> bool {
+        std::mem::take(&mut self.start_game)
     }
 
     /// The player asked to leave VR: the headset view closes (the window stays).

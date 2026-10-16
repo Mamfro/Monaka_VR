@@ -8,10 +8,9 @@ fn pad_with(buttons: u16) -> Gamepad {
 }
 
 /// Feeds `buttons` at `ms` after `start`; the pad the game gets and what was asked.
-fn step(menu: &mut HeadsetMenu<'_>, buttons: u16, start: Instant, ms: u64) -> (Gamepad, Asked) {
+fn step(menu: &mut HeadsetMenu, buttons: u16, start: Instant, ms: u64) -> (Gamepad, Asked) {
     let mut pad = pad_with(buttons);
-    let head = Some(([0.0, 0.0, 0.0, 1.0], [0.0, 1.6, 0.0]));
-    let asked = menu.pad(&mut pad, head, start + Duration::from_millis(ms), &Status::default());
+    let asked = menu.pad(&mut pad, start + Duration::from_millis(ms), &Status::default());
     (pad, asked)
 }
 
@@ -63,22 +62,22 @@ fn an_open_menu_leaves_the_triggers_and_sticks_to_the_pointer_and_b_closes_it() 
     let status = Status { offered: Categories(u64::MAX), ..Status::default() };
     let now = Instant::now();
     let mut pulled = Gamepad { right_trigger: 255, thumb_ry: 20000, ..Gamepad::default() };
-    menu.pad(&mut pulled, None, now, &status);
+    menu.pad(&mut pulled, now, &status);
     assert_eq!((pulled.right_trigger, pulled.thumb_ry, menu.menu.tab), (255, 20000, 0), "the pointer's, not a tab");
-    menu.pad(&mut pad_with(button::B), None, now + Duration::from_millis(50), &status);
+    menu.pad(&mut pad_with(button::B), now + Duration::from_millis(50), &status);
     assert!(!menu.open());
 }
 
 #[test]
-fn lb_rb_slide_the_row() {
+fn lb_rb_turn_the_ring() {
     let mut menu = HeadsetMenu::new(DXGI_FORMAT_R8G8B8A8_UNORM);
     let status = Status::default();
     let now = Instant::now();
     menu.menu.open = true;
-    let asked = menu.pad(&mut pad_with(button::RIGHT_SHOULDER), None, now, &status);
-    assert_eq!(asked.focus_step, 1);
-    let asked = menu.pad(&mut pad_with(button::RIGHT_SHOULDER), None, now + Duration::from_millis(50), &status);
-    assert_eq!(asked.focus_step, 0, "held: no new step");
-    let asked = menu.pad(&mut pad_with(button::RIGHT_SHOULDER | button::LEFT_SHOULDER), None, now + Duration::from_millis(75), &status);
-    assert_eq!(asked.focus_step, -1, "LB: back a step");
+    let asked = menu.pad(&mut pad_with(button::RIGHT_SHOULDER), now, &status);
+    assert_eq!(asked.turn, 1);
+    let asked = menu.pad(&mut pad_with(button::RIGHT_SHOULDER), now + Duration::from_millis(50), &status);
+    assert_eq!(asked.turn, 0, "held: no new step");
+    let asked = menu.pad(&mut pad_with(button::RIGHT_SHOULDER | button::LEFT_SHOULDER), now + Duration::from_millis(75), &status);
+    assert_eq!(asked.turn, -1, "LB: back a step");
 }

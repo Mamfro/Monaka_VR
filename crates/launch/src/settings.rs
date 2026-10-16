@@ -6,7 +6,7 @@
 use crate::games::Values;
 use monaka_contract::manifest::MONAKA;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Default, Debug, PartialEq)]
 pub struct Settings {
@@ -38,12 +38,20 @@ impl Settings {
         settings
     }
 
+    /// Writes them to their file whole: through a file beside it, renamed over it, so a save cut
+    /// short (the PC off mid-write) leaves the last one.
     pub fn save(&self) -> Result<(), String> {
         let file = self.file.as_ref().ok_or("APPDATA is not set")?;
         if let Some(folder) = file.parent() {
             std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
         }
-        std::fs::write(file, self.text()).map_err(|e| format!("{}: {e}", file.display()))
+        let part = file.with_extension("txt.part");
+        std::fs::write(&part, self.text()).and_then(|()| std::fs::rename(&part, file)).map_err(|e| format!("{}: {e}", file.display()))
+    }
+
+    /// The file they are kept in.
+    pub fn file(&self) -> Option<&Path> {
+        self.file.as_deref()
     }
 
     /// Values for a run of `game`: its own (all defaults when none were saved) and Monaka's own

@@ -20,6 +20,7 @@ pub mod check;
 pub mod games;
 pub mod headset;
 pub mod packs;
+pub mod report;
 pub mod run_log;
 pub mod session;
 pub mod settings;

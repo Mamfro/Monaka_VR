@@ -152,12 +152,18 @@ impl<'s> HandPanel<'s> {
         }
         let (Some(reader), Some(texture), Some(swapchain)) = (&mut self.reader, &self.texture, &self.swapchain) else { return };
         match reader.read_one(context, texture, self.seen) {
-            Ok(Some(pair)) => {
-                self.seen = pair.sequence;
-                let _ = swapchain.fill(|image| {
-                    d3d::copy_texture(context, image, texture);
-                });
-            }
+            Ok(Some(pair)) => match swapchain.fill(|image| d3d::copy_texture(context, image, texture)) {
+                // Shown once an image went in: a swapchain with none released is a layer the
+                // runtime refuses.
+                Ok(()) => self.seen = pair.sequence,
+                Err(e) => {
+                    println!("HUD panel {} could not be shown ({e}); made again", self.piece);
+                    self.reader = None;
+                    self.texture = None;
+                    self.swapchain = None;
+                    self.seen = 0;
+                }
+            },
             Ok(None) => {}
             Err(e) => {
                 println!("HUD panel {} lost: {e}", self.piece);

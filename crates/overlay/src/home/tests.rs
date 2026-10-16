@@ -31,8 +31,8 @@ pub(crate) fn run_folder(name: &str, saved: &Values) -> PathBuf {
     std::fs::write(folder.join(MANIFEST_FILE), pack::text(std::slice::from_ref(&GAME), "Someone", "", "1.2.3", &Needs::NONE)).unwrap();
     std::fs::write(folder.join(VALUES_FILE), values_text(&[&GAME, &MONAKA], saved)).unwrap();
     let games = [
-        Listed { id: "g".into(), name: "The Game".into(), status: "Beta".into(), current: true, playing: true },
-        Listed { id: "o".into(), name: "Other".into(), status: "Alpha".into(), current: false, playing: false },
+        Listed { id: "g".into(), name: "The Game".into(), status: "Beta".into(), current: true, in_vr: true, running: true },
+        Listed { id: "o".into(), name: "Other".into(), status: "Alpha".into(), ..Listed::default() },
     ];
     std::fs::write(folder.join(GAMES_FILE), games_text(&games)).unwrap();
     folder
@@ -172,7 +172,7 @@ fn the_home_takes_what_the_window_changes() {
     assert_eq!(home.game.map(|g| g.id), Some("o"));
     assert!(home.values.switch(&OTHER, "shade"));
     assert_eq!(home.tab, Shown::Rendering, "a tab the new game lacks falls back to its first");
-    assert!(home.playing().is_none() && !home.can_apply());
+    assert!(home.in_vr().is_none() && !home.can_apply());
     let _ = std::fs::remove_dir_all(&folder);
 }
 
@@ -184,7 +184,8 @@ fn a_home_with_no_files_yet_is_empty_until_they_come() {
     let mut home = Home::load(Some(&folder));
     assert!(home.game.is_none() && home.games.is_empty());
     let filled = run_folder("empty-filled", &Values::default());
-    for name in FILES {
+    // A run's folder has no status (that is the window's own view's).
+    for name in FILES.into_iter().filter(|name| filled.join(name).exists()) {
         std::fs::copy(filled.join(name), folder.join(name)).unwrap();
     }
     assert!(home.sync(&folder));
@@ -196,7 +197,7 @@ fn a_home_with_no_files_yet_is_empty_until_they_come() {
 #[test]
 fn with_no_game_playing_a_change_waits_for_nothing() {
     let folder = run_folder("idle", &Values::default());
-    let games = [Listed { id: "g".into(), name: "The Game".into(), status: "Beta".into(), current: true, playing: false }];
+    let games = [Listed { id: "g".into(), name: "The Game".into(), status: "Beta".into(), current: true, ..Listed::default() }];
     std::fs::write(folder.join(GAMES_FILE), games_text(&games)).unwrap();
     let mut home = Home::load(Some(&folder));
     let hud = home.settings().into_iter().find(|s| s.opt.id == HUD_SIZE.id).unwrap();

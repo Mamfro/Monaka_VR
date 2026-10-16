@@ -102,6 +102,19 @@ pub struct GlDepth {
     pub multisampled: bool,
 }
 
+/// Each eye's depth with a side-by-side pair, for the headset: when it shows a pair again (the game
+/// behind the headset's refresh), the headset's runtime moves it for the eyes' movement as well as
+/// turning it, so near things (a table leg) land where they should instead of showing twice.
+#[derive(Clone, Copy, Debug)]
+pub struct GlPairDepth {
+    /// The game's scene depth now, behind the frame being presented: both eyes' at their place in
+    /// the window, as the colour.
+    pub depth: fn() -> Option<GlDepth>,
+    /// The near plane the frame was drawn with (metres): the depth is standard (0 at the near
+    /// plane), its far plane infinite.
+    pub near: fn() -> Option<f32>,
+}
+
 /// The part of a depth texture `depth_width` wide holding the eye at `region` of a frame
 /// `frame_width` wide: the same part when the texture covers the frame (at least three quarters of
 /// its width: a render scale below one leaves it smaller), else the whole texture (rendered at the
@@ -140,6 +153,11 @@ struct State {
     side_by_side: bool,
     /// Frame warping: one eye per frame, the other warped ([`GlWarp`]).
     warp: Option<GlWarp>,
+    /// Each eye's depth with its pair ([`GlPairDepth`]).
+    pair_depth: Option<GlPairDepth>,
+    /// Pairs published with their depth, and the depth copies that failed.
+    with_depth: u64,
+    pair_depth_failures: u64,
     channel: ChannelName,
     /// Frame warping's thread, started at the first frame.
     worker: Option<Worker>,
@@ -172,13 +190,20 @@ unsafe impl Send for Cell {}
 
 static STATE: Mutex<Cell> = Mutex::new(Cell(None));
 
-pub(crate) fn install(channel: ChannelName, side_by_side: bool, warp: Option<GlWarp>) {
+pub(crate) fn install(channel: ChannelName, side_by_side: bool, warp: Option<GlWarp>, pair_depth: Option<GlPairDepth>) {
     if warp.is_some() {
         log!("frame warping: one eye per frame, the other warped from it with its depth");
+    }
+    let pair_depth = pair_depth.filter(|_| side_by_side && warp.is_none());
+    if pair_depth.is_some() {
+        log!("each eye's depth goes to the headset with its pair");
     }
     let state = State {
         side_by_side,
         warp,
+        pair_depth,
+        with_depth: 0,
+        pair_depth_failures: 0,
         channel: channel.clone(),
         worker: None,
         depth_failures: 0,
@@ -368,8 +393,35 @@ impl State {
             self.posed += 1;
         }
         self.waiting_max = self.waiting_max.max(waiting);
-        match writer.publish_eyes(&context, [(&eyes[0].0, eyes[0].1), (&eyes[1].0, eyes[1].1)], monaka_channel::tick()) {
+        // Each eye's depth, from its half of the scene's depth (a flat frame goes without).
+        let depth = match (self.pair_depth, flat, self.bridge.as_mut()) {
+            (Some(source), None, Some(bridge)) => {
+                let copied = (source.depth)().zip((source.near)()).ok_or("no scene depth".to_owned()).and_then(|(d, near)| {
+                    let texture = bridge.capture_depth(d.texture, (d.width, d.height), d.multisampled, [0.0, 0.0, 1.0, 1.0], width, height).map_err(|e| e.to_string())?.clone();
+                    Ok((texture, near))
+                });
+                match copied {
+                    Ok(copied) => Some(copied),
+                    Err(e) => {
+                        if self.pair_depth_failures < 5 {
+                            log!("frame {frame}: each eye's depth: {e}; the pair goes without");
+                        }
+                        self.pair_depth_failures += 1;
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        let Some(writer) = self.writer.get(&device, eye_width, eye_height, format).ready(|_| {}) else { return };
+        let depth = depth.as_ref().map(|(texture, near)| monaka_channel::fence11::Depth {
+            eyes: [0, 1].map(|eye| monaka_channel::fence11::EyeDepth { texture, rect: Some([eye * eye_width, 0, eye_width, eye_height]) }),
+            params: monaka_contract::protocol::DepthParams::new(*near, f32::INFINITY, false),
+        });
+        let sent_depth = depth.is_some();
+        match writer.publish_with_depth(&context, [(&eyes[0].0, eyes[0].1), (&eyes[1].0, eyes[1].1)], depth, monaka_channel::tick()) {
             Ok(true) => {
+                self.with_depth += u64::from(sent_depth);
                 self.pairs += 1;
                 self.flat_pairs += u64::from(flat.is_some());
                 self.window_pairs += 1;
@@ -382,11 +434,12 @@ impl State {
         let elapsed = start.elapsed().as_secs_f64();
         if elapsed >= 10.0 {
             log!(
-                "{:.1} pairs/s over {elapsed:.0} s ({} frames, {} failures, {} with poses, at most {} built frames waiting)",
+                "{:.1} pairs/s over {elapsed:.0} s ({} frames, {} failures, {} with poses, {} with depth, at most {} built frames waiting)",
                 self.window_pairs as f64 / elapsed,
                 frames(),
                 self.failures,
                 self.posed,
+                self.with_depth,
                 self.waiting_max,
             );
             if let Some(rate) = PAIRS.settings().and_then(|s| s.rate) {

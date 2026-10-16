@@ -182,6 +182,12 @@ pub fn depth_image(image: VkImage) -> Option<(i32, (u32, u32))> {
     with_record(|r| r.depths[..r.depth_count as usize].iter().find(|d| d.image == image).map(|d| (d.format, (d.width, d.height))))?
 }
 
+/// Whether the hooks have seen the game make its device (this copy's or an earlier one's): not
+/// when it was made before any copy joined, or is still to be made.
+pub fn device_seen() -> bool {
+    with_record(|r| r.device_state != 0).unwrap_or(false)
+}
+
 /// Why nothing can be shared yet, for the summary.
 pub fn state() -> String {
     with_record(|r| match r.device_state {

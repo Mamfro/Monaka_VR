@@ -1112,13 +1112,10 @@ pub const DIAGNOSTIC_MARKER: &str = "diagnostic-logging.on";
 
 /// The headset's debug menu (Back held), for chasing a bug with a tester. The window hides it
 /// until its version is clicked 5 times; a build tree always has it. The launcher gives the viewer
-/// [`DEBUG_MENU_ARG`] for it.
+/// its switch for it (`monaka_core::home::DEBUG_MENU_ARG`).
 pub const DEBUG_MENU: Opt = opt("debug_menu", "Debug menu", "Back held opens it in the headset.", Kind::Switch { default: false })
     .on(Shown::Monaka)
     .launcher();
-
-/// The viewer's switch for [`DEBUG_MENU`]: without it Back held is plain Back.
-pub const DEBUG_MENU_ARG: &str = "--debug-menu";
 
 /// The run-folder file whose presence tells the producer the debug menu is on: it opens the probe
 /// console then (`monaka_producer::console`).
@@ -1141,31 +1138,11 @@ pub const MENU_PICK: &str = "menu_pick";
 /// default: on the hand as it is), for a game whose stereo method shifts near things.
 pub const PANEL_NEAREST: &str = "panel_nearest";
 
-/// The viewer's switch for the 2D window: the run shown in a desktop window with the debug menu
-/// and its panels, no headset (the launcher's "Debug without VR").
-pub const DESKTOP_ARG: &str = "--desktop";
-
-/// The viewer's exit code when the player closed the 2D window: the session stops, as for Stop VR
-/// (any other end while the game runs starts the run again).
-pub const CLOSED_BY_PLAYER: i32 = 10;
-
 /// The options the viewer acts on the moment they change (by id): changed in the headset's home,
 /// they apply at once; any other applies with the next launch. Their help is left out: a game's own
 /// words for one (its menus by reach) are not the viewer's to know.
 pub const LIVE: &[Opt] = &[CONTROLLER_SMOOTHING, menu_reach(""), MENU_REACH_DEPTH, CONTROLLER_PROXY];
 
-
-/// The viewer's line asking for the settings changed in the headset to apply now: the launcher
-/// starts the producer again with them, the game and the viewer running on.
-pub const APPLY_LINE: &str = "Monaka apply";
-
-/// How a viewer line starts when the player changed a [`LIVE`] option in the headset, followed by
-/// ` id=value`: the launcher saves it as the window would.
-pub const SETTING_LINE: &str = "Monaka setting:";
-
-/// How a viewer line starts when the run cannot go on, followed by why: the launcher shows that as
-/// the run's failure, not the viewer's exit code.
-pub const FAILURE_LINE: &str = "Monaka failure:";
 
 pub const DISABLE_VIEW_BOBBING: Opt = opt(
     "disable_view_bobbing",

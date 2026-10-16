@@ -199,6 +199,8 @@ pub enum Event {
     InstanceLossPending,
     /// The room's origin is about to move (the player recentred).
     ReferenceSpaceChanging,
+    /// The controllers in use changed (another kind picked up, or hands in their place).
+    InteractionProfileChanged,
     Other,
 }
 
@@ -539,6 +541,7 @@ impl Instance {
             }
             sys::TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING => Event::InstanceLossPending,
             sys::TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING => Event::ReferenceSpaceChanging,
+            sys::TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED => Event::InteractionProfileChanged,
             _ => Event::Other,
         }))
     }
@@ -1151,17 +1154,25 @@ impl Swapchain<'_> {
         }
     }
 
-    /// Acquires the next image, waits for it, lets `fill` write it, and releases it.
+    /// Acquires the next image, waits for it, lets `fill` write it, and releases it. The wait has
+    /// a limit ([`IMAGE_WAIT`]): a compositor that never hands the image back fails the fill (the
+    /// caller drops what it was for) rather than stopping the viewer for good.
     pub fn fill(&self, fill: impl FnOnce(&ID3D11Texture2D)) -> Result<()> {
         let fns = &self.instance.fns;
         let acquire = sys::BaseInfo { ty: sys::TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO, next: std::ptr::null() };
-        let wait = sys::SwapchainImageWaitInfo { ty: sys::TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, next: std::ptr::null(), timeout: sys::INFINITE_DURATION };
+        let wait = sys::SwapchainImageWaitInfo { ty: sys::TYPE_SWAPCHAIN_IMAGE_WAIT_INFO, next: std::ptr::null(), timeout: IMAGE_WAIT };
         let release = sys::BaseInfo { ty: sys::TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO, next: std::ptr::null() };
         let mut index = 0;
         // SAFETY: typed infos on a swapchain we own; the index is checked before use.
         unsafe {
             check((fns.AcquireSwapchainImage)(self.handle, &acquire, &mut index), "xrAcquireSwapchainImage")?;
-            check((fns.WaitSwapchainImage)(self.handle, &wait), "xrWaitSwapchainImage")?;
+            // Timing out leaves the image acquired: it cannot be released before a wait succeeds,
+            // so this swapchain is done with; the error says so.
+            let waited = (fns.WaitSwapchainImage)(self.handle, &wait);
+            if waited == sys::TIMEOUT_EXPIRED {
+                return Err(Error::Call { call: "xrWaitSwapchainImage (timed out)", result: waited });
+            }
+            check(waited, "xrWaitSwapchainImage")?;
         }
         let image = self.images.get(index as usize).ok_or(Error::Unsupported("swapchain image index out of range"))?;
         fill(image);
@@ -1178,7 +1189,11 @@ impl Drop for Swapchain<'_> {
     }
 }
 
+/// How long [`Swapchain::fill`] waits for an image (nanoseconds).
+const IMAGE_WAIT: sys::Duration = 1_000_000_000;
+
 /// One eye of a projection layer.
+#[derive(Clone, Copy)]
 pub struct ProjectionView<'a> {
     pub pose: Posef,
     pub fov: Fovf,
@@ -1190,6 +1205,7 @@ pub struct ProjectionView<'a> {
 
 /// The depth beside one eye's image (`XR_KHR_composition_layer_depth`), over a depth range of 0
 /// to 1.
+#[derive(Clone, Copy)]
 pub struct DepthView<'a> {
     /// A depth swapchain ([`Session::create_depth_swapchain`]).
     pub swapchain: &'a Swapchain<'a>,
@@ -1202,6 +1218,7 @@ pub struct DepthView<'a> {
 }
 
 /// A composition layer for [`Session::end_frame`].
+#[derive(Clone, Copy)]
 pub enum Layer<'a> {
     /// Eye images with the poses they were rendered from; the runtime reprojects them.
     Projection { space: &'a Space<'a>, views: [ProjectionView<'a>; 2] },

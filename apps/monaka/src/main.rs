@@ -21,14 +21,15 @@ mod reload;
 mod screenshot;
 
 use eframe::egui::{self, Align, Button, Color32, Layout, RichText, ScrollArea, Sense, Stroke, TextEdit, ViewportCommand};
-use monaka_contract::manifest::{CLOSED_BY_PLAYER, DEBUG_MENU, DEV_MODE, DIAGNOSTIC_LOGGING, DIAGNOSTIC_MARKER, Manifest, SETTING_LINE};
+use monaka_contract::manifest::{DEBUG_MENU, DEV_MODE, DIAGNOSTIC_LOGGING, DIAGNOSTIC_MARKER, Manifest};
+use monaka_core::home::{CLOSED_BY_PLAYER, SETTING_LINE};
 use monaka_contract::pack;
 use monaka_core::home;
 use monaka_launch::headset::Headset;
 use monaka_launch::games::{self, Game, Launch, MONAKA, Shown, TABS};
 use monaka_launch::session::{self, Console, Event, Shows, State, Stop};
 use monaka_launch::settings::Settings;
-use monaka_launch::{Paths, packs};
+use monaka_launch::{Paths, packs, report};
 use pc::Pc;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
@@ -40,8 +41,11 @@ const RELEASES: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/releases");
 const STEAMVR_APP: u32 = 250820;
 /// Checks SteamVR and the game this often.
 const CHECK_EVERY: Duration = Duration::from_millis(1500);
-/// The details log is emptied past this many bytes.
+/// The details log is cut to its newest half past this many bytes.
 const DETAILS_MAX: usize = 200_000;
+/// Settings changed again within this of a save are saved once it has passed (a slider dragged
+/// writes once, not at every step).
+const SAVE_GAP: Duration = Duration::from_millis(400);
 /// The left column (the games).
 const LEFT_WIDTH: f32 = 250.0;
 /// The column of Play and the line under it.
@@ -145,6 +149,8 @@ struct App {
     headset_failed: Option<Instant>,
     closing: bool,
     checks: Checks,
+    /// The games whose process runs, as last checked (for the headset's list).
+    games_up: Vec<&'static str>,
     checked: Instant,
     state_line: String,
     details: String,
@@ -152,6 +158,9 @@ struct App {
     log_open: bool,
 
     dialog: Option<Dialog>,
+    /// When the settings were last saved, and whether a change waits to be.
+    saved_at: Option<Instant>,
+    unsaved: bool,
     /// Packs made for a newer Monaka told about this run.
     told_too_new: Vec<String>,
     /// `--screenshot`: where the picture goes, and the frames drawn so far.
@@ -204,11 +213,14 @@ impl App {
             headset_failed: None,
             closing: false,
             checks: Checks { game_installed: true, ..Default::default() },
+            games_up: Vec::new(),
             checked: Instant::now(),
             state_line: String::new(),
             details: String::new(),
             log_open: false,
             dialog: None,
+            saved_at: None,
+            unsaved: false,
             told_too_new: Vec::new(),
             screenshot: screenshot.map(|r| (r.file, 0)),
             reload_watch,
@@ -236,7 +248,7 @@ impl App {
         self.selected = index.min(self.list.len().saturating_sub(1));
         if let Some(game) = self.game() {
             self.settings.selected = Some(game.id.to_owned());
-            let _ = self.settings.save();
+            self.settings_changed();
         }
         self.refresh_checks();
     }
@@ -361,6 +373,13 @@ impl App {
         let running = self.pc.running(&executables, self.headset.as_ref().map(Headset::pid));
         self.checks.steamvr_up = running.steamvr;
         self.checks.other_session = self.running.is_none() && running.viewer;
+        // Every game's, for the headset's list; only while it shows.
+        if self.headset.is_some() {
+            let all: Vec<(&'static str, Vec<String>)> = self.list.iter().map(|g| (g.id, g.runs_as(&self.settings.values(g.id)))).collect();
+            let names: Vec<&str> = all.iter().flat_map(|(_, names)| names.iter().map(String::as_str)).collect();
+            let found = self.pc.processes(&names);
+            self.games_up = all.iter().filter(|(_, names)| names.iter().any(|n| found.iter().any(|f| f.eq_ignore_ascii_case(n)))).map(|(id, _)| *id).collect();
+        }
         let Some(game) = game else { return };
         self.checks.game_up = !executables.is_empty() && running.game;
         // A pack for any game knows no Steam app.
@@ -386,7 +405,7 @@ impl App {
         let paths = self.paths.clone();
         let session_stop = stop.clone();
         let ctx = self.ctx.clone();
-        self.details.clear();
+        self.detail(&format!("Starting {}", game.name));
         self.run_folder = None;
         std::thread::spawn(move || {
             session::run(game, &values, &paths, Console::Hidden, shows, linked, &session_stop, &mut |event| {
@@ -479,6 +498,14 @@ impl App {
                 self.stop_session();
                 continue;
             }
+            if said == home::START_GAME_LINE {
+                self.start_game();
+                continue;
+            }
+            // Closing the home matters only to a run, to bring its game to the front.
+            if said == home::HOME_CLOSED_LINE && self.running.as_ref().is_none_or(|r| r.to_headset.is_none()) {
+                continue;
+            }
             match self.running.as_ref().and_then(|r| r.to_headset.as_ref()) {
                 Some(send) => {
                     let _ = send.send(line);
@@ -508,16 +535,24 @@ impl App {
             pack::text(std::slice::from_ref(g.manifest), &about.author, &about.source, &about.version, &pack::Needs::NONE)
         });
         let owners: Vec<&Manifest> = game.map(|g| g.manifest).into_iter().chain([&MONAKA]).collect();
-        let playing = self.running.as_ref().map(|r| r.game);
+        let in_vr = self.running.as_ref().filter(|r| r.to_headset.is_some()).map(|r| r.game);
         let games: Vec<home::Listed> = self
             .list
             .iter()
             .enumerate()
-            .map(|(i, g)| home::Listed { id: g.id.to_owned(), name: g.name.to_owned(), status: g.status.label().to_owned(), current: i == self.selected, playing: playing == Some(g.id) })
+            .map(|(i, g)| home::Listed { id: g.id.to_owned(), name: g.name.to_owned(), status: g.status.label().to_owned(), current: i == self.selected, in_vr: in_vr == Some(g.id), running: self.games_up.contains(&g.id) })
             .collect();
         let values = home::values_text(&owners, &values);
+        let (can_play, why) = self.play_line();
+        let idle = self.running.is_none();
+        let status = home::Status {
+            can_play: can_play && idle,
+            why: if idle { why.to_owned() } else { String::new() },
+            can_start_game: game.is_some_and(|g| self.can_start_game(g)),
+            line: if idle { String::new() } else { self.state_line.clone() },
+        };
         if let Some(headset) = &mut self.headset {
-            headset.show(manifest, values, home::games_text(&games));
+            headset.show(manifest, values, home::games_text(&games), home::status_text(&status));
         }
     }
 
@@ -530,12 +565,17 @@ impl App {
     }
 
     fn detail(&mut self, line: &str) {
-        // Keep the log from growing without end.
-        if self.details.len() > DETAILS_MAX {
-            self.details.clear();
-        }
         self.details.push_str(line);
         self.details.push('\n');
+        // Kept from growing without end: the oldest half goes, from a line's start.
+        if self.details.len() > DETAILS_MAX {
+            let mut cut = self.details.len() - DETAILS_MAX / 2;
+            while !self.details.is_char_boundary(cut) {
+                cut += 1;
+            }
+            let cut = self.details[cut..].find('\n').map_or(self.details.len(), |at| cut + at + 1);
+            self.details.drain(..cut);
+        }
     }
 
     fn session_events(&mut self) {
@@ -589,14 +629,14 @@ impl App {
         let monakas = MONAKA.option(id).is_some() && game.option(id).is_none();
         let saved = if monakas { &mut self.settings.monaka } else { self.settings.values.entry(game.id.to_owned()).or_default() };
         saved.set(id, value);
-        let _ = self.settings.save();
+        self.settings_changed();
     }
 
     /// The game's options back to their defaults (forgotten in the settings).
     fn reset_defaults(&mut self) {
         let Some(game) = self.game() else { return };
         self.settings.values.remove(game.id);
-        let _ = self.settings.save();
+        self.settings_changed();
         self.say(&format!("{}: options back to their defaults.", game.name), false);
     }
 
@@ -606,6 +646,52 @@ impl App {
         let (Some(_), Some(folder)) = (&self.running, &self.run_folder) else { return };
         let marker = folder.join(DIAGNOSTIC_MARKER);
         let _ = if self.settings.monaka.switch(&MONAKA, DIAGNOSTIC_LOGGING.id) { std::fs::write(&marker, "") } else { std::fs::remove_file(&marker) };
+    }
+
+    /// The settings changed: saved now, or (changed again soon after a save) once [`SAVE_GAP`]
+    /// has passed ([`App::save_pending`]).
+    fn settings_changed(&mut self) {
+        if self.saved_at.is_some_and(|at| at.elapsed() < SAVE_GAP) {
+            self.unsaved = true;
+            self.ctx.request_repaint_after(SAVE_GAP);
+        } else {
+            self.save_settings();
+        }
+    }
+
+    /// Saves a change that waited, once it is time (`now`: whatever the time, as the window closes).
+    fn save_pending(&mut self, now: bool) {
+        if self.unsaved && (now || self.saved_at.is_none_or(|at| at.elapsed() >= SAVE_GAP)) {
+            self.save_settings();
+        }
+    }
+
+    fn save_settings(&mut self) {
+        self.unsaved = false;
+        self.saved_at = Some(Instant::now());
+        if let Err(why) = self.settings.save() {
+            self.say(&format!("Your settings could not be saved: {why}"), true);
+        }
+    }
+
+    /// Saves a report of the run (the latest of the game shown when none runs) into the runs'
+    /// `reports` folder, and opens that folder.
+    fn save_report(&mut self) {
+        let run = self.run_folder.clone().or_else(|| self.game().and_then(|g| report::latest_run(&self.paths.runs, g.run_prefix)));
+        let into = self.paths.runs.join("reports");
+        if let Err(e) = std::fs::create_dir_all(&into) {
+            return self.say(&format!("Report not saved: cannot make {}: {e}", into.display()), true);
+        }
+        match report::save(&report::Report { run: run.as_deref(), settings: self.settings.file(), details: &self.details }, &into) {
+            Ok(zip) => {
+                let name = zip.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                self.say(&format!("Report saved as {name}. Attach it to your bug report."), true);
+                if let Err(why) = self.pc.open(&into.to_string_lossy()) {
+                    self.say(&why, true);
+                }
+            }
+            Err(why) => self.say(&format!("Report not saved: {why}"), true),
+        }
     }
 
     fn open_logs(&mut self) {
@@ -717,7 +803,7 @@ impl App {
         }
         self.debug_unlocked = true;
         self.settings.monaka.set(DEBUG_MENU.id, "1");
-        let _ = self.settings.save();
+        self.settings_changed();
         self.say("Debug menu on (Monaka tab).", false);
     }
 
@@ -839,14 +925,25 @@ impl App {
                 (false, true) => (off, "Game not running"),
             };
             ready(ui, line.0, line.1);
-            let can_start_game = idle && !checks.game_up && checks.game_installed && !game.any_game();
-            if can_start_game && ui.add(Button::new("Start game").small()).clicked() {
-                match self.pc.launch_steam_game(game.steam_app) {
-                    Ok(()) => self.say(&format!("Starting {} through Steam...", game.name), false),
-                    Err(why) => self.say(&why, true),
-                }
+            if self.can_start_game(game) && ui.add(Button::new("Start game").small()).clicked() {
+                self.start_game();
             }
         });
+    }
+
+    /// Whether `game` can be started through Steam from here: nothing runs, it is installed and
+    /// not running, and it is one Steam game.
+    fn can_start_game(&self, game: &Game) -> bool {
+        self.running.is_none() && !self.checks.game_up && self.checks.game_installed && !game.any_game()
+    }
+
+    /// Starts the game shown through Steam.
+    fn start_game(&mut self) {
+        let Some(game) = self.game().filter(|g| self.can_start_game(g)) else { return };
+        match self.pc.launch_steam_game(game.steam_app) {
+            Ok(()) => self.say(&format!("Starting {} through Steam...", game.name), false),
+            Err(why) => self.say(&why, true),
+        }
     }
 
     /// The bottom line: the latest message, opening the logs' folder and the details log.
@@ -858,6 +955,9 @@ impl App {
                 }
                 if ui.button("Open logs").clicked() {
                     self.open_logs();
+                }
+                if ui.button("Save report").on_hover_text("A zip of the latest run's logs and your settings, to send with a bug report").clicked() {
+                    self.save_report();
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui.add(egui::Label::new(RichText::new(self.state_line.as_str()).weak()).truncate());
@@ -941,6 +1041,9 @@ impl App {
         }
         let running = self.running.is_some();
         let changed = area.show(ui, |ui| options::show(ui, &mut self.settings, game, &rows, self.tab, running)).inner;
+        if changed.is_some() {
+            self.settings_changed();
+        }
         if changed == Some(DIAGNOSTIC_LOGGING.id) {
             self.mark_diagnostics();
         }
@@ -1011,6 +1114,7 @@ impl App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.headset_lines();
+        self.save_pending(false);
         self.session_events();
         self.reload_asked();
         if self.checked.elapsed() >= CHECK_EVERY {
@@ -1019,6 +1123,9 @@ impl eframe::App for App {
         }
         self.show_in_headset();
         ctx.request_repaint_after(CHECK_EVERY);
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.save_pending(true);
+        }
         if ctx.input(|i| i.viewport().close_requested()) && self.running.is_some() {
             // Stop the producer before the window goes; the Stopped event closes it.
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);

@@ -1,24 +1,21 @@
 //! Monaka's home in the headset ([`monaka_overlay::home`]): the Games, Settings and Log panels,
 //! opened and closed by holding Start for half a second (a short press still reaches the game).
-//! They stand round where the head was when it opened, the Settings panel in front; LB and RB turn
-//! the ring, the panels going round to their new places. A controller points at them
-//! ([`crate::pointer`]), B closes. While open the home takes the pad (the game gets it idle). A setting changed
+//! They stand on a ring round where the head was when it opened ([`crate::ring`], as the debug
+//! menu's), the Settings panel in front; LB and RB turn the ring, the panels going round to their
+//! new places. A controller points at them, B closes. While open the home takes the pad (the game gets it idle). A setting changed
 //! here is printed as a [`SETTING_LINE`] for the launcher to save, and acted on at once when the
 //! viewer owns it.
 
 use crate::debug_menu::Buzz;
-use crate::menu_quad::{self, MenuQuad};
-use crate::pointer::{Pointer, Target};
+use crate::menu_quad;
+use crate::ring::RingView;
 use monaka_contract::gamepad::{Gamepad, button};
-use monaka_contract::manifest::SETTING_LINE;
-use monaka_core::home::{PLAY_LINE, SELECT_LINE};
+use monaka_core::home::{HOME_CLOSED_LINE, PLAY_LINE, SELECT_LINE, SETTING_LINE, START_GAME_LINE};
 use monaka_contract::protocol::HandPose;
 use monaka_core::hold::HoldToggle;
 use monaka_core::math::{Quat, Vec3};
-use monaka_openxr::{Extent2Df, Layer, Posef, Session, Space};
-use monaka_overlay::egui;
+use monaka_openxr::{Layer, Session, Space};
 use monaka_overlay::home::pages::Pages;
-use monaka_overlay::home::place::{self, Ring, TURN_SECONDS, Turning, slot_angle};
 use monaka_overlay::home::{Home, PAGES};
 use std::path::Path;
 use std::time::Instant;
@@ -44,27 +41,15 @@ pub struct Asked {
     pub leave: bool,
 }
 
-/// The ring turning: how, and since when.
-struct Turn {
-    turning: Turning,
-    started: Instant,
-}
-
 pub struct HomeView<'s> {
     home: Home,
     pages: Pages,
-    quads: [MenuQuad<'s>; 3],
+    /// The panels round the player, and the pointer on them.
+    ring: RingView<'s>,
     open: bool,
     start: HoldToggle,
     /// Buttons held at the last read, for presses.
     held: u16,
-    /// Where the ring was opened, each panel's angle round it now, and a turn under way.
-    ring: Option<Ring>,
-    angles: [f32; 3],
-    turn: Option<Turn>,
-    pointer: Pointer,
-    /// What the pointer did on each panel since it was last drawn.
-    events: [Vec<egui::Event>; 3],
     /// Opens as soon as the head is known (the window's view at its start, and when a game ends).
     open_soon: bool,
     /// The ring goes round to where the head faces at the next read (the player recentred).
@@ -77,19 +62,14 @@ impl<'s> HomeView<'s> {
     pub fn new(format: DXGI_FORMAT, run_folder: Option<&Path>, debug: bool) -> Self {
         let mut home = Home::load(run_folder);
         home.debug = debug;
-        let angles = std::array::from_fn(|page| slot_angle(page, home.front, PAGES.len()));
+        let ring = RingView::new("Monaka's home", format, PAGES.len(), home.front);
         Self {
             home,
             pages: Pages::new(format),
-            quads: std::array::from_fn(|page| MenuQuad::new(PAGES[page].title(), format, place::PIXELS)),
+            ring,
             open: false,
             start: HoldToggle::new(button::START),
             held: 0,
-            ring: None,
-            angles,
-            turn: None,
-            pointer: Pointer::default(),
-            events: Default::default(),
             open_soon: false,
             recenter: false,
         }
@@ -154,11 +134,13 @@ impl<'s> HomeView<'s> {
         if self.home.take_play() {
             println!("{PLAY_LINE}");
         }
+        if self.home.take_start_game() {
+            println!("{START_GAME_LINE}");
+        }
         asked.leave = self.home.take_leave();
-        if let (true, Some((orientation, position))) = (self.recenter, head) {
+        if let (true, Some(head)) = (self.recenter, head) {
             self.recenter = false;
-            self.ring = Some(Ring::at(orientation, position));
-            self.placed();
+            self.ring.place_at(head);
         }
         if self.open_soon && !self.open && head.is_some() {
             self.open_soon = false;
@@ -186,58 +168,35 @@ impl<'s> HomeView<'s> {
         for (shoulder, steps) in [(button::LEFT_SHOULDER, -1), (button::RIGHT_SHOULDER, 1)] {
             if pressed & shoulder != 0 {
                 self.home.turn(steps);
-                self.turn = Some(Turn { turning: Turning::new(self.angles, self.home.front, steps), started: now });
+                self.ring.turn(steps, now);
                 asked.buzzes.push(menu_quad::pressed(false));
             }
         }
-        if self.home.take_recenter() {
-            self.ring = head.map(|(orientation, position)| Ring::at(orientation, position)).or(self.ring);
+        if self.home.take_recenter()
+            && let Some(head) = head
+        {
+            self.ring.place_at(head);
         }
-        self.step_turn(now);
-        let points = self.pages.points();
-        let size = [place::WIDTH, place::height()];
-        let targets = self.quads.each_ref().map(|quad| Target { orientation: quad.anchor.orientation.xyzw(), centre: quad.anchor.position.xyz(), size, points });
-        let targets = if self.ring.is_some() { &targets[..] } else { &[] };
-        asked.buzzes.extend(self.pointer.step(pad, hands, targets, &mut self.events, self.home.front));
+        self.ring.step(now);
+        asked.buzzes.extend(self.ring.point(pad, hands, |_| true));
         *pad = Gamepad::default();
         asked
     }
 
     fn set_open(&mut self, open: bool, head: Option<(Quat, Vec3)>) {
+        // Closed: the player goes back to the game, which the launcher brings to the front.
+        if self.open && !open {
+            println!("{HOME_CLOSED_LINE}");
+        }
         self.open = open;
         if open {
-            if let Some((orientation, position)) = head {
-                self.ring = Some(Ring::at(orientation, position));
+            match head {
+                Some(head) => self.ring.place_at(head),
+                None => self.ring.show_in_front(self.home.front),
             }
-            self.turn = None;
-            self.angles = std::array::from_fn(|page| slot_angle(page, self.home.front, PAGES.len()));
-            self.placed();
             self.home.all_stale();
         } else {
-            self.pointer.leave(&mut self.events);
-        }
-    }
-
-    /// The panels' angles along a turn under way, settled in their places once it is done.
-    fn step_turn(&mut self, now: Instant) {
-        if let Some(turn) = &self.turn {
-            let progress = now.duration_since(turn.started).as_secs_f32() / TURN_SECONDS;
-            if progress >= 1.0 {
-                self.angles = std::array::from_fn(|page| slot_angle(page, self.home.front, PAGES.len()));
-                self.turn = None;
-            } else {
-                self.angles = turn.turning.at(progress);
-            }
-        }
-        self.placed();
-    }
-
-    /// The quads where their angles round the ring put them.
-    fn placed(&mut self) {
-        let Some(ring) = self.ring else { return };
-        for (quad, angle) in self.quads.iter_mut().zip(self.angles) {
-            let (orientation, centre) = ring.at_angle(angle);
-            quad.anchor = Posef::new(orientation, centre);
+            self.ring.leave();
         }
     }
 
@@ -248,10 +207,10 @@ impl<'s> HomeView<'s> {
         }
         self.home.refresh(now);
         for page in 0..PAGES.len() {
-            let events = std::mem::take(&mut self.events[page]);
+            let events = self.ring.take_events(page);
             let stale = self.home.take_stale(page);
             let (pages, home) = (&mut self.pages, &mut self.home);
-            self.quads[page].show(session, context, |fresh| {
+            self.ring.show(page, session, context, |fresh| {
                 if !(fresh || stale || !events.is_empty()) {
                     return Ok(None);
                 }
@@ -265,8 +224,7 @@ impl<'s> HomeView<'s> {
         if !self.open {
             return Vec::new();
         }
-        let size = Extent2Df { width: place::WIDTH, height: place::height() };
-        self.quads.iter().filter_map(|quad| Some(Layer::Overlay { space, swapchain: quad.swapchain()?, pose: quad.anchor, size })).collect()
+        (0..PAGES.len()).filter_map(|page| self.ring.layer(page, space)).collect()
     }
 }
 

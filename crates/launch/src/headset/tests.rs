@@ -18,6 +18,17 @@ fn a_file_is_written_whole_over_the_last() {
 }
 
 #[test]
+fn a_run_takes_the_eye_size_the_view_left() {
+    let dir = folder("eye");
+    let (_send, lines) = mpsc::channel();
+    let linked = Linked { folder: dir.clone(), lines, pid: 1 };
+    assert_eq!(linked.eye_size(), None, "not said yet");
+    std::fs::write(dir.join(home::EYE_SIZE_FILE), home::eye_size_text((2064, 2208))).unwrap();
+    assert_eq!(linked.eye_size(), Some((2064, 2208)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_run_links_its_game_in_and_lets_it_go() {
     let dir = folder("link");
     let (_send, lines) = mpsc::channel();

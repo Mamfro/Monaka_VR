@@ -14,7 +14,8 @@
 pub use monaka_contract::manifest::{HowTo, Kind, Launch, MONAKA, Manifest, Opt, PLAY_WITH, Shown, Status, SteamFiles, TABS, Values, describe, number_text};
 use crate::Paths;
 use crate::packs::{self, Pack};
-use monaka_contract::manifest::{DEBUG_MENU, DEBUG_MENU_ARG, OPTION_ARG};
+use monaka_contract::manifest::{DEBUG_MENU, OPTION_ARG};
+use monaka_core::home::DEBUG_MENU_ARG;
 use monaka_contract::manifest::aims;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};

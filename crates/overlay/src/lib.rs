@@ -16,6 +16,7 @@ pub mod lines;
 pub mod menu;
 pub mod panels;
 pub mod quad;
+pub mod ring_page;
 pub mod stats;
 pub mod views;
 pub mod window;

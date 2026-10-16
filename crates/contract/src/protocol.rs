@@ -137,6 +137,20 @@ pub struct PoseBlock {
     pub stamp: Stamp,
     pub head: Seq<HeadPose>,
     pub pairs: [Seq<RenderedPair>; POSE_PAIR_SLOTS],
+    /// The headset's refresh as the viewer sees it (minor 1; zero: not sent).
+    pub display: Seq<DisplayTiming>,
+}
+
+/// The headset's refresh, written by the viewer each time its frame wait returns: how long a
+/// headset frame is, and the moment that wait returned (both in nanoseconds of the Windows
+/// performance counter, which every process reads alike: `monaka_channel::pose::now_ns`). A
+/// producer can start its frames on that grid, so each headset frame gets one new pair (or one
+/// every few) instead of drifting against it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisplayTiming {
+    pub period_ns: u64,
+    pub woke_ns: u64,
 }
 
 impl PoseBlock {
@@ -145,6 +159,7 @@ impl PoseBlock {
             stamp: Stamp::of::<Self>(),
             head: Seq::default(),
             pairs: [Seq::default(); POSE_PAIR_SLOTS],
+            display: Seq::default(),
         }
     }
 
@@ -156,7 +171,7 @@ impl PoseBlock {
 impl Versioned for PoseBlock {
     const MAGIC: u32 = POSE_MAGIC;
     const MAJOR: u16 = POSE_MAJOR;
-    const MINOR: u16 = 0;
+    const MINOR: u16 = 1;
     const WHAT: &'static str = "head pose block";
     const CAPACITY: usize = 16 * 1024;
 

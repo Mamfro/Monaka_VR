@@ -59,12 +59,17 @@ pub struct Tickets<X: Copy = ()> {
     lost: u64,
     /// The most that were waiting at a show.
     deepest: usize,
+    /// The ticket the last show took off the queue, and that show's count (for
+    /// [`Tickets::show_behind_drawing`]; none after a show that took the last one again).
+    last: Option<(Ticket<X>, u64)>,
+    /// Shows that found the queue a frame ahead and took the last ticket again.
+    realigned: u64,
 }
 
 impl<X: Copy> Tickets<X> {
     /// Keeps at most `depth` unshown tickets (a game pipelines one to three frames: 4 is ample).
     pub const fn new(depth: usize) -> Self {
-        Self { queue: VecDeque::new(), depth, next: 0, shown: 0, missing: 0, lost: 0, deepest: 0 }
+        Self { queue: VecDeque::new(), depth, next: 0, shown: 0, missing: 0, lost: 0, deepest: 0, last: None, realigned: 0 }
     }
 
     /// A frame's views were built for `view` from `pose`: its ticket, numbered in issue order.
@@ -112,6 +117,30 @@ impl<X: Copy> Tickets<X> {
         Shown { ticket, waiting }
     }
 
+    /// A frame is shown by a present that comes once the next frame is being drawn (an engine that
+    /// presents at the start of drawing the next frame): that frame's ticket is issued already, so
+    /// at least two wait whenever the pairing holds, and the oldest leaves. With only one waiting,
+    /// the frame shown is the one the last show gave (its ticket was taken a frame early: a present
+    /// before any frame was drawn, say), and the waiting one stays: the frame shown gets the last
+    /// ticket again, and from the next show on the pairing holds. Only once in a row: with nothing
+    /// new built (a menu), the next show takes the waiting ticket.
+    pub fn show_behind_drawing(&mut self) -> Shown<X> {
+        let waiting = self.queue.len();
+        if waiting == 1
+            && let Some((ticket, at)) = self.last
+            && at == self.shown
+        {
+            self.shown += 1;
+            self.realigned += 1;
+            self.deepest = self.deepest.max(waiting);
+            self.last = None;
+            return Shown { ticket: Some(ticket), waiting };
+        }
+        let shown = self.show();
+        self.last = shown.ticket.map(|ticket| (ticket, self.shown));
+        shown
+    }
+
     /// The frames up to and including `number` are shown (a present that completes a numbered
     /// frame): their tickets leave, and the one numbered `number` comes back.
     pub fn show_through(&mut self, number: u64) -> Shown<X> {
@@ -146,9 +175,9 @@ impl<X: Copy> Tickets<X> {
         self.missing
     }
 
-    /// `"1200 shown (at most 2 waiting), 0 missing, 0 lost"`.
+    /// `"1200 shown (at most 2 waiting), 0 missing, 0 lost, 0 realigned"`.
     pub fn summary(&self) -> String {
-        format!("{} shown (at most {} waiting), {} missing, {} lost", self.shown, self.deepest, self.missing, self.lost)
+        format!("{} shown (at most {} waiting), {} missing, {} lost, {} realigned", self.shown, self.deepest, self.missing, self.lost, self.realigned)
     }
 }
 

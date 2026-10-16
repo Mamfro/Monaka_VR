@@ -23,6 +23,8 @@ pub trait Pc {
     /// SteamVR, a viewer other than `ours` (the window's headset view), and a process named one of
     /// `game` (the game's executables).
     fn running(&self, game: &[&str], ours: Option<u32>) -> Running;
+    /// Which of `executables` run, by name.
+    fn processes(&self, executables: &[&str]) -> Vec<String>;
     /// The Steam library folders; none without Steam.
     fn steam_libraries(&self) -> Vec<PathBuf>;
     fn steam_installed(&self, libraries: &[PathBuf], steam_app: u32) -> bool;
@@ -46,6 +48,10 @@ impl Pc for ThisPc {
         // folder) matters at the start, not here.
         let viewer = found.iter().any(|p| p.executable.eq_ignore_ascii_case(system::VIEWER_EXE) && Some(p.pid) != ours);
         Running { steamvr: any(&[system::STEAMVR_EXE]), viewer, game: any(game) }
+    }
+
+    fn processes(&self, executables: &[&str]) -> Vec<String> {
+        system::processes_named(executables).into_iter().map(|p| p.executable).collect()
     }
 
     fn steam_libraries(&self) -> Vec<PathBuf> {

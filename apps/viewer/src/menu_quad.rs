@@ -1,20 +1,17 @@
-//! A headset menu's quad, the same for the debug menu ([`crate::debug_menu`]) and Monaka's home
-//! (each panel of [`crate::home`]): where it floats (placed ahead of the head when it opens), its
-//! swapchain (made at its first show), its image handed to the headset, and the menu turned off for
-//! the run when any of that fails.
+//! One panel of a ring in the headset ([`crate::ring`]: Monaka's home, the debug menu): where it
+//! floats, its swapchain (made at its first show), its image handed to the headset, and the panel
+//! turned off for the run when any of that fails.
 
 use crate::debug_menu::Buzz;
 use monaka_channel::d3d;
-use monaka_core::math::{self, Quat, Vec3};
+use monaka_core::math;
 use monaka_contract::protocol::{LEFT_HAND, RIGHT_HAND};
 use monaka_openxr::{Posef, Session, Swapchain};
 use windows::Win32::Graphics::Direct3D11::{ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 
-/// Where a menu floats when it opens: this far ahead of the head and this far below the eyes
-/// (metres).
+/// Where a panel floats until its ring stands somewhere: this far ahead (metres).
 const DISTANCE: f32 = 1.0;
-const BELOW_EYES: f32 = 0.1;
 
 /// The buzz on both hands when a menu opens or closes.
 pub const TOGGLED: [Buzz; 2] = [(LEFT_HAND, 0.5, 0.08), (RIGHT_HAND, 0.5, 0.08)];
@@ -39,14 +36,6 @@ impl<'s> MenuQuad<'s> {
     /// The quad of menu `name`, `pixels` in `format`, a metre straight ahead until it opens.
     pub fn new(name: &'static str, format: DXGI_FORMAT, pixels: [u32; 2]) -> Self {
         Self { name, format, pixels, swapchain: None, failed: false, anchor: Posef::new(math::IDENTITY, [0.0, 0.0, -DISTANCE]) }
-    }
-
-    /// The menu opened with the head at `head` (none: unknown, it stays where it was).
-    pub fn open_at(&mut self, head: Option<(Quat, Vec3)>) {
-        if let Some((orientation, position)) = head {
-            let (facing, ahead) = math::ahead_of(orientation, position, DISTANCE);
-            self.anchor = Posef::new(facing, [ahead[0], ahead[1] - BELOW_EYES, ahead[2]]);
-        }
     }
 
     /// Hands the menu's image to the headset, `draw`n when it shows something new (its argument:

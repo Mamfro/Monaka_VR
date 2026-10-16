@@ -2,9 +2,10 @@
 
 Monaka is a framework for (more) easily implementing VR mods into games. It reduces the amount of plumbing needed, and offers reusable structures (for head tracking, driving hands/arms/fingers, etc) that can be used by many games.
 
-> **Monaka VR is in pre-alpha.** Expect bugs and missing pieces. Until its API settles, things
-> WILL change often: options, game packs and how games are run may work differently from one version to
-> the next, and game packs made for an older version may stop working.
+> **Monaka VR is in pre-alpha.** Expect bugs and missing pieces. Options and how games are run may
+> still work differently from one version to the next. Game packs keep working across Monaka VR
+> versions that speak the same pack contract; a pack made for an older contract shows as
+> **Needs update** in the game list, with what to do.
 >
 > Contribution is encouraged, though please hold off a little bit longer until the API has further stabilised. 
 > The license was chosen specifically to encourage open source collaboration instead of VR mods behind paywalls.
@@ -60,9 +61,12 @@ To update later, download the new version over the old one and run `cargo build 
 2. Add the game pack for your game, once (see below).
 3. Pick your game. The window shows what to set in the game's own options first, and the options
    Monaka VR has for that game. Options are saved as you change them.
-4. Start **SteamVR** and turn on your headset (the window has a **Start SteamVR** button).
-5. Press **Start VR**. Some games are started for you; for the others the window says to start the
-   game first. Put on the headset. **Alt+tab into the game** (that is important). Play.
+4. Start **SteamVR** and turn on your headset (the window has a **Start SteamVR** button). Monaka
+   VR's home opens in the headset: your games, their settings and the log, on panels around you.
+   Hold **Start** to show or hide it; point a controller and pull the trigger to click.
+5. Press **Play**, in the window or on the headset's Games panel. Under it, the window says what
+   it will do: some games are started for you, others must be started first (**Start game** does
+   that through Steam). **Alt+tab into the game** (that is important). Play.
 
 ### Game packs
 
@@ -77,7 +81,9 @@ inside the game, so only add packs from people you trust. To update a pack, add 
 - **Recentre** with your headset's own recentre button (on the Steam Frame, hold the SteamVR
   button). Forward is wherever your headset faces.
 - **Menus, maps and loading screens** appear on a flat screen in front of you. That's expected.
-- **To stop VR**, press **Stop VR**, or quit the game. The game keeps running flat if you stop VR.
+- **To stop VR**, press **Stop** in the window or **Stop game** in the headset, or quit the game.
+  The game keeps running flat if you stop VR, and the headset goes back to Monaka VR's home.
+  **Leave VR** closes the headset view; **Open in headset** brings it back.
 - If VR stops on its own, it restarts after a few seconds. If it keeps stopping right after it
   starts, Monaka VR gives up and says so.
 
@@ -106,16 +112,18 @@ stands in for the Quest thumbrest or the Index trackpad touch.
 
 | What you see | What to do |
 |---|---|
-| `Start SteamVR and connect the headset first.` | Start SteamVR, wait until it sees your headset, then press **Start VR** again. |
+| `Start SteamVR and turn on your headset first.` | Start SteamVR, wait until it sees your headset, then press **Play** again. |
 | `Build first: ...` | Run `cargo build --release` in the Monaka VR folder (see setup). |
-| `... is not running` | That game needs to be started before you press **Start VR**. |
+| `Start the game first and load into gameplay.` | That game needs to be running before you press **Play**: start it (**Start game**) and load in. |
 | `Attaching failed` or `The mod refused to start in this game` | The game probably updated and Monaka VR doesn't recognise the new version yet. It refuses instead of risking a crash. Check for a Monaka VR update. |
 | `Another VR session is already running` | VR is still running from another terminal or the Monaka VR window. Stop that one first. |
 | The headset shows a flat screen | You're in a menu or a loading screen. That's normal. It switches to 3D in gameplay. |
 | The game paused | Some games pause when the window loses focus. Click into the game window once. |
 
 Every run leaves a log: press **Open logs** in the window, or look in `%LOCALAPPDATA%\monaka\runs`
-(newest folder, file ending in `.log`). If you report a problem, include that file.
+(newest folder, file ending in `.log`). If you report a problem, press **Save report**: it makes one
+zip of the latest run's logs and your settings (with your Windows user name taken out) and opens
+its folder. Attach that zip.
 
 ## Good to know
 

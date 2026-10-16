@@ -5,7 +5,7 @@
 //! (all but the freeze) are remembered between runs in `%APPDATA%\monaka\viewer-debug.txt`.
 
 use crate::debug_menu::{Buzz, HeadsetMenu};
-use crate::debug_panels::{self, HeadsetPanels};
+use crate::debug_panels::HeadsetPanels;
 use crate::recorder::Recorder;
 use monaka_channel::debug::{DebugChannel, Source};
 use monaka_channel::debug_image::ImageReader;
@@ -25,8 +25,7 @@ use monaka_overlay::lines::LinePass;
 use monaka_overlay::quad::QuadPass;
 use monaka_overlay::menu::{Command, DepthNear, Settings, Status, View};
 use monaka_overlay::egui;
-use crate::pointer::{Pointer, Target};
-use monaka_overlay::canvas::PIXELS_PER_POINT;
+use crate::ring::RingView;
 use monaka_overlay::panels::{self, Content, PanelId};
 use monaka_overlay::views::{self, ViewPass};
 use std::path::PathBuf;
@@ -82,16 +81,11 @@ pub struct DebugViews<'s> {
     /// What a panel asked for (a console command, the fake head and controllers changed), until
     /// taken ([`DebugViews::take_asked`]).
     asked: Option<panels::Asked>,
-    menu: HeadsetMenu<'s>,
+    menu: HeadsetMenu,
     /// The panels switched on in the menu, as the headset shows them.
-    panels: HeadsetPanels<'s>,
-    /// Which of the row of the menu and the panels is where the menu opened (0: the menu).
-    focus: usize,
-    /// The controller pointing at the row, what it did on each (the menu first), and where each
-    /// floats.
-    pointer: Pointer,
-    events: Vec<Vec<egui::Event>>,
-    places: Vec<debug_panels::Place>,
+    panels: HeadsetPanels,
+    /// The debug ring: the menu first, then the panels; and the pointer on them.
+    ring: RingView<'s>,
     /// A capture asked for with the pointer, for the next read of the pad to say.
     capture_asked: bool,
     said_at: u64,
@@ -145,10 +139,7 @@ impl<'s> DebugViews<'s> {
             asked: None,
             menu: HeadsetMenu::new(format),
             panels: HeadsetPanels::new(format),
-            focus: 0,
-            pointer: Pointer::default(),
-            events: Vec::new(),
-            places: Vec::new(),
+            ring: RingView::new("The debug menu", format, 1, 0),
             capture_asked: false,
             said_at: 0,
             read: None,
@@ -220,8 +211,16 @@ impl<'s> DebugViews<'s> {
     /// Opens the debug menu now (asked from Monaka's home), ahead of `head`; the pad drives it.
     pub fn open_menu(&mut self, head: Option<(Quat, Vec3)>) {
         let status = self.status();
-        self.menu.open_now(head, &status);
-        self.focus = 0;
+        self.menu.open_now(&status);
+        self.open_ring(head);
+    }
+
+    /// The ring round `head` (none: where it stood), the menu in front.
+    fn open_ring(&mut self, head: Option<(Quat, Vec3)>) {
+        if let Some(head) = head {
+            self.ring.place_at(head);
+        }
+        self.ring.show_in_front(0);
     }
 
     /// The pad before anything else reads it ([`HeadsetMenu::pad`]): the buzzes to give, and
@@ -230,22 +229,29 @@ impl<'s> DebugViews<'s> {
         // Read even while closed: the first opening with a game page goes to it.
         let status = self.status();
         let was_open = self.menu.open();
-        let mut asked = self.menu.pad(pad, head, now, &status);
-        // Opened again: the menu where it opened; LB / RB slide the row.
-        let ids: Vec<PanelId> = self.settings.panels.iter().collect();
+        let mut asked = self.menu.pad(pad, now, &status);
+        self.panels.follow(self.settings.panels);
+        self.ring.set_pages(1 + self.panels.len());
+        // Opened: the ring round the head, the menu in front; LB / RB turn it.
         if self.menu.open() && !was_open {
-            self.focus = 0;
+            self.open_ring(head);
         }
-        self.focus = (self.focus as i32 + asked.focus_step).rem_euclid(1 + ids.len() as i32) as usize;
-        self.events.resize_with(1 + ids.len(), Vec::new);
+        // Panels switched on in an earlier run show from the start, round the head.
+        if !self.ring.placed()
+            && self.panels.len() > 0
+            && let Some(head) = head
+        {
+            self.ring.place_at(head);
+        }
+        if asked.turn != 0 {
+            self.ring.turn(asked.turn as isize, now);
+        }
+        self.ring.step(now);
         if self.menu.open() {
-            let points = |pixels: [u32; 2]| egui::vec2(pixels[0] as f32, pixels[1] as f32) / PIXELS_PER_POINT;
-            let pages = std::iter::once(points(monaka_overlay::menu::panel::PIXELS)).chain(ids.iter().map(|id| points(id.pixels())));
-            let targets: Vec<Target> = self.places.iter().zip(pages).map(|(place, points)| Target { orientation: place.orientation, centre: place.centre, size: place.size, points }).collect();
-            asked.buzzes.extend(self.pointer.step(pad, hands, &targets, &mut self.events, 0));
+            asked.buzzes.extend(self.ring.point(pad, hands, |_| true));
             *pad = Gamepad::default();
         } else if was_open {
-            self.pointer.leave(&mut self.events);
+            self.ring.leave();
         }
         let capture = std::mem::take(&mut self.capture_asked);
         if capture {
@@ -334,33 +340,42 @@ impl<'s> DebugViews<'s> {
         capture
     }
 
-    /// Hands the menu's panel to the headset when it changed, while it is open, and the panels
-    /// switched on (`content`: what they show).
+    /// Hands the debug ring to the headset: the panels switched on (`content`: what they show),
+    /// and the menu while it is open, each drawn when it changed.
     pub fn show_in_headset(&mut self, session: &'s Session<'_>, device: &ID3D11Device, context: &ID3D11DeviceContext, content: &Content<'_>, now: Instant) {
-        // The menu and the panels in a row, the one the pad drives where the menu opened.
-        let ids: Vec<PanelId> = self.settings.panels.iter().collect();
+        self.panels.follow(self.settings.panels);
+        self.ring.set_pages(1 + self.panels.len());
         let open = self.menu.open();
-        let focus = if open { self.focus.min(ids.len()) } else { 0 };
-        let anchor = self.menu.place();
-        let sizes: Vec<[f32; 2]> = std::iter::once(anchor.size).chain(ids.iter().map(|id| debug_panels::size(*id))).collect();
-        let places = debug_panels::strip(&anchor, &sizes, focus);
-        self.menu.set_shown(places[0]);
-        self.panels.follow(self.settings.panels, &places[1..], open);
-        // What the pointer did on each, the menu first.
-        let mut events = std::mem::take(&mut self.events);
-        events.resize_with(places.len(), Vec::new);
-        self.places = places;
-        let asked = self.panels.show(session, device, context, content, now, |id| ids.iter().position(|i| *i == id).map(|at| std::mem::take(&mut events[at + 1])).unwrap_or_default());
-        if asked.is_some() {
-            self.asked = asked;
+        // The outline marks the one in front while the menu is open (LB / RB move it).
+        let front = |page: usize, ring: &RingView<'_>| open && ring.front() == page;
+        for index in 0..self.panels.len() {
+            let page = 1 + index;
+            let (in_front, events) = (front(page, &self.ring), self.ring.take_events(page));
+            let (ring, panels) = (&mut self.ring, &mut self.panels);
+            let mut asked = None;
+            ring.show(page, session, context, |fresh| {
+                let (image, said) = panels.draw(index, device, context, content, in_front, events, now, fresh)?;
+                asked = said;
+                Ok(image)
+            });
+            if asked.is_some() {
+                self.asked = asked;
+            }
         }
         if !open {
             return;
         }
         let status = self.status();
         let settings = self.settings;
-        let menu_events = std::mem::take(&mut events[0]);
-        if let Some(click) = self.menu.show(session, device, context, &settings, &status, menu_events) {
+        let (in_front, events) = (front(0, &self.ring), self.ring.take_events(0));
+        let (ring, menu) = (&mut self.ring, &mut self.menu);
+        let mut click = None;
+        ring.show(0, session, context, |fresh| {
+            let (image, clicked) = menu.draw(device, context, &settings, &status, in_front, events, fresh)?;
+            click = clicked;
+            Ok(image)
+        });
+        if let Some(click) = click {
             let before = self.settings;
             let (menu, settings) = (self.menu.model(), &mut self.settings);
             let command = menu.click(click, settings, &status);
@@ -370,9 +385,10 @@ impl<'s> DebugViews<'s> {
         }
     }
 
-    /// The menu's layer while it is open, and the panels'.
+    /// The panels' layers, and the menu's while it is open.
     pub fn layers<'a>(&'a self, space: &'a Space<'a>) -> impl Iterator<Item = Layer<'a>> + 'a {
-        self.panels.layers(space).chain(self.menu.layer(space))
+        let first = if self.menu.open() { 0 } else { 1 };
+        (first..=self.panels.len()).filter_map(move |page| self.ring.layer(page, space))
     }
 
     /// The game's timing and settings, as its producer says them.
@@ -525,7 +541,9 @@ impl<'s> DebugViews<'s> {
         let Some(copy) = &self.copies[eye] else { return };
         d3d::copy_texture(context, copy, image);
         let Some(pair) = pair else { return };
-        let shown: Vec<_> = self.panels.images().chain(self.menu.shown()).collect();
+        let panels = (0..self.panels.len()).filter_map(|index| Some((self.panels.image(index)?, self.ring.rectangle(1 + index)?)));
+        let menu = self.menu.image().and_then(|image| Some((image, self.ring.rectangle(0)?)));
+        let shown: Vec<_> = panels.chain(menu).collect();
         if shown.is_empty() {
             return;
         }

@@ -1,7 +1,8 @@
-//! Where the home's panels float and where a controller points on them. The panels stand on a
-//! ring round where the head was when the home opened, each turned to face it, flat (not curved):
-//! the one in front straight ahead of where the head faced, the other two to its sides. Turning the
-//! ring (LB, RB) brings another panel in front, so none needs the head turned far to use.
+//! Where a ring's panels float and where a controller points on them, the same for Monaka's home
+//! and the debug menu. The panels stand on a ring round where the head was when it opened, each
+//! turned to face it, flat (not curved): the one in front straight ahead of where the head faced,
+//! the others to its sides. Turning the ring (LB, RB) brings another panel in front, so none needs
+//! the head turned far to use.
 
 use monaka_core::math::{self, Quat, Vec3};
 
@@ -61,19 +62,20 @@ pub const TURN_SECONDS: f32 = 0.3;
 
 /// A turn of the ring: each panel going round from where it was to its new place, all in the
 /// direction of the turn, so one that leaves one end goes all the way round to the other.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Turning {
-    from: [f32; 3],
-    to: [f32; 3],
+    from: Vec<f32>,
+    to: Vec<f32>,
 }
 
 impl Turning {
-    /// From the panels' angles now (`from`) to their places with `front` in front, turning
-    /// `steps` (positive: the ring turns left, bringing the panel on the right in front).
-    pub fn new(from: [f32; 3], front: usize, steps: isize) -> Self {
+    /// From the panels' angles now (`from`, one per panel) to their places with `front` in front,
+    /// turning `steps` (positive: the ring turns left, bringing the panel on the right in front).
+    pub fn new(from: &[f32], front: usize, steps: isize) -> Self {
         let full = std::f32::consts::TAU;
-        let to = std::array::from_fn(|page| {
-            let mut delta = slot_angle(page, front, 3) - from[page];
+        let pages = from.len();
+        let to = (0..pages).map(|page| {
+            let mut delta = slot_angle(page, front, pages) - from[page];
             // Every panel moves the way the ring turns; a panel that would move back goes round.
             if steps > 0 && delta > 1e-4 {
                 delta -= full;
@@ -82,14 +84,14 @@ impl Turning {
             }
             from[page] + delta
         });
-        Self { from, to }
+        Self { from: from.to_vec(), to: to.collect() }
     }
 
     /// The panels' angles `progress` of the way through (0 to 1, eased at both ends).
-    pub fn at(&self, progress: f32) -> [f32; 3] {
+    pub fn at(&self, progress: f32) -> Vec<f32> {
         let t = progress.clamp(0.0, 1.0);
         let eased = t * t * (3.0 - 2.0 * t);
-        std::array::from_fn(|page| self.from[page] + (self.to[page] - self.from[page]) * eased)
+        self.from.iter().zip(&self.to).map(|(from, to)| from + (to - from) * eased).collect()
     }
 }
 

@@ -78,7 +78,7 @@ fn items(game: &Game, rows: &[Row], values: &Values, tab: Shown) -> Vec<Item> {
     order
 }
 
-/// Draws tab `tab`'s options for `game` and saves what the player changes. While a session runs
+/// Draws tab `tab`'s options for `game` and keeps what the player changes (the window saves it). While a session runs
 /// only diagnostic logging may change (the producer follows it mid-run). Returns the id of the
 /// option changed, if any.
 pub fn show(ui: &mut egui::Ui, settings: &mut Settings, game: &Game, rows: &[Row], tab: Shown, running: bool) -> Option<&'static str> {
@@ -98,7 +98,6 @@ pub fn show(ui: &mut egui::Ui, settings: &mut Settings, game: &Game, rows: &[Row
                 if let Some(value) = option_row(ui, &values, row, running) {
                     let saved = if row.owner.id == MONAKA.id { &mut settings.monaka } else { settings.values.entry(game.id.to_owned()).or_default() };
                     saved.set(row.opt.id, value);
-                    let _ = settings.save();
                     changed = Some(row.opt.id);
                 }
             }
