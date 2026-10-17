@@ -4,7 +4,8 @@
 # (the everyday target is left alone) with:
 #   - the C runtime linked in (+crt-static), so players need no Visual C++ redistributable;
 #   - this PC's folders rewritten out of the binaries (--remap-path-prefix): the source paths in
-#     panic messages read monaka_vr\crates\..., not a path under the builder's home folder;
+#     panic messages read monaka_vr\crates\... or monaka_sdk\crates\..., not a path under the
+#     builder's home folder;
 #   - the debug-file path cut to its file name (/PDBALTPATH).
 # With an explicit --target, these flags reach only the shipped code, not build scripts or macros.
 # Assert-NoPersonalPaths fails if a file still names the user's profile folder.

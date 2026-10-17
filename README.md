@@ -39,10 +39,12 @@ To update, unzip the new version over the old one. Your options and game packs a
 1. **Install Rust.** Download `rustup-init.exe` from [rustup.rs](https://rustup.rs) and run it. If
    it asks to install the Visual Studio C++ build tools, say yes and let it finish, then press
    Enter to accept the defaults.
-2. **Get Monaka VR.** On the [GitHub page](https://github.com/Mamfro/monaka_vr), click **Code** →
-   **Download ZIP** and unzip it somewhere, for example `C:\vr\monaka_vr`. If you use git, clone it
-   instead.
-3. **Open a terminal in that folder.** In File Explorer, open the folder, right-click an empty spot
+2. **Get Monaka VR and the Monaka SDK.** Monaka VR builds on the SDK's crates, from a folder
+   beside its own. On the [Monaka VR page](https://github.com/Mamfro/monaka_vr) and the
+   [Monaka SDK page](https://github.com/Mamfro/monaka_sdk), click **Code** → **Download ZIP** and
+   unzip both into one folder, named `monaka_vr` and `monaka_sdk`: for example `C:\vr\monaka_vr`
+   and `C:\vr\monaka_sdk`. If you use git, clone both there instead.
+3. **Open a terminal in the `monaka_vr` folder.** In File Explorer, open the folder, right-click an empty spot
    and pick **Open in Terminal**.
 4. **Build it:**
 

@@ -178,6 +178,7 @@ pub enum Shows {
 
 /// Runs a session to its end. Blocks; call it on its own thread from a GUI. `linked`: the window's
 /// headset view, where a run in the headset shows its game.
+#[allow(clippy::too_many_arguments)]
 pub fn run(game: &Game, values: &Values, paths: &Paths, console: Console, shows: Shows, linked: Option<Linked>, stop: &Stop, report: &mut dyn FnMut(Event)) {
     match session(game, values, paths, console, shows, linked.as_ref(), stop, report) {
         Ok(()) => {}

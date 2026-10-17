@@ -114,13 +114,13 @@ fn a_developer_option_runs_at_its_default_without_developer_mode() {
 fn options_reach_the_viewer_as_lines() {
     let lines = |values: &Values| viewer_lines(&plan(values, &GAME, None).viewer_args).iter().map(|l| (*l).to_owned()).collect::<Vec<_>>();
     // Monaka's own settings reach the viewer in every game's run, at any value.
-    assert_eq!(lines(&parsed(&["aim=head"])), ["controller_smoothing=3"]);
+    assert_eq!(lines(&parsed(&["aim=head"])), ["controller_smoothing=3", "frosted_panels=1"]);
     let mut smoother = parsed(&["aim=head"]);
     smoother.set_checked(&MONAKA, "controller_smoothing", "6").unwrap();
-    assert_eq!(lines(&smoother), ["controller_smoothing=6"]);
+    assert_eq!(lines(&smoother), ["controller_smoothing=6", "frosted_panels=1"]);
     assert!(!plan(&smoother, &GAME, None).files[0].1.contains("smoothing"), "not the producer's");
     // A game's lines at one of its choices.
-    assert_eq!(lines(&parsed(&["aim=head", "mode=deep"])), ["panel_nearest=0.5", "controller_smoothing=3"]);
+    assert_eq!(lines(&parsed(&["aim=head", "mode=deep"])), ["panel_nearest=0.5", "controller_smoothing=3", "frosted_panels=1"]);
     // The debug menu is a viewer switch of the launcher's own.
     assert!(!plan(&smoother, &GAME, None).viewer_args.contains(&DEBUG_MENU_ARG.to_owned()));
     smoother.set_checked(&MONAKA, "debug_menu", "1").unwrap();

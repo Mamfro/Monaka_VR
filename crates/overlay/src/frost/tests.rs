@@ -8,7 +8,7 @@ const SIZE: u32 = 256;
 fn the_eye_behind_a_panel_is_blurred_and_the_rest_left_alone() {
     let (device, context, _) = create_device(None).unwrap();
     // Black and white stripes four pixels wide, the alpha saying where pixels came from.
-    let stripes: Vec<u8> = (0..SIZE * SIZE).flat_map(|i| if (i % SIZE / 4) % 2 == 0 { [0, 0, 0, 77] } else { [255, 255, 255, 77] }).collect();
+    let stripes: Vec<u8> = (0..SIZE * SIZE).flat_map(|i| if (i % SIZE / 4).is_multiple_of(2) { [0, 0, 0, 77] } else { [255, 255, 255, 77] }).collect();
     let mut desc = simple_texture_desc(SIZE, SIZE, DXGI_FORMAT_R8G8B8A8_UNORM);
     desc.BindFlags = (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32;
     let image = create_texture_with(&device, &desc, &stripes).unwrap();

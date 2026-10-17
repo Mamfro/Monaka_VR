@@ -61,6 +61,7 @@ impl Panel {
     /// Draws the menu as a page on the debug ring ([`crate::ring_page`]) when it shows something
     /// new, was moved to or from the front (`front`), or the pointer did anything on it
     /// (`events`, the cursor drawn where it is); the image when drawn, and the click made, if one.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, menu: &Menu, settings: &Settings, status: &Status, front: bool, events: Vec<egui::Event>) -> Result<(Option<&ID3D11Texture2D>, Option<Click>)> {
         let now = (*menu, *settings, *status, front);
         if self.shown == Some(now) && self.canvas.image().is_some() && events.is_empty() {

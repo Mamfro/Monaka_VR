@@ -2,7 +2,7 @@
 //! (`monaka_play harness|capture|probe`): the producer attached to the running game with a
 //! stand-in for the viewer, then stopped, and its log shown.
 //!
-//! - **Harness**: `examples\harness.exe` (`crates\channel\examples\harness.rs`) plays a timed
+//! - **Harness**: `examples\harness.exe` (`monaka_sdk\crates\channel\examples\harness.rs`) plays a timed
 //!   script of head and controller poses, fingers and gamepad in place of the viewer, saving the
 //!   frames the script asks for as PNG in the run folder's `frames`.
 //! - **Capture**: `examples\probe.exe` reads the channel for a few seconds with a synthetic head

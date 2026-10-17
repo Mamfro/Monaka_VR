@@ -1519,18 +1519,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "monaka_body"
-version = "0.2.0"
-dependencies = [
- "monaka_channel",
- "monaka_contract",
- "monaka_core",
- "monaka_hook",
- "monaka_pad",
- "monaka_producer",
-]
-
-[[package]]
 name = "monaka_channel"
 version = "0.2.0"
 dependencies = [
@@ -1548,59 +1536,6 @@ name = "monaka_core"
 version = "0.2.0"
 dependencies = [
  "monaka_contract",
-]
-
-[[package]]
-name = "monaka_ffx"
-version = "0.2.0"
-dependencies = [
- "monaka_channel",
- "monaka_hook",
- "windows",
-]
-
-[[package]]
-name = "monaka_framegen"
-version = "0.2.0"
-dependencies = [
- "monaka_channel",
- "monaka_contract",
- "monaka_core",
- "monaka_ffx",
- "monaka_hook",
- "monaka_producer",
- "monaka_streamline",
- "windows",
-]
-
-[[package]]
-name = "monaka_fsr11"
-version = "0.2.0"
-dependencies = [
- "monaka_channel",
- "monaka_core",
- "monaka_ffx",
- "monaka_producer",
- "monaka_warp",
- "windows",
-]
-
-[[package]]
-name = "monaka_gl"
-version = "0.2.0"
-dependencies = [
- "monaka_channel",
- "monaka_contract",
- "monaka_core",
- "windows",
-]
-
-[[package]]
-name = "monaka_hook"
-version = "0.2.0"
-dependencies = [
- "monaka_core",
- "windows",
 ]
 
 [[package]]
@@ -1638,57 +1573,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "monaka_pad"
-version = "0.2.0"
-dependencies = [
- "monaka_channel",
- "monaka_contract",
- "monaka_core",
- "monaka_hook",
- "monaka_producer",
- "windows",
-]
-
-[[package]]
-name = "monaka_producer"
-version = "0.2.0"
-dependencies = [
- "monaka_channel",
- "monaka_contract",
- "monaka_core",
- "monaka_hook",
-]
-
-[[package]]
-name = "monaka_stereo"
-version = "0.2.0"
-dependencies = [
- "monaka_channel",
- "monaka_contract",
- "monaka_core",
- "monaka_ffx",
- "monaka_framegen",
- "monaka_fsr11",
- "monaka_gl",
- "monaka_hook",
- "monaka_producer",
- "monaka_streamline",
- "monaka_warp",
- "windows",
-]
-
-[[package]]
-name = "monaka_streamline"
-version = "0.2.0"
-dependencies = [
- "monaka_channel",
- "monaka_core",
- "monaka_hook",
- "monaka_producer",
- "windows",
-]
-
-[[package]]
 name = "monaka_viewer"
 version = "0.2.0"
 dependencies = [
@@ -1698,27 +1582,6 @@ dependencies = [
  "monaka_core",
  "monaka_openxr",
  "monaka_overlay",
- "windows",
-]
-
-[[package]]
-name = "monaka_vulkan"
-version = "0.2.0"
-dependencies = [
- "monaka_channel",
- "monaka_contract",
- "monaka_core",
- "monaka_hook",
- "monaka_producer",
- "windows",
-]
-
-[[package]]
-name = "monaka_warp"
-version = "0.2.0"
-dependencies = [
- "monaka_channel",
- "monaka_core",
  "windows",
 ]
 

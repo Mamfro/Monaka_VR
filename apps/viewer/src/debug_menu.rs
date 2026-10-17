@@ -89,6 +89,7 @@ impl HeadsetMenu {
     /// Draws the menu's page when it shows something new, came to or left the `front`, the pointer
     /// did anything on it (`events`), or its image went somewhere new (`fresh`); the image when
     /// drawn, and the click the pointer made, if one.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, settings: &Settings, status: &Status, front: bool, events: Vec<egui::Event>, fresh: bool) -> Result<(Option<ID3D11Texture2D>, Option<Click>), String> {
         if fresh {
             self.panel.forget();

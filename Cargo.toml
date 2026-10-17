@@ -11,24 +11,13 @@ license = "GPL-3.0-only"
 repository = "https://github.com/Mamfro/monaka_vr"
 
 [workspace.dependencies]
-monaka_body = { path = "crates/body" }
-monaka_contract = { path = "crates/contract" }
-monaka_core = { path = "crates/core" }
-monaka_channel = { path = "crates/channel" }
+# The SDK's crates the host uses, from the monaka_sdk checkout beside this one.
+monaka_channel = { path = "../monaka_sdk/crates/channel" }
+monaka_contract = { path = "../monaka_sdk/crates/contract" }
+monaka_core = { path = "../monaka_sdk/crates/core" }
+monaka_launch = { path = "crates/launch" }
 monaka_openxr = { path = "crates/openxr" }
 monaka_overlay = { path = "crates/overlay" }
-monaka_ffx = { path = "crates/ffx" }
-monaka_framegen = { path = "crates/framegen" }
-monaka_fsr11 = { path = "crates/fsr11" }
-monaka_gl = { path = "crates/gl" }
-monaka_hook = { path = "crates/hook" }
-monaka_launch = { path = "crates/launch" }
-monaka_pad = { path = "crates/pad" }
-monaka_producer = { path = "crates/producer" }
-monaka_stereo = { path = "crates/stereo" }
-monaka_streamline = { path = "crates/streamline" }
-monaka_warp = { path = "crates/warp" }
-monaka_vulkan = { path = "crates/vulkan" }
 windows = "0.62"
 
 [workspace.lints.rust]

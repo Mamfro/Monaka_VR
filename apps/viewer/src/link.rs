@@ -64,6 +64,7 @@ pub struct Wants {
 
 impl<'s> Link<'s> {
     /// The link to the producer that publishes `producer` on channel `name`, read through `input`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(name: &ChannelName, producer: Description, input: FenceReader, session: &'s Session<'_>, device: &ID3D11Device, offered: &[i64], args: &Args, wants: Wants) -> Result<Self, Box<dyn Error>> {
         let poses = pose_channel(PoseChannel::open(name))?;
         let hands_out = if wants.hands { side_channel("hand channel", HandChannel::open(name)) } else { None };
