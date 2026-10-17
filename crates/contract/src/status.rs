@@ -14,6 +14,10 @@ pub mod code {
     pub const REVISION_MISMATCH: u32 = 1306;
 }
 
+/// What starts the producer's log line giving why `MonakaStart` refused; the loader shows the
+/// player the reason after it.
+pub const REJECTED_LINE: &str = "rejected: ";
+
 /// `MonakaStatus` values; the loader stops an older copy that reports [`State::Running`] before
 /// another starts.
 #[repr(u32)]

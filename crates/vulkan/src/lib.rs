@@ -14,7 +14,7 @@ pub mod device;
 mod ffi;
 pub mod share;
 
-pub use share::{Depth, DepthFn, Frame, FrameFn, on_depth, on_frame};
+pub use share::{Depth, DepthFn, Frame, FrameFn, Layer, LayerFn, on_depth, on_frame, on_layer};
 
 use monaka_hook::Hooks;
 use monaka_hook::module::Module;

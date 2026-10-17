@@ -148,8 +148,7 @@ fn made_for(sides: &Sides, settings: &Settings, chain: &IDXGISwapChain, swap: us
     if !(settings.ready)(desc.Width as u32, desc.Height) {
         return Ok(None);
     }
-    // SAFETY: the caller's live swapchain.
-    let queue = settings.queue().or_else(|| unsafe { crate::swapchain_queue::of(chain.as_raw()) }).ok_or("the game's queue is unknown")?;
+    let queue = crate::queue12::game_queue(Some(&chain3)).ok_or("the game's queue is unknown")?;
     Eyes12::new(&sides.channel, &buffer, queue).map(|eyes| Some(Publisher::D3D12 { swap, eyes: Box::new(eyes) }))
 }
 

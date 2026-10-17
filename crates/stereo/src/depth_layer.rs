@@ -21,7 +21,7 @@ use monaka_core::feature::Feature;
 pub use monaka_contract::manifest::HEADSET_DEPTH;
 use monaka_contract::protocol::DepthParams;
 use monaka_framegen::inputs::{self, EyeInputs, Motion};
-use monaka_producer::game::{Component, Lack, Start, Switch};
+use monaka_producer::game::{Component, Lack, Need, Start, Switch};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::*};
 use windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_STATE_COMMON;
 
@@ -32,7 +32,7 @@ static UNITS_PER_METRE: AtomicU32 = AtomicU32::new(0);
 /// The depth component for game `G`: the feature, the option, the switch. The game adds what it
 /// works on top of (`needs`) by struct update.
 pub const fn depth_layer<G: FrameInputs>() -> Component<G> {
-    Component { install: install::<G>, ..depth_layer_shape() }
+    Component { needs: &[Need::Feature(Feature::Stereo)], install: install::<G>, ..depth_layer_shape() }
 }
 
 /// [`depth_layer`] for a D3D11 game `G`.

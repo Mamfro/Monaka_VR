@@ -26,3 +26,12 @@ fn the_viewers_stated_failure_is_the_runs() {
     assert_eq!(failure(&said).as_deref(), Some("the game's head pose block is version 4, this Monaka reads version 3"));
     assert_eq!(failure("Live stereo; update cadence set by the producer."), None);
 }
+
+#[test]
+fn a_refusal_tells_the_producers_reason() {
+    let log = "    0.001 monaka_wolf_tnc 0.1.0\n    0.363 rejected: the game was started before Monaka; start it again while Monaka runs\n";
+    assert_eq!(refusal_from(log, code::NOT_READY), "The game was started before Monaka; start it again while Monaka runs.");
+    let host = "    0.400 |     0.363 rejected: cvar vr_enable is not where this build keeps it";
+    assert!(refusal_from(host, code::REVISION_MISMATCH).contains("(cvar vr_enable is not where this build keeps it)"));
+    assert_eq!(refusal_from("    0.001 started", 50), "The mod refused to start in this game (code 50); see the log.");
+}

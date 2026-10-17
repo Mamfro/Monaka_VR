@@ -1,8 +1,9 @@
 //! `monaka_play GAME [option=value ...]`: plays a game in VR from the command line, as the `monaka`
 //! window does (same options, same saved settings when none are given on the line), plus the
-//! options only the command line takes (`mode=auto`, `launch=off`, ...). The `tools\Play-*.ps1`
-//! scripts are thin wrappers over it. The PC checks without a headset run from here too, with the
-//! same option files (`tools\Harness-*.ps1`, `Capture-*.ps1` and `Probe-*.ps1` wrap them):
+//! options only the command line takes (`mode=auto`, `launch=off`, ...). The game packs'
+//! `tools\Play-*.ps1` scripts are thin wrappers over it. The PC checks without a headset run from
+//! here too, with the same option files (the packs' `tools\Harness-*.ps1`, `Capture-*.ps1` and
+//! `Probe-*.ps1` wrap them):
 //!
 //! ```text
 //! monaka_play dl1 aim=hand_rig render_size=headset

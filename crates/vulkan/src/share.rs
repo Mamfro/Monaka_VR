@@ -1,5 +1,7 @@
 //! Each present's frame out of the game's Vulkan device into a D3D12 device of Monaka's own: its
-//! colour (the swapchain image) and, when the game names it ([`on_depth`]), its depth. The D3D12
+//! colour (the swapchain image) and, when the game names them, its depth ([`on_depth`]) and its
+//! UI layer (the game's HUD drawn in an image of its own and kept out of the frame, [`on_layer`]).
+//! The D3D12
 //! device (on the game's GPU) makes a ring of shared buffers and two shared fences; the game's
 //! device imports them. At each present, on the game's queue: the images are copied into the ring's
 //! next buffers, and the "produced" fence signalled with the frame's number. On the D3D12 queue:
@@ -23,7 +25,9 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::core::Interface;
 
 /// One frame in Monaka's D3D12 device (in COMMON, ready once the queue reaches them): its colour,
-/// its format and size; its depth (32-bit float, its own size) when the game named one; its number.
+/// its format and size; its depth (32-bit float, its own size) when the game named one; its UI
+/// layer (the image's bytes as they are, its own size and format) when the game named one at this
+/// present; its number.
 pub struct Frame<'a> {
     pub device: &'a ID3D12Device,
     pub queue: &'a ID3D12CommandQueue,
@@ -31,6 +35,7 @@ pub struct Frame<'a> {
     pub format: DXGI_FORMAT,
     pub size: (u32, u32),
     pub depth: Option<&'a ID3D12Resource>,
+    pub layer: Option<&'a ID3D12Resource>,
     pub number: u64,
 }
 
@@ -44,18 +49,33 @@ pub struct Depth {
     pub size: (u32, u32),
 }
 
+/// A colour image of the game's to go out with the frame as its UI layer: the image, the layout it
+/// is in at the present (it is put back in it), its Vulkan format and size (as the record noted it,
+/// `device::color_image`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Layer {
+    pub image: VkImage,
+    pub layout: i32,
+    pub format: i32,
+    pub size: (u32, u32),
+}
+
 /// What a game does with each frame (publishes it, warps it), on the game's present thread.
 pub type FrameFn = fn(&Frame<'_>);
 /// The game's depth image at a present, if it has one now.
 pub type DepthFn = fn() -> Option<Depth>;
+/// The game's UI layer at a present, if its HUD went into one this frame.
+pub type LayerFn = fn() -> Option<Layer>;
 
 static ON_FRAME: OnceLock<FrameFn> = OnceLock::new();
 static ON_DEPTH: OnceLock<DepthFn> = OnceLock::new();
+static ON_LAYER: OnceLock<LayerFn> = OnceLock::new();
 static SHARING: Mutex<Option<Sharing>> = Mutex::new(None);
 static BROKEN: Mutex<Option<String>> = Mutex::new(None);
 static PRESENTS: AtomicU64 = AtomicU64::new(0);
 static SHARED: AtomicU64 = AtomicU64::new(0);
 static WITH_DEPTH: AtomicU64 = AtomicU64::new(0);
+static WITH_LAYER: AtomicU64 = AtomicU64::new(0);
 static BUSY: AtomicU64 = AtomicU64::new(0);
 
 /// The game's frame handler.
@@ -68,13 +88,19 @@ pub fn on_depth(depth: DepthFn) {
     let _ = ON_DEPTH.set(depth);
 }
 
+/// Where the game's UI layer is at each present.
+pub fn on_layer(layer: LayerFn) {
+    let _ = ON_LAYER.set(layer);
+}
+
 pub fn summary() -> String {
     let broken = BROKEN.locked().clone().map_or(String::new(), |why| format!("; stopped: {why}"));
     format!(
-        "{} presents, {} frames shared ({} with depth), {} skipped (ring busy); {}{broken}",
+        "{} presents, {} frames shared ({} with depth, {} with a UI layer), {} skipped (ring busy); {}{broken}",
         PRESENTS.load(Relaxed),
         SHARED.load(Relaxed),
         WITH_DEPTH.load(Relaxed),
+        WITH_LAYER.load(Relaxed),
         BUSY.load(Relaxed),
         device::state()
     )
@@ -154,12 +180,13 @@ struct Lane {
 }
 
 /// One slot: its command buffer and the fence its submission signals, its lanes (colour, and depth
-/// when the ring carries it), and the frame number it last carried.
+/// and the UI layer when the ring carries them), and the frame number it last carried.
 struct Slot {
     commands: VkCommandBuffer,
     done: VkFence,
     color: Lane,
     depth: Option<Lane>,
+    layer: Option<Lane>,
     number: u64,
 }
 
@@ -195,23 +222,25 @@ struct Sharing {
     queue: ID3D12CommandQueue,
     recorder: Recorder,
     /// The swapchain image's Vulkan format and lane; the depth's Vulkan format and lane, and the
-    /// pass making 24-bit depth a float.
+    /// pass making 24-bit depth a float; the UI layer's Vulkan format and lane.
     vk_format: i32,
     color: Shape,
     depth: Option<(i32, Shape)>,
     unpack: Option<Unpack24>,
+    layer: Option<(i32, Shape)>,
 }
 
 // SAFETY: plain handles and free-threaded D3D12 objects, used under the lock.
 unsafe impl Send for Sharing {}
 
-/// The D3D12 format a swapchain image of Vulkan `format` is shared as (its bytes as they are), and
-/// its bytes per texel.
+/// The D3D12 format a colour image (the swapchain's, a UI layer) of Vulkan `format` is shared as
+/// (its bytes as they are), and its bytes per texel.
 fn color_format(format: i32) -> Option<(DXGI_FORMAT, u32)> {
     match format {
         FORMAT_B8G8R8A8_UNORM | FORMAT_B8G8R8A8_SRGB => Some((DXGI_FORMAT_B8G8R8A8_UNORM, 4)),
         FORMAT_R8G8B8A8_UNORM | FORMAT_R8G8B8A8_SRGB => Some((DXGI_FORMAT_R8G8B8A8_UNORM, 4)),
         FORMAT_A2B10G10R10_UNORM_PACK32 => Some((DXGI_FORMAT_R10G10B10A2_UNORM, 4)),
+        FORMAT_R16G16B16A16_SFLOAT => Some((DXGI_FORMAT_R16G16B16A16_FLOAT, 8)),
         _ => None,
     }
 }
@@ -321,23 +350,41 @@ pub fn present(queue: VkQueue, swapchain: VkSwapchainKHR, index: u32) {
         }
         usable
     });
+    let layer = ON_LAYER.get().and_then(|layer| layer()).filter(|l| {
+        let usable = color_format(l.format).is_some();
+        if !usable {
+            log_first(1, format_args!("the game's UI layer (format {}) cannot go out", l.format));
+        }
+        usable
+    });
     let mut guard = SHARING.locked();
     let size = (chain.width, chain.height);
     let depth_shape = depth.map(|d| (d.format, d.size));
-    // A frame without the depth found goes out on the ring as it is; a new shape (or depth found
-    // for a ring made without) makes a new ring.
+    let layer_shape = layer.map(|l| (l.format, l.size));
+    // A frame without the depth (or layer) found goes out on the ring as it is; a new shape (or
+    // depth or a layer found for a ring made without) makes a new ring.
     let fits = guard.as_ref().is_some_and(|s| {
-        s.color.size == size && s.vk_format == chain.format && s.family == family && (depth_shape.is_none() || s.depth.map(|(f, shape)| (f, shape.size)) == depth_shape)
+        s.color.size == size
+            && s.vk_format == chain.format
+            && s.family == family
+            && (depth_shape.is_none() || s.depth.map(|(f, shape)| (f, shape.size)) == depth_shape)
+            && (layer_shape.is_none() || s.layer.map(|(f, shape)| (f, shape.size)) == layer_shape)
     });
     if !fits {
+        // Keep what the old ring carried that this frame did not name.
+        let (depth_shape, layer_shape) = match guard.as_ref() {
+            Some(old) => (depth_shape.or(old.depth.map(|(f, s)| (f, s.size))), layer_shape.or(old.layer.map(|(f, s)| (f, s.size)))),
+            None => (depth_shape, layer_shape),
+        };
         if let Some(old) = guard.take() {
             // A new shape: the old ring stays (the GPUs may still use it).
             std::mem::forget(old);
         }
-        match Sharing::new(&device, family, size, chain.format, depth_shape) {
+        match Sharing::new(&device, family, size, chain.format, depth_shape, layer_shape) {
             Ok(made) => {
                 let depth = depth_shape.map_or("no depth".to_owned(), |(f, s)| format!("depth {}x{} format {f}", s.0, s.1));
-                log!("frames shared: {}x{} format {} ({:?}), {depth}, {} slots", size.0, size.1, chain.format, made.color.format, SLOTS);
+                let layer = layer_shape.map_or("no UI layer".to_owned(), |(f, s)| format!("UI layer {}x{} format {f}", s.0, s.1));
+                log!("frames shared: {}x{} format {} ({:?}), {depth}, {layer}, {} slots", size.0, size.1, chain.format, made.color.format, SLOTS);
                 *guard = Some(made);
             }
             Err(why) => {
@@ -348,12 +395,15 @@ pub fn present(queue: VkQueue, swapchain: VkSwapchainKHR, index: u32) {
         }
     }
     let Some(sharing) = guard.as_mut() else { return };
-    match sharing.share(queue, image, depth) {
-        Ok(Some(slot)) => {
+    match sharing.share(queue, image, depth, layer) {
+        Ok(Some((slot, with_layer))) => {
             SHARED.fetch_add(1, Relaxed);
             let slot = &sharing.slots[slot];
             if slot.depth.is_some() {
                 WITH_DEPTH.fetch_add(1, Relaxed);
+            }
+            if with_layer {
+                WITH_LAYER.fetch_add(1, Relaxed);
             }
             if let Some(handler) = ON_FRAME.get() {
                 handler(&Frame {
@@ -363,6 +413,7 @@ pub fn present(queue: VkQueue, swapchain: VkSwapchainKHR, index: u32) {
                     format: sharing.color.format,
                     size: sharing.color.size,
                     depth: slot.depth.as_ref().map(|lane| &lane.texture),
+                    layer: slot.layer.as_ref().filter(|_| with_layer).map(|lane| &lane.texture),
                     number: slot.number,
                 });
             }
@@ -410,11 +461,12 @@ fn region(aspect: u32, shape: &Shape) -> VkBufferImageCopy {
 }
 
 impl Sharing {
-    fn new(device: &Device, family: u32, size: (u32, u32), vk_format: i32, depth: Option<(i32, (u32, u32))>) -> Result<Self, String> {
+    fn new(device: &Device, family: u32, size: (u32, u32), vk_format: i32, depth: Option<(i32, (u32, u32))>, layer: Option<(i32, (u32, u32))>) -> Result<Self, String> {
         let fns = Fns::load()?;
         let (format, texel) = color_format(vk_format).ok_or_else(|| format!("swapchain format {vk_format} not handled"))?;
         let color = Shape::new(size, texel, format);
         let depth = depth.map(|(f, size)| (f, Shape::new(size, 4, DXGI_FORMAT_R32_FLOAT)));
+        let layer = layer.and_then(|(f, size)| color_format(f).map(|(format, texel)| (f, Shape::new(size, texel, format))));
         let depth_kind = depth.and_then(|(f, _)| depth_format(f)).map(|(kind, _)| kind);
         let (d3d, queue) = d3d12(device.luid)?;
         let recorder = Recorder::new(&d3d, SLOTS + 1).map_err(|e| e.to_string())?;
@@ -429,18 +481,20 @@ impl Sharing {
             // 24-bit depth is written by the unpacking pass, so its texture takes unordered access.
             let flags = if depth_kind == Some(DepthKind::Unorm24) { D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS } else { D3D12_RESOURCE_FLAG_NONE };
             let depth_lane = depth.map(|(_, shape)| lane(&fns, device, &d3d, &shape, flags)).transpose()?;
-            slots.push(Slot { commands, done, color: color_lane, depth: depth_lane, number: 0 });
+            let layer_lane = layer.map(|(_, shape)| lane(&fns, device, &d3d, &shape, D3D12_RESOURCE_FLAG_NONE)).transpose()?;
+            slots.push(Slot { commands, done, color: color_lane, depth: depth_lane, layer: layer_lane, number: 0 });
         }
         let unpack = match (depth_kind, depth) {
             (Some(DepthKind::Unorm24), Some((_, shape))) => Some(Unpack24::new(&d3d, &slots, &shape)?),
             _ => None,
         };
-        Ok(Self { fns, device: vk, family, slots, produced, consumed, number: 0, d3d, queue, recorder, vk_format, color, depth, unpack })
+        Ok(Self { fns, device: vk, family, slots, produced, consumed, number: 0, d3d, queue, recorder, vk_format, color, depth, unpack, layer })
     }
 
-    /// `image` (the swapchain's, in PRESENT_SRC) and `depth` copied into the next slot on the game's
-    /// `queue`, then read into the slot's textures on ours. The slot, or none while the ring is busy.
-    fn share(&mut self, queue: VkQueue, image: VkImage, depth: Option<Depth>) -> Result<Option<usize>, String> {
+    /// `image` (the swapchain's, in PRESENT_SRC), `depth` and the UI `layer` copied into the next
+    /// slot on the game's `queue`, then read into the slot's textures on ours. The slot and whether
+    /// it carries this frame's layer, or none while the ring is busy.
+    fn share(&mut self, queue: VkQueue, image: VkImage, depth: Option<Depth>, layer: Option<Layer>) -> Result<Option<(usize, bool)>, String> {
         let next = self.number + 1;
         let index = (next % SLOTS as u64) as usize;
         let fns = &self.fns;
@@ -462,6 +516,14 @@ impl Sharing {
             }
             _ => None,
         };
+        let layer_copy = match (layer, &slot.layer, self.layer) {
+            (Some(layer), Some(lane), Some((_, shape))) => {
+                before.push(barrier(layer.image, IMAGE_ASPECT_COLOR, layer.layout, IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, ACCESS_MEMORY_WRITE, ACCESS_TRANSFER_READ));
+                after.push(barrier(layer.image, IMAGE_ASPECT_COLOR, IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, layer.layout, ACCESS_TRANSFER_READ, ACCESS_MEMORY_READ | ACCESS_MEMORY_WRITE));
+                Some((layer.image, lane.buffer, region(IMAGE_ASPECT_COLOR, &shape)))
+            }
+            _ => None,
+        };
         let color_region = region(IMAGE_ASPECT_COLOR, &self.color);
         // SAFETY: our own command buffer (its last submission finished: its fence is signalled),
         // recording copies of the game's images, on the game's present thread.
@@ -471,8 +533,8 @@ impl Sharing {
             check((fns.begin)(commands, &begin), "vkBeginCommandBuffer")?;
             (fns.barrier)(commands, PIPELINE_STAGE_ALL_COMMANDS, PIPELINE_STAGE_TRANSFER, 0, 0, std::ptr::null(), 0, std::ptr::null(), before.len() as u32, before.as_ptr());
             (fns.copy)(commands, image, IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, slot.color.buffer, 1, &color_region);
-            if let Some((depth_image, buffer, region)) = &depth_copy {
-                (fns.copy)(commands, *depth_image, IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, *buffer, 1, region);
+            for (source, buffer, region) in depth_copy.iter().chain(&layer_copy) {
+                (fns.copy)(commands, *source, IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, *buffer, 1, region);
             }
             (fns.barrier)(commands, PIPELINE_STAGE_TRANSFER, PIPELINE_STAGE_ALL_COMMANDS, 0, 0, std::ptr::null(), 0, std::ptr::null(), after.len() as u32, after.as_ptr());
             check((fns.end)(commands), "vkEndCommandBuffer")?;
@@ -504,16 +566,18 @@ impl Sharing {
         check(unsafe { (fns.submit)(queue, 1, &submit, slot.done) }, "vkQueueSubmit")?;
         self.number = next;
         self.slots[index].number = next;
-        self.read(index, depth_copy.is_some())?;
-        Ok(Some(index))
+        self.read(index, depth_copy.is_some(), layer_copy.is_some())?;
+        Ok(Some((index, layer_copy.is_some())))
     }
 
     /// Slot `index`'s buffers into its textures on our queue, once the game's copy is done; the
-    /// consumed fence then signalled. The depth lane only when `with_depth`.
-    fn read(&mut self, index: usize, with_depth: bool) -> Result<(), String> {
+    /// consumed fence then signalled. The depth lane only when `with_depth`, the layer's only when
+    /// `with_layer`.
+    fn read(&mut self, index: usize, with_depth: bool, with_layer: bool) -> Result<(), String> {
         let slot = &self.slots[index];
         let color = (&slot.color, self.color);
         let depth = slot.depth.as_ref().filter(|_| with_depth).zip(self.depth.map(|(_, s)| s));
+        let layer = slot.layer.as_ref().filter(|_| with_layer).zip(self.layer.map(|(_, s)| s));
         // SAFETY: GPU waits and copies on our own queue and resources.
         unsafe {
             self.queue.Wait(&self.produced.0, slot.number).map_err(|e| e.to_string())?;
@@ -529,6 +593,9 @@ impl Sharing {
                 (Some((lane, shape)), Some(unpack)) => unpack.record(&list, index, &lane.texture, &shape),
                 (Some((lane, shape)), None) => copy_in(&list, lane, &shape),
                 (None, _) => {}
+            }
+            if let Some((lane, shape)) = layer {
+                copy_in(&list, lane, &shape);
             }
             self.recorder.submit(&self.queue).map_err(|e| e.to_string())?;
             self.queue.Signal(&self.consumed.0, slot.number).map_err(|e| e.to_string())?;

@@ -30,6 +30,7 @@ pub mod pe;
 pub mod png;
 pub mod reach;
 pub mod rendering;
+pub mod run;
 pub mod scan;
 pub mod scrub;
 pub mod sha256;

@@ -59,11 +59,26 @@ pub struct DepthImage {
     pub _pad: u32,
 }
 
+/// A colour render target of the game's the width of a screen (one a copy may read), as the
+/// record keeps it.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ColorImage {
+    pub image: VkImage,
+    pub format: i32,
+    pub width: u32,
+    pub height: u32,
+    pub _pad: u32,
+}
+
 const QUEUES: usize = 16;
 const CHAINS: usize = 4;
 const DEPTHS: usize = 128;
-/// The record's layout; a copy with another layout leaves the record alone.
-const LAYOUT: u32 = 1;
+const COLORS: usize = 64;
+/// A colour render target at least this wide is noted, and made a copy's source.
+const SCREEN_WIDTH: u32 = 1024;
+/// The record's layout (also in its name); a copy with another layout leaves the record alone.
+const LAYOUT: u32 = 2;
 
 /// What the hooks of every producer copy in the game have seen, and the present handler of the
 /// newest one. Plain integers only (it lives in shared memory).
@@ -87,11 +102,12 @@ pub struct Record {
     pub queue_count: u32,
     pub chain_count: u32,
     pub depth_count: u32,
-    pub _pad2: u32,
+    pub color_count: u32,
     /// The game's queues: the handle, its family.
     pub queues: [[u64; 2]; QUEUES],
     pub chains: [Chain; CHAINS],
     pub depths: [DepthImage; DEPTHS],
+    pub colors: [ColorImage; COLORS],
 }
 
 // SAFETY: repr(C), integers and arrays of integers only.
@@ -182,16 +198,47 @@ pub fn depth_image(image: VkImage) -> Option<(i32, (u32, u32))> {
     with_record(|r| r.depths[..r.depth_count as usize].iter().find(|d| d.image == image).map(|d| (d.format, (d.width, d.height))))?
 }
 
+/// The format and size of the game's screen-wide colour render target `image` (one made since the
+/// first copy's hooks went in).
+pub fn color_image(image: VkImage) -> Option<(i32, (u32, u32))> {
+    with_record(|r| r.colors[..r.color_count as usize].iter().find(|c| c.image == image).map(|c| (c.format, (c.width, c.height))))?
+}
+
 /// Whether the hooks have seen the game make its device (this copy's or an earlier one's): not
 /// when it was made before any copy joined, or is still to be made.
 pub fn device_seen() -> bool {
     with_record(|r| r.device_state != 0).unwrap_or(false)
 }
 
+/// Whether a record of an earlier layout (an older producer build's, under its own name) is in this
+/// process: the game was started under that build, whose hooks keep their notes there, which this
+/// copy cannot read.
+pub fn older_record() -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Memory::{FILE_MAP_READ, OpenFileMappingW};
+    use windows::core::PCWSTR;
+    let pid = std::process::id();
+    // Layout 1 had no layout in its name.
+    let names = std::iter::once(format!("Local\\monaka-vulkan-{pid}")).chain((2..LAYOUT).map(|layout| format!("Local\\monaka-vulkan-{pid}-{layout}")));
+    names.into_iter().any(|name| {
+        let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+        // SAFETY: opens a named mapping by a NUL-terminated name, and closes it at once.
+        unsafe {
+            match OpenFileMappingW(FILE_MAP_READ.0, false, PCWSTR(wide.as_ptr())) {
+                Ok(handle) => {
+                    let _ = CloseHandle(handle);
+                    true
+                }
+                Err(_) => false,
+            }
+        }
+    })
+}
+
 /// Why nothing can be shared yet, for the summary.
 pub fn state() -> String {
     with_record(|r| match r.device_state {
-        1 => format!("device with sharing; {} swapchains, {} depth images", r.chain_count, r.depth_count),
+        1 => format!("device with sharing; {} swapchains, {} depth images, {} screen-wide colour images", r.chain_count, r.depth_count, r.color_count),
         2 => "the game's device has no sharing extensions".to_owned(),
         _ => "no device seen since the first hooks went in (made before them?)".to_owned(),
     })
@@ -218,7 +265,7 @@ pub fn give_back_presents(handler: PresentHandler) {
 /// Called once at start, before the hooks are enabled; `module` imports these from vulkan-1.dll.
 pub unsafe fn install(hooks: &mut Hooks, module: &Module) -> Result<(), Rejection> {
     let pid = std::process::id();
-    let block = SharedBlock::<Record>::create(&format!("Local\\monaka-vulkan-{pid}"), &format!("Local\\monaka-vulkan-{pid}-lock"), Create::OrOpen)
+    let block = SharedBlock::<Record>::create(&format!("Local\\monaka-vulkan-{pid}-{LAYOUT}"), &format!("Local\\monaka-vulkan-{pid}-{LAYOUT}-lock"), Create::OrOpen)
         .map_err(|e| Rejection::not_ready(format!("the Vulkan record: {e}")))?;
     *RECORD.locked() = Some(block);
     if with_record(|r| r.device_state).is_some_and(|seen| seen != 0) {
@@ -354,13 +401,15 @@ unsafe extern "system" fn get_device_queue(device: VkDevice, family: u32, index:
     });
 }
 
-/// `vkCreateImage`: a depth image also a copy's source, and noted with its format and size.
+/// `vkCreateImage`: a depth image, or a colour render target the width of a screen, also a copy's
+/// source, and noted with its format and size.
 unsafe extern "system" fn create_image(device: VkDevice, info: *const VkImageCreateInfo, allocator: *const c_void, out: *mut VkImage) -> VkResult {
     let flight = InFlight::enter();
     // SAFETY: a copy of the game's create info.
     let mut ours: VkImageCreateInfo = unsafe { std::ptr::read(info) };
     let depth = ours.usage & IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT != 0;
-    if depth {
+    let screen = ours.usage & IMAGE_USAGE_COLOR_ATTACHMENT != 0 && ours.extent[0] >= SCREEN_WIDTH;
+    if depth || screen {
         ours.usage |= IMAGE_USAGE_TRANSFER_SRC;
     }
     // SAFETY: the original, with the game's arguments and our usage.
@@ -379,6 +428,20 @@ unsafe extern "system" fn create_image(device: VkDevice, info: *const VkImageCre
             r.depth_count += 1;
         });
         log_first(16, format_args!("Vulkan depth image {image:#x}: {}x{} format {}", ours.extent[0], ours.extent[1], ours.format));
+    }
+    if screen && result == VK_SUCCESS && !out.is_null() {
+        // SAFETY: the image the call just made.
+        let image = unsafe { *out };
+        let entry = ColorImage { image, format: ours.format, width: ours.extent[0], height: ours.extent[1], _pad: 0 };
+        with_record(|r| {
+            // The newest kept: the oldest goes when the list is full.
+            if r.color_count as usize == COLORS {
+                r.colors.copy_within(1.., 0);
+                r.color_count -= 1;
+            }
+            r.colors[r.color_count as usize] = entry;
+            r.color_count += 1;
+        });
     }
     result
 }

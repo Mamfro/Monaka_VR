@@ -358,6 +358,8 @@ impl PadChain {
                 println!("{ms:>6} ms: reach: buzz on the {} hand", ["left", "right"][hand]);
             }
         }
+        let held = pad.buttons;
+        let mut menu_has_pad = false;
         if let Some((toggle, open)) = self.menu.as_mut() {
             if toggle.toggled(&mut pad, at) {
                 *open = !*open;
@@ -365,9 +367,11 @@ impl PadChain {
             }
             if *open {
                 pad = Gamepad::default();
+                menu_has_pad = true;
             }
         }
-        if self.chord.step(&mut pad, at) {
+        let chorded = if menu_has_pad { self.chord.step_held(held, at) } else { self.chord.step(&mut pad, at) };
+        if chorded {
             println!("{ms:>6} ms: capture chord");
         }
         pad

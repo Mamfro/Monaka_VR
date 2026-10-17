@@ -5,10 +5,21 @@ use monaka_channel::ChannelName;
 use monaka_channel::fingers::FingerChannel;
 use monaka_channel::hands::HandChannel;
 use monaka_channel::reticles::ReticleChannel;
-use monaka_contract::protocol::{FingerPose, HandPose, LEFT_HAND, RIGHT_HAND};
+use monaka_contract::protocol::{FingerPose, HandPose, HeadPose, LEFT_HAND, RIGHT_HAND};
 use monaka_producer::log;
 use std::sync::Mutex;
+use std::time::Instant;
 use monaka_core::sync::Locked;
+
+/// PC checks without a headset: palms made here instead of read ([`use_synthetic`]).
+static SYNTHETIC: Mutex<Option<Synthetic>> = Mutex::new(None);
+
+struct Synthetic {
+    since: Instant,
+    /// Both palms lost for a second, two seconds after they are first asked for.
+    loss_test: bool,
+    first_asked: Option<Instant>,
+}
 
 /// A controller not located for this long is off or asleep: head aim takes over.
 const MAX_AGE_MS: u64 = 250;
@@ -48,6 +59,7 @@ pub fn open(channel: &ChannelName) {
 pub fn close() {
     *CHANNEL.locked() = None;
     *FINGERS.locked() = None;
+    *SYNTHETIC.locked() = None;
     if let Some(mut reticles) = RETICLES.locked().take() {
         reticles.write(LEFT_HAND, None);
         reticles.write(RIGHT_HAND, None);
@@ -81,12 +93,41 @@ pub fn aims_and_grips() -> ([Option<HandPose>; 2], [Option<HandPose>; 2]) {
 
 /// Controller `side`'s palm ([`HandPose::palm`]) in the headset's tracking space, if tracked.
 pub fn palm(side: usize) -> Option<HandPose> {
-    CHANNEL.lock().ok()?.as_mut()?.read_palm(side, MAX_AGE_MS)
+    palms().get(side).copied().flatten()
 }
 
-/// Both palms, by side.
+/// Both palms, by side, from one viewer write (aim and grip of the same moment); the synthetic
+/// ones while PC checks make them up ([`use_synthetic`]).
 pub fn palms() -> [Option<HandPose>; 2] {
+    if let Some(synthetic) = SYNTHETIC.locked().as_mut() {
+        return synthetic_palms(synthetic);
+    }
     let Ok(mut channel) = CHANNEL.lock() else { return [None; 2] };
     let Some(hands) = channel.as_mut() else { return [None; 2] };
-    [hands.read_palm(LEFT_HAND, MAX_AGE_MS), hands.read_palm(RIGHT_HAND, MAX_AGE_MS)]
+    hands.read_palms(MAX_AGE_MS)
+}
+
+/// PC checks without a headset (`on`): the palms swing gently side to side in front of the head
+/// instead of being read; `loss_test` loses both for a second, two seconds after they are first
+/// asked for, to see what a game does without them. Off: read again.
+pub fn use_synthetic(on: bool, loss_test: bool) {
+    *SYNTHETIC.locked() = on.then(|| Synthetic { since: Instant::now(), loss_test, first_asked: None });
+}
+
+fn synthetic_palms(synthetic: &mut Synthetic) -> [Option<HandPose>; 2] {
+    let asked = synthetic.first_asked.get_or_insert_with(Instant::now).elapsed().as_secs_f32();
+    if synthetic.loss_test && (2.0..3.0).contains(&asked) {
+        return [None; 2];
+    }
+    let t = synthetic.since.elapsed().as_secs_f32();
+    std::array::from_fn(|i| {
+        let side = if i == LEFT_HAND { -1.0 } else { 1.0 };
+        let head = HeadPose::synthetic(side * 15.0 * (t * 1.5).sin(), 0.0, HeadPose::SYNTHETIC_FOV, 0.064);
+        Some(HandPose {
+            orientation: head.orientation,
+            position: [side * (0.24 + 0.05 * (t * 1.5).sin()), -0.20 + 0.06 * (t * 1.5 + side).cos(), -0.42],
+            valid: 1,
+            received_tick: monaka_channel::tick(),
+        })
+    })
 }

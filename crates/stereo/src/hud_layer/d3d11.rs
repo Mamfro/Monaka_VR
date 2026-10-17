@@ -19,7 +19,7 @@
 //! code, found on an immediate and a deferred context of our own (Direct3D rewrites the immediate
 //! context's vtable while a game runs, which would undo a vtable hook). Each frame's HUD goes
 //! where the game's frame labels put it ([`FrameLabels`]: the eye and pose of the frame being
-//! drawn, the eye's frustum and the eyes' separation) at the HUD's distance ([`place_eye`]); the
+//! drawn, the eye's frustum and the eyes' separation) at the HUD's distance ([`super::place_eye`]); the
 //! game calls [`frame_end`] at each present.
 //!
 //! A game that draws its frame on its immediate context alone can have more ([`install_with`], a
@@ -747,14 +747,7 @@ pub fn install_with<G: FrameLabels>(hooks: &mut Hooks, setup: Setup, game_contex
 /// labels.
 fn placement<G: FrameLabels>(distance: f32) -> Option<HudPlacement> {
     let frame = G::labelled()?;
-    place_eye::<G>(&frame.pose, frame.eye, distance)
-}
-
-/// Where the HUD goes in eye `eye` of a frame drawn from `pose`, `distance` metres away: in the
-/// eye's frustum, toward the nose by half the eyes' separation seen at that distance (`G`'s frame
-/// labels). `None` while the labels have no frustum or separation.
-pub fn place_eye<G: FrameLabels>(pose: &HeadPose, eye: usize, distance: f32) -> Option<HudPlacement> {
-    Some(HudPlacement::new(G::frustum(pose, eye)?, eye, G::separation(pose)?, distance))
+    super::place_eye::<G>(&frame.pose, frame.eye, distance)
 }
 
 /// Where the HUD goes in each eye of a frame drawn from `pose`, as (x, y, width, height) in pixels
@@ -768,7 +761,7 @@ pub fn eye_rects<G: FrameLabels>(pose: &HeadPose, width: u32, height: u32) -> [[
 /// [`eye_rects`] with the HUD's scale and distance (`None`: not placed).
 fn rects<G: FrameLabels>(hud: Option<(f32, f32)>, pose: &HeadPose, width: u32, height: u32) -> [[f32; 4]; 2] {
     let base = Rect::sized(width as f32, height as f32);
-    std::array::from_fn(|eye| match hud.and_then(|(scale, distance)| Some((scale, place_eye::<G>(pose, eye, distance)?))) {
+    std::array::from_fn(|eye| match hud.and_then(|(scale, distance)| Some((scale, super::place_eye::<G>(pose, eye, distance)?))) {
         Some((scale, at)) => at.rect(base, base.aspect(), scale).array(),
         None => base.array(),
     })

@@ -18,7 +18,7 @@ use monaka_core::math::{Quat, cross, dot, forward_axis, right_axis, wrap_degrees
 use monaka_contract::protocol::{HandPose, LEFT_HAND, RIGHT_HAND};
 use monaka_core::sync::Locked;
 use monaka_pad::actions::{self, Action, Actions, Reading, Source};
-use monaka_producer::game::{Component, Lack, On, Run, Start, Switch};
+use monaka_producer::game::{Component, Lack, Need, Start, Switch, lines};
 use monaka_producer::log;
 use std::sync::Mutex;
 
@@ -58,26 +58,25 @@ pub trait Lockpicks: Actions + HandRig {
         Ok(())
     }
 
-    /// Logs the hook's counts, the hooks out.
-    fn report() {}
+    /// The hooks' counts, for the stop's log (empty: nothing to say).
+    fn summary() -> String {
+        String::new()
+    }
 }
 
 /// Lockpicking by hand for game `G`, with motion controls (`lockpick_by_hand=0`: the sticks, for a
 /// test). A game says what it works on top of by struct update.
 pub const fn lockpick<G: Lockpicks>() -> Component<G> {
     Component {
+        needs: &[Need::Feature(Feature::HandRig)],
         name: "lockpick",
         features: &[Feature::Lockpick],
         switch: Some(Switch::new("lockpick_by_hand", true, "the game's lockpick")),
-        on: on::<G>,
         install: install::<G>,
-        release: release::<G>,
+        release,
+        summary: Some(summary::<G>),
         ..Component::NONE
     }
-}
-
-fn on<G: Lockpicks>(run: &Run<'_, G>) -> On {
-    On::when(run.shared.aim.rig, "aim is not motion controls")
 }
 
 /// Where a hand's twist was as the lock began.
@@ -236,13 +235,14 @@ fn install<G: Lockpicks>(start: &mut Start<'_, G>) -> Result<(), Lack> {
     Ok(())
 }
 
-fn release<G: Lockpicks>() {
+fn release() {
     actions::follow(Action::Pick, None);
     actions::follow(Action::Turn, None);
-    G::report();
-    if std::mem::take(&mut *INSTALLED.locked()) {
-        log!("lockpicking by hand: {} locks", PICKING.locked().locks());
-    }
+    *INSTALLED.locked() = false;
+}
+
+fn summary<G: Lockpicks>() -> String {
+    lines(&[G::summary(), format!("lockpicking by hand: {} locks", PICKING.locked().locks())])
 }
 
 #[cfg(test)]

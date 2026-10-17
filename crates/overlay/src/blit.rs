@@ -119,7 +119,7 @@ impl BlitPass {
 
 /// The format to read a texture stored as `format` with: a typeless one as its plain typed one,
 /// a typed one as itself.
-fn plain(format: DXGI_FORMAT) -> DXGI_FORMAT {
+pub(crate) fn plain(format: DXGI_FORMAT) -> DXGI_FORMAT {
     match format {
         DXGI_FORMAT_R8G8B8A8_TYPELESS => DXGI_FORMAT_R8G8B8A8_UNORM,
         DXGI_FORMAT_B8G8R8A8_TYPELESS => DXGI_FORMAT_B8G8R8A8_UNORM,

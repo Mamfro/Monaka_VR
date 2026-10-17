@@ -51,7 +51,7 @@ fn a_camera_that_turns_by_the_angles_keeps_the_share_as_it_was() {
     let _serial = crate::look::tests::serial();
     let held = Share { yaw: 60f32.to_radians(), pitch: 10f32.to_radians() };
     let run = |holds: fn() -> bool| {
-        *GAME.locked() = Some(GameFns { camera_taken: || true, head: || Some(HeadPose::synthetic(5.0, 0.0, HeadPose::SYNTHETIC_FOV, 0.064)), holds });
+        *GAME.locked() = Some(GameFns { camera_taken: || true, head: || Some(HeadPose::synthetic(5.0, 0.0, HeadPose::SYNTHETIC_FOV, 0.064)), holds, pitch: Pitch::Own });
         PAUSE_HOLD.store(false, Relaxed);
         AIMING.store(true, Relaxed);
         *STATE.locked() = State { held, commands: 0, aimed: 0, last_command: None, holding_after_pause: 0, pauses: 0 };
@@ -72,7 +72,7 @@ fn a_camera_that_turns_by_the_angles_keeps_the_share_as_it_was() {
 fn a_menu_leaving_the_camera_alone_keeps_the_share_and_reports_it_baked() {
     let _serial = crate::look::tests::serial();
     let held = Share { yaw: 30f32.to_radians(), pitch: 5f32.to_radians() };
-    *GAME.locked() = Some(GameFns { camera_taken: || false, head: || Some(HeadPose::synthetic(5.0, 0.0, HeadPose::SYNTHETIC_FOV, 0.064)), holds: || true });
+    *GAME.locked() = Some(GameFns { camera_taken: || false, head: || Some(HeadPose::synthetic(5.0, 0.0, HeadPose::SYNTHETIC_FOV, 0.064)), holds: || true, pitch: Pitch::Own });
     PAUSE_HOLD.store(false, Relaxed);
     AIMING.store(true, Relaxed);
     *STATE.locked() = State { held, commands: 0, aimed: 0, last_command: None, holding_after_pause: 0, pauses: 0 };
@@ -86,4 +86,25 @@ fn a_menu_leaving_the_camera_alone_keeps_the_share_and_reports_it_baked() {
     assert_eq!((angles, kept), (Some((240.0, 215.0)), held));
     // The eye site turns that share back out of the camera, so the head looks around.
     assert_eq!(baked, Some(held));
+}
+
+#[test]
+fn head_alone_drops_the_games_own_pitch_and_keeps_its_turns() {
+    let _serial = crate::look::tests::serial();
+    let held = Share { yaw: 2f32.to_radians(), pitch: 3f32.to_radians() };
+    *GAME.locked() = Some(GameFns { camera_taken: || false, head: || Some(HeadPose::synthetic(5.0, 8.0, HeadPose::SYNTHETIC_FOV, 0.064)), holds: || false, pitch: Pitch::HeadAlone });
+    PAUSE_HOLD.store(false, Relaxed);
+    AIMING.store(true, Relaxed);
+    *STATE.locked() = State { held, commands: 0, aimed: 0, last_command: None, holding_after_pause: 0, pauses: 0 };
+    // The held share's pitch (3 degrees up: -3 in the command's degrees) and 20 more down from the
+    // game's own input since; the yaw with the game's own turning in it.
+    let angles = built(17.0, 100.0);
+    AIMING.store(false, Relaxed);
+    HOLDING.store(false, Release);
+    *GAME.locked() = None;
+    let next = std::mem::take(&mut STATE.locked().held);
+    let head = head_share(HeadPose::synthetic(5.0, 8.0, HeadPose::SYNTHETIC_FOV, 0.064).orientation);
+    assert_eq!(next, head);
+    // The pitch is the head's alone; the yaw keeps the game's own turn, the share swapped.
+    assert_eq!(angles, Some((degrees(head).1, reshare(17.0, 100.0, held, head).1)));
 }

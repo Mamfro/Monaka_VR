@@ -19,7 +19,7 @@
 //!   targets (each view's size noted at the game device's `CreateRenderTargetView`; a view made
 //!   before the hooks went in is sized by the pass's viewport, from `RSSetViewports`), and `Reset`
 //!   starts a list afresh. The list calls come from the game's own lists ([`crate::lists12`], from
-//!   its queue, [`GameQueue`]); where the game records on Streamline's proxy lists, VRS and the
+//!   its queue, [`crate::queue12::game_queue`]); where the game records on Streamline's proxy lists, VRS and the
 //!   image writes go on the native list behind the proxy.
 //! - None for a frame shown flat (a menu), a frame whose eye is not known, or a game rendering its
 //!   scene at the output size (its scene passes cannot be told from the rest).
@@ -27,10 +27,11 @@
 //! Its parts: the rings and the component (here), the scene's size and each frame's eye (`frame`),
 //! the hooks (`hooks`), the images (`images`) and the counts (`counts`).
 
+use monaka_core::feature::Feature;
 use crate::driver::{Label, Pending};
 use crate::feature::DRIVER;
 use crate::lists12::{self, Subscriber};
-use crate::providers::{FrameInputs, GameQueue};
+use crate::providers::FrameInputs;
 use monaka_channel::d3d12::{self, barrier, placed, subresource};
 use monaka_core::camera::Frustum;
 use monaka_contract::manifest::{Kind, Opt, Shown, choice, line, opt};
@@ -38,7 +39,7 @@ use monaka_core::options::Options;
 use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
 use monaka_hook::{Hooks, InFlight, Original, mem};
-use monaka_producer::game::{Component, Every, Lack, Missing, OrMissing, Start, Switch};
+use monaka_producer::game::{Component, Every, Lack, Missing, Need, OrMissing, Start, Switch};
 use monaka_producer::{log, log_first};
 use monaka_streamline::imports;
 use std::cell::OnceCell;
@@ -219,8 +220,9 @@ const EVERY: [Every; 1] = [Every::millis(2000, report)];
 /// Foveated rendering for game `G` (`foveated_rendering`, on by default), from its frame labels
 /// (each frame's eye, head pose and frustum), inputs (the render size) and queue (its device and
 /// command lists). A game says what it works on top of (`needs`: its eyes) by struct update.
-pub const fn foveation<G: FrameInputs + GameQueue>() -> Component<G> {
+pub const fn foveation<G: FrameInputs>() -> Component<G> {
     Component {
+        needs: &[Need::Feature(Feature::Stereo)],
         name: "foveation",
         options: &OPTIONS,
         settings: read_settings,
@@ -245,9 +247,9 @@ struct GameFns {
     frustum: fn(&HeadPose, usize) -> Option<Frustum>,
 }
 
-fn install<G: FrameInputs + GameQueue>(start: &mut Start<'_, G>) -> Result<(), Lack> {
+fn install<G: FrameInputs>(start: &mut Start<'_, G>) -> Result<(), Lack> {
     let rings = Rings::read(start.options);
-    let queue = G::game_queue().or_missing("the game queue is not known (D3D11, or no present yet)")?;
+    let queue = crate::queue12::game_queue(None).or_missing("the game queue is not known (D3D11, or no present yet)")?;
     let device = d3d12::device_of(&queue).map_err(|e| Lack::Missing(format!("the game's device: {e}")))?;
     {
         let mut state = STATE.locked();

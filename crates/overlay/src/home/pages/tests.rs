@@ -5,13 +5,20 @@ use monaka_channel::d3d::{create_device, read_image};
 use monaka_contract::manifest::Values;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM;
 
-/// Each panel draws: an opaque background with text on it, the cursor where the pointer is, and
-/// nothing drawn again while nothing changed. `MONAKA_HOME_PNG=<folder>` saves them.
+/// Each panel draws, solid and frosted: a background nearly opaque (or letting the blurred game
+/// through) with text on it, the cursor where the pointer is. `MONAKA_HOME_PNG=<folder>` saves them.
 #[test]
 fn the_panels_draw() {
-    let folder = run_folder("pages", &Values::default());
+    for frosted in [false, true] {
+        draw_the_panels(frosted);
+    }
+}
+
+fn draw_the_panels(frosted: bool) {
+    let folder = run_folder(if frosted { "pages-frosted" } else { "pages" }, &Values::default());
     std::fs::write(folder.join("monaka.log"), (0..80).map(|i| format!("Line {i} of the run's log\n")).collect::<String>()).unwrap();
     let mut home = Home::load(Some(&folder));
+    home.set_frosted(frosted);
     home.refresh(std::time::Instant::now());
     let (device, context, _) = create_device(None).unwrap();
     let mut pages = Pages::new(DXGI_FORMAT_R8G8B8A8_UNORM);
@@ -21,7 +28,13 @@ fn the_panels_draw() {
         let (width, height, pixels) = read_image(&device, &context, &image).unwrap();
         assert_eq!([width, height], PIXELS);
         let alpha = |x: u32, y: u32| pixels[((y * width + x) * 4 + 3) as usize];
-        assert!(alpha(width / 2, height / 2) > 200, "{which:?}: the background is nearly opaque");
+        // Below the title, where nothing but the background is.
+        let background = alpha(width - 40, 40);
+        if frosted {
+            assert!((120..=200).contains(&background), "{which:?}: frosted, the game shows through ({background})");
+        } else {
+            assert!(background > 200, "{which:?}: the background is nearly opaque ({background})");
+        }
         assert_eq!(alpha(1, 1), 0, "{which:?}: its rounded corner is clear");
         let shades: std::collections::HashSet<u8> = pixels.chunks(4).map(|p| p[0]).collect();
         assert!(shades.len() > 20, "{which:?}: {} shades", shades.len());
@@ -32,7 +45,7 @@ fn the_panels_draw() {
             assert!(bottom[0] > 200 && bottom[2] < 120, "{which:?}: the outline's bottom edge is {bottom:?}");
         }
         if let Some(out) = std::env::var_os("MONAKA_HOME_PNG") {
-            let out = std::path::Path::new(&out).join(format!("home-{}.png", which.title().to_lowercase()));
+            let out = std::path::Path::new(&out).join(format!("home-{}{}.png", which.title().to_lowercase(), if frosted { "-frosted" } else { "" }));
             std::fs::write(out, monaka_core::png::rgba(width, height, &pixels)).unwrap();
         }
     }

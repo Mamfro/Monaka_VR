@@ -32,11 +32,14 @@ use monaka_core::feature::{Available, Feature, Features, Message, fault, repeate
 use monaka_contract::host;
 use monaka_contract::manifest::{EXTRA, Kind, Manifest, OTHER_BUILDS, Opt, opt};
 use monaka_core::options::{Options, Shared};
+use monaka_core::rendering::StereoMethod;
 use monaka_contract::protocol::ChannelName;
 use monaka_core::situation::Situation;
+use monaka_core::run::RunCell;
 use monaka_hook::Hooks;
+use std::any::Any;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::*};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::*};
 use std::time::{Duration, Instant};
 use monaka_core::sync::Locked;
 
@@ -48,8 +51,9 @@ pub trait Game: Sized + 'static {
     /// one refuses the pack and names it. Those it does more with are worked out from its
     /// components ([`host_uses`]).
     const REQUIRES: &'static [&'static str] = &[];
-    /// This build's facts (addresses, layouts, the engine's objects), from [`Game::prepare`].
-    type Build;
+    /// This build's facts (addresses, layouts, the engine's objects), from [`Game::prepare`]; a
+    /// detour reads them with [`build`].
+    type Build: Send + Sync + 'static;
     /// What the game's per-frame hook hands the components' `frame` ([`frame`]).
     type Frame;
 
@@ -150,8 +154,12 @@ pub struct Component<G: Game> {
     pub options: &'static [Opt],
     /// The games (manifest ids) it serves; empty: every game of the producer.
     pub games: &'static [&'static str],
-    /// Components earlier in the list it works on top of: off when any of them is.
-    pub needs: &'static [&'static Component<G>],
+    /// The stereo methods it serves (`monaka_core::rendering`); empty: every method. Off for a run
+    /// of another method ([`method`]).
+    pub methods: &'static [StereoMethod],
+    /// What it works on top of, each resolved for the running game to one earlier component
+    /// ([`Need`]): off when any of them is.
+    pub needs: &'static [Need<G>],
     /// It needs the run's channel (publishing, the pose channel, the controllers).
     pub needs_channel: bool,
     /// Reads its own options (also what the manifest test calls, to prove each option is read).
@@ -183,6 +191,210 @@ pub struct Component<G: Game> {
     pub summary: Option<fn() -> String>,
 }
 
+/// What a component works on top of. A ready-made says its needs by feature, once, so a game lists
+/// it without restating them; a game whose need differs replaces them by struct update.
+///
+/// Each need resolves, for every game the component serves, to one earlier component serving that
+/// game; one that does not resolve does not build, the message naming the components:
+///
+/// ```
+/// use monaka_producer::game::*;
+/// use monaka_producer::{Rejection, Session};
+/// use monaka_contract::manifest::{Manifest, Opt};
+/// use monaka_core::feature::Feature;
+/// use monaka_core::options::Options;
+///
+/// struct Good;
+/// const RIG: Component<Good> = Component { name: "rig", features: &[Feature::HandRig], ..Component::NONE };
+/// const FINGERS: Component<Good> = Component { name: "fingers", needs: &[Need::Feature(Feature::HandRig)], ..Component::NONE };
+/// impl Game for Good {
+///     const MANIFESTS: &'static [Manifest] = &[];
+///     const ADAPTER: Adapter<Good> = Adapter { components: &[&RIG, &FINGERS] };
+///     type Build = ();
+///     type Frame = ();
+///     fn prepare(_: &'static Session, _: &'static Manifest, _: &Options) -> Result<(), Rejection> { Ok(()) }
+/// }
+/// const OPTIONS: [Opt; options_len::<Good>("good")] = options::<Good, { options_len::<Good>("good") }>("good");
+/// ```
+///
+/// No earlier component provides the feature (here: the rig is listed after):
+///
+/// ```compile_fail
+/// # use monaka_producer::game::*;
+/// # use monaka_producer::{Rejection, Session};
+/// # use monaka_contract::manifest::{Manifest, Opt};
+/// # use monaka_core::feature::Feature;
+/// # use monaka_core::options::Options;
+/// struct Bad;
+/// const RIG: Component<Bad> = Component { name: "rig", features: &[Feature::HandRig], ..Component::NONE };
+/// const FINGERS: Component<Bad> = Component { name: "fingers", needs: &[Need::Feature(Feature::HandRig)], ..Component::NONE };
+/// impl Game for Bad {
+///     const MANIFESTS: &'static [Manifest] = &[];
+///     const ADAPTER: Adapter<Bad> = Adapter { components: &[&FINGERS, &RIG] };
+///     type Build = ();
+///     type Frame = ();
+///     fn prepare(_: &'static Session, _: &'static Manifest, _: &Options) -> Result<(), Rejection> { Ok(()) }
+/// }
+/// const OPTIONS: [Opt; options_len::<Bad>("bad")] = options::<Bad, { options_len::<Bad>("bad") }>("bad");
+/// ```
+///
+/// Two earlier components provide it: the game names one with [`Need::On`]:
+///
+/// ```compile_fail
+/// # use monaka_producer::game::*;
+/// # use monaka_producer::{Rejection, Session};
+/// # use monaka_contract::manifest::{Manifest, Opt};
+/// # use monaka_core::feature::Feature;
+/// # use monaka_core::options::Options;
+/// struct Bad;
+/// const GUNS: Component<Bad> = Component { name: "guns", features: &[Feature::HandRig], ..Component::NONE };
+/// const RIG: Component<Bad> = Component { name: "rig", features: &[Feature::HandRig], ..Component::NONE };
+/// const FINGERS: Component<Bad> = Component { name: "fingers", needs: &[Need::Feature(Feature::HandRig)], ..Component::NONE };
+/// impl Game for Bad {
+///     const MANIFESTS: &'static [Manifest] = &[];
+///     const ADAPTER: Adapter<Bad> = Adapter { components: &[&GUNS, &RIG, &FINGERS] };
+///     type Build = ();
+///     type Frame = ();
+///     fn prepare(_: &'static Session, _: &'static Manifest, _: &Options) -> Result<(), Rejection> { Ok(()) }
+/// }
+/// const OPTIONS: [Opt; options_len::<Bad>("bad")] = options::<Bad, { options_len::<Bad>("bad") }>("bad");
+/// ```
+///
+/// The provider serves fewer games than the component on top of it:
+///
+/// ```compile_fail
+/// # use monaka_producer::game::*;
+/// # use monaka_producer::{Rejection, Session};
+/// # use monaka_contract::manifest::{Manifest, Opt};
+/// # use monaka_core::feature::Feature;
+/// # use monaka_core::options::Options;
+/// struct Bad;
+/// const RIG: Component<Bad> = Component { name: "rig", features: &[Feature::HandRig], games: &["two"], ..Component::NONE };
+/// const FINGERS: Component<Bad> = Component { name: "fingers", needs: &[Need::Feature(Feature::HandRig)], ..Component::NONE };
+/// impl Game for Bad {
+///     const MANIFESTS: &'static [Manifest] = &[];
+///     const ADAPTER: Adapter<Bad> = Adapter { components: &[&RIG, &FINGERS] };
+///     type Build = ();
+///     type Frame = ();
+///     fn prepare(_: &'static Session, _: &'static Manifest, _: &Options) -> Result<(), Rejection> { Ok(()) }
+/// }
+/// const OPTIONS: [Opt; options_len::<Bad>("one")] = options::<Bad, { options_len::<Bad>("one") }>("one");
+/// ```
+///
+/// A named need listed after:
+///
+/// ```compile_fail
+/// # use monaka_producer::game::*;
+/// # use monaka_producer::{Rejection, Session};
+/// # use monaka_contract::manifest::{Manifest, Opt};
+/// # use monaka_core::options::Options;
+/// struct Bad;
+/// const A: Component<Bad> = Component { name: "a", ..Component::NONE };
+/// const B: Component<Bad> = Component { name: "b", needs: &[Need::On(&A)], ..Component::NONE };
+/// impl Game for Bad {
+///     const MANIFESTS: &'static [Manifest] = &[];
+///     const ADAPTER: Adapter<Bad> = Adapter { components: &[&B, &A] };
+///     type Build = ();
+///     type Frame = ();
+///     fn prepare(_: &'static Session, _: &'static Manifest, _: &Options) -> Result<(), Rejection> { Ok(()) }
+/// }
+/// const OPTIONS: [Opt; options_len::<Bad>("bad")] = options::<Bad, { options_len::<Bad>("bad") }>("bad");
+/// ```
+pub enum Need<G: Game> {
+    /// Whichever earlier component provides this feature for the running game; exactly one must.
+    Feature(Feature),
+    /// This component (a need the feature does not say, or a pick between two providers).
+    On(&'static Component<G>),
+}
+
+/// Why a need does not resolve (each a build error through [`options`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unresolved {
+    /// No component in the list provides the feature for the game.
+    NoProvider,
+    /// The one that provides it, or the named one, is listed at this place, after the component.
+    ListedAfter(usize),
+    /// Both these places provide it.
+    TwoProviders(usize, usize),
+    /// The named component, at this place, does not serve the game.
+    NotServing(usize),
+    /// The adapter does not list the named component.
+    NotListed,
+}
+
+/// Where the need `need` of the component at `at` in `G`'s adapter resolves for `game`: the place
+/// of the one component it means.
+pub const fn resolve<G: Game>(game: &str, at: usize, need: &Need<G>) -> Result<usize, Unresolved> {
+    let list = G::ADAPTER.components;
+    match need {
+        Need::On(wanted) => {
+            let mut k = 0;
+            while k < list.len() {
+                if same_str(list[k].name, wanted.name) {
+                    return if k >= at {
+                        Err(Unresolved::ListedAfter(k))
+                    } else if !list[k].serves(game) {
+                        Err(Unresolved::NotServing(k))
+                    } else {
+                        Ok(k)
+                    };
+                }
+                k += 1;
+            }
+            Err(Unresolved::NotListed)
+        }
+        Need::Feature(feature) => {
+            let mut found = None;
+            let mut k = 0;
+            while k < at {
+                if list[k].serves(game) && list[k].provides(*feature) {
+                    if let Some(first) = found {
+                        return Err(Unresolved::TwoProviders(first, k));
+                    }
+                    found = Some(k);
+                }
+                k += 1;
+            }
+            if let Some(place) = found {
+                return Ok(place);
+            }
+            let mut later = at + 1;
+            while later < list.len() {
+                if list[later].serves(game) && list[later].provides(*feature) {
+                    return Err(Unresolved::ListedAfter(later));
+                }
+                later += 1;
+            }
+            Err(Unresolved::NoProvider)
+        }
+    }
+}
+
+/// The build error for a need of the component at `at` that does not resolve for `game`.
+const fn unresolved<G: Game>(game: &str, at: usize, need: &Need<G>, why: Unresolved) -> ! {
+    let list = G::ADAPTER.components;
+    let named = match need {
+        Need::Feature(feature) => Message::new().push("component `").push(list[at].name).push("` needs ").push(feature.name()),
+        Need::On(wanted) => Message::new().push("component `").push(list[at].name).push("` needs `").push(wanted.name).push("`"),
+    };
+    let message = match why {
+        Unresolved::NoProvider => named.push(", which no component provides for game `").push(game).push("`"),
+        Unresolved::ListedAfter(k) => match need {
+            Need::Feature(_) => named.push(", which `").push(list[k].name).push("` provides but is listed after it"),
+            Need::On(_) => named.push(", which is listed after it"),
+        },
+        Unresolved::TwoProviders(a, b) => named.push(", which both `").push(list[a].name).push("` and `").push(list[b].name).push("` provide for game `").push(game).push("`: name one with Need::On"),
+        Unresolved::NotServing(k) => named.push(": `").push(list[k].name).push("` does not serve game `").push(game).push("`; say `games` on this one too"),
+        Unresolved::NotListed => named.push(", which the adapter does not list"),
+    };
+    panic!("{}", message.text())
+}
+
+/// A summary of several lines ([`Component::summary`]): the non-empty ones, one per line.
+pub fn lines(lines: &[String]) -> String {
+    lines.iter().filter(|line| !line.is_empty()).map(String::as_str).collect::<Vec<_>>().join("\n")
+}
+
 fn always<G: Game>(_: &Run<'_, G>) -> On {
     On::Yes
 }
@@ -198,6 +410,7 @@ impl<G: Game> Component<G> {
         reports: &[],
         options: &[],
         games: &[],
+        methods: &[],
         needs: &[],
         needs_channel: false,
         settings: |_, _| {},
@@ -223,6 +436,17 @@ impl<G: Game> Component<G> {
             i += 1;
         }
         self.games.is_empty()
+    }
+
+    const fn provides(&self, feature: Feature) -> bool {
+        let mut i = 0;
+        while i < self.features.len() {
+            if self.features[i].same(feature) {
+                return true;
+            }
+            i += 1;
+        }
+        false
     }
 }
 
@@ -320,6 +544,8 @@ pub struct Run<'a, G: Game> {
     pub options: &'a Options,
     pub shared: &'a Shared,
     pub build: &'a G::Build,
+    /// The run's stereo method ([`method`]).
+    pub method: Option<StereoMethod>,
     /// The components decided so far (earlier in the list), and whether each is on.
     decided: &'a [(&'static str, bool)],
 }
@@ -456,18 +682,14 @@ pub const fn options<G: Game, const N: usize>(game: &str) -> [Opt; N] {
             }
             j += 1;
         }
-        let mut n = 0;
-        while n < component.needs.len() {
-            let mut earlier = false;
-            let mut k = 0;
-            while k < i {
-                earlier |= same_str(components[k].name, component.needs[n].name);
-                k += 1;
+        if component.serves(game) {
+            let mut n = 0;
+            while n < component.needs.len() {
+                if let Err(why) = resolve::<G>(game, i, &component.needs[n]) {
+                    unresolved::<G>(game, i, &component.needs[n], why);
+                }
+                n += 1;
             }
-            if !earlier {
-                panic!("{}", Message::new().push("component `").push(component.name).push("` needs `").push(component.needs[n].name).push("`, which is not listed before it").text());
-            }
-            n += 1;
         }
         i += 1;
     }
@@ -547,14 +769,21 @@ static ON: AtomicU64 = AtomicU64::new(0);
 ///
 /// `const FINGERS_AT: usize = place::<Kcd>(&FINGERS);`
 pub const fn place<G: Game>(component: &Component<G>) -> usize {
+    place_named::<G>(component.name)
+}
+
+/// [`place`] by name, for a component listed inline in the adapter (`&fingers()`):
+///
+/// `const FINGERS_AT: usize = place_named::<Dl2>("fingers");`
+pub const fn place_named<G: Game>(name: &str) -> usize {
     let mut i = 0;
     while i < G::ADAPTER.components.len() {
-        if same_str(G::ADAPTER.components[i].name, component.name) {
+        if same_str(G::ADAPTER.components[i].name, name) {
             return i;
         }
         i += 1;
     }
-    panic!("{}", Message::new().push("the adapter does not list `").push(component.name).push("`").text());
+    panic!("{}", Message::new().push("the adapter does not list `").push(name).push("`").text());
 }
 
 /// Whether the component at `place` ([`place`]) is on in this run: one atomic, for a detour or a
@@ -572,6 +801,35 @@ pub fn feature_on<G: Game>(feature: Feature) -> bool {
 /// Whether one of `components` providing `feature` is on, by the bits of those on (`on`).
 fn provided_by_on<G: Game>(components: &[&Component<G>], on: u64, feature: Feature) -> bool {
     components.iter().enumerate().any(|(place, component)| component.features.contains(&feature) && on & (1 << place) != 0)
+}
+
+/// The stereo methods, in [`METHOD`]'s numbering (0: none).
+const METHODS: [StereoMethod; 4] = [StereoMethod::SameFrame, StereoMethod::Aer, StereoMethod::Afw, StereoMethod::DepthStereo];
+
+/// The run's stereo method, by [`METHODS`] place plus one (0: the game offers no choice).
+static METHOD: AtomicUsize = AtomicUsize::new(0);
+
+/// The stereo method the run's options pick among those the manifest's `stereo` option offers
+/// (`monaka_core::rendering::stereo_method`); none for a game without that choice.
+fn chosen_method(manifest: &Manifest, options: &Options) -> Option<StereoMethod> {
+    let opt = manifest.option("stereo")?;
+    matches!(opt.kind, Kind::Choice { .. }).then(|| StereoMethod::chosen(opt, options))
+}
+
+/// This run's stereo method, from anywhere (a detour, a frame's work); none before the start reads
+/// it, or for a game that offers no choice.
+pub fn method() -> Option<StereoMethod> {
+    METHODS.get(METHOD.load(Acquire).checked_sub(1)?).copied()
+}
+
+/// The running game's build, kept for its run: one DLL is one [`Game`], so one untyped cell
+/// serves, and [`build`] checks the type.
+static BUILD: RunCell<dyn Any + Send + Sync> = RunCell::new();
+
+/// This run's build ([`Game::prepare`]'s facts), from anywhere: a detour, a timer, a frame. None
+/// before the start has prepared it, or for another game's type.
+pub fn build<G: Game>() -> Option<Arc<G::Build>> {
+    BUILD.get()?.downcast::<G::Build>().ok()
 }
 
 /// The game's per-frame hook: each component that is on does its frame's work, in order.
@@ -618,6 +876,18 @@ fn step<R>(component: &str, what: &str, work: impl FnOnce() -> R) -> R {
     result
 }
 
+/// The names of the components the component at `place` needs in `game` (each need resolved; one
+/// that does not resolve cannot build, and reads here as needing what it named).
+fn needed<G: Game>(game: &'static str, place: usize, component: &'static Component<G>) -> impl Iterator<Item = &'static str> {
+    component.needs.iter().map(move |need| match resolve::<G>(game, place, need) {
+        Ok(k) => G::ADAPTER.components[k].name,
+        Err(_) => match need {
+            Need::Feature(feature) => feature.name(),
+            Need::On(wanted) => wanted.name,
+        },
+    })
+}
+
 /// The components that were armed in this run, with their places, in order.
 fn armed<G: Game>(bits: u64) -> Vec<(usize, &'static Component<G>)> {
     G::ADAPTER.components.iter().copied().enumerate().filter(|(i, _)| bits & (1 << i) != 0).collect()
@@ -625,25 +895,37 @@ fn armed<G: Game>(bits: u64) -> Vec<(usize, &'static Component<G>)> {
 
 /// Starts `G`'s run (`producer!`'s `MonakaStart`).
 pub fn start<G: Game>(session: &'static Session) -> Result<(), Rejection> {
+    // A new run: what the last one left in run cells and states reads as fresh from here.
+    monaka_core::run::begin();
     let manifest = meant::<G>(session);
     let options = session.manifest_options(manifest);
     let shared = Shared::from_options(&options, manifest);
-    let build = G::prepare(session, manifest, &options)?;
+    let build = Arc::new(G::prepare(session, manifest, &options)?);
+    BUILD.set_arc(build.clone());
+    let build: &G::Build = &build;
     let serving: Vec<(usize, &'static Component<G>)> = G::ADAPTER.components.iter().copied().enumerate().filter(|(_, c)| c.serves(manifest.id)).collect();
     let reports: Vec<Situation> = serving.iter().flat_map(|(_, c)| c.reports.iter().copied()).collect();
     let mut available = Available::new(features::<G>(manifest.id), &reports);
     crate::situation::accept(reports);
 
+    let method = chosen_method(manifest, &options);
+    METHOD.store(method.map_or(0, |m| METHODS.iter().position(|k| *k == m).map_or(0, |i| i + 1)), Release);
+
     // Each component's condition, in order: a later one may ask about an earlier one.
     let mut decided: Vec<(&'static str, bool)> = Vec::new();
-    for (_, component) in &serving {
-        let run = Run::<G> { manifest, options: &options, shared: &shared, build: &build, decided: &decided };
-        let missing = component.needs.iter().find(|need| !run.is_on(need));
+    for (place, component) in &serving {
+        let run = Run::<G> { manifest, options: &options, shared: &shared, build, method, decided: &decided };
+        let missing = needed::<G>(manifest.id, *place, component).find(|need| !decided.contains(&(need, true)));
+        let other_method = !component.methods.is_empty() && !method.is_some_and(|m| component.methods.contains(&m));
         let switched_off = component.switch.filter(|switch| !switch.on(&options, manifest));
-        let off = match (missing, switched_off) {
-            (Some(need), _) => Some(format!("needs {}", need.name)),
-            (None, Some(switch)) => Some(switch.off.to_owned()),
-            (None, None) => match (component.on)(&run) {
+        let off = match (missing, other_method, switched_off) {
+            (Some(need), _, _) => Some(format!("needs {need}")),
+            (None, true, _) => Some(match method {
+                Some(m) => format!("the stereo method is {}", m.label()),
+                None => "the game has no stereo method".to_owned(),
+            }),
+            (None, false, Some(switch)) => Some(switch.off.to_owned()),
+            (None, false, None) => match (component.on)(&run) {
                 On::No(why) => Some(why.to_owned()),
                 On::Yes => None,
             },
@@ -669,15 +951,15 @@ pub fn start<G: Game>(session: &'static Session) -> Result<(), Rejection> {
     for (index, component) in wanted {
         let names: Vec<&'static str> = installed.iter().map(|(_, c, _)| c.name).collect();
         // A component it needs did not install (this build lacks it): this one stays off too.
-        if let Some(need) = component.needs.iter().find(|need| !names.contains(&need.name)) {
-            log!("{}: off for this build (needs {}, which is off)", component.name, need.name);
+        if let Some(need) = needed::<G>(manifest.id, index, component).find(|need| !names.contains(need)) {
+            log!("{}: off for this build (needs {}, which is off)", component.name, need);
             for feature in component.features {
-                available.lose(*feature, format!("needs {}", need.name));
+                available.lose(*feature, format!("needs {}", need));
             }
             continue;
         }
         let mut ledger = Ledger::new();
-        let mut start = Start::<G> { session, manifest, options: &options, shared: &shared, build: &build, hooks: &mut hooks, ledger: &mut ledger, channel: channel.as_ref(), installed: &names };
+        let mut start = Start::<G> { session, manifest, options: &options, shared: &shared, build, hooks: &mut hooks, ledger: &mut ledger, channel: channel.as_ref(), installed: &names };
         match step(component.name, "install", || (component.install)(&mut start)) {
             Ok(()) => installed.push((index, component, ledger)),
             Err(Lack::Missing(why)) => {

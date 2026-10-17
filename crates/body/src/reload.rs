@@ -18,7 +18,7 @@ use monaka_core::math::{Vec3, length};
 use monaka_contract::protocol::{LEFT_HAND, RIGHT_HAND};
 use monaka_core::sync::Locked;
 use monaka_pad::actions::{self, Action, Actions};
-use monaka_producer::game::{Component, Lack, On, Run, Start, Switch};
+use monaka_producer::game::{Component, Lack, Need, Start, Switch, lines};
 use monaka_producer::log;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -55,28 +55,29 @@ pub trait Reloads: HeldItems + Actions {
         Ok(())
     }
 
-    /// Logs the hook's counts, the hooks out.
-    fn report() {}
+    /// The hook's state put back once its hooks are out.
+    fn release() {}
+    /// The hook's counts, for the stop's log (empty: nothing to say).
+    fn summary() -> String {
+        String::new()
+    }
 }
 
 /// Reloading by hand for game `G`, with motion controls (`manual_reload=0` turns it off, for a
 /// test). A game says what it works on top of by struct update.
 pub const fn reload<G: Reloads>() -> Component<G> {
     Component {
+        needs: &[Need::Feature(Feature::HandRig)],
         name: "reload",
         features: &[Feature::Reload],
         switch: Some(Switch::new("manual_reload", true, "reloading by hand is off")),
-        on: on::<G>,
         install: install::<G>,
         arm,
         quiet,
         release: release::<G>,
+        summary: Some(summary::<G>),
         ..Component::NONE
     }
-}
-
-fn on<G: Reloads>(run: &Run<'_, G>) -> On {
-    On::when(run.shared.aim.rig, "aim is not motion controls")
 }
 
 /// The gesture, the aiming hand, and whether reloads may be pressed (the component on).
@@ -106,10 +107,12 @@ fn quiet() {
 }
 
 fn release<G: Reloads>() {
-    G::report();
-    if std::mem::take(&mut *INSTALLED.locked()) {
-        log!("reload: {} reloads by the gesture", RELOADS.load(Relaxed));
-    }
+    G::release();
+    *INSTALLED.locked() = false;
+}
+
+fn summary<G: Reloads>() -> String {
+    lines(&[G::summary(), format!("reload: {} reloads by the gesture", RELOADS.load(Relaxed))])
 }
 
 /// How far apart the left and right controllers are on `trail`: their latest places, or (with

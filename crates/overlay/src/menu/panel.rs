@@ -70,8 +70,8 @@ impl Panel {
         let cursor = self.cursor;
         let mut click = None;
         let image = self.canvas.draw_with(device, context, events, |ui| {
-            crate::ring_page::style(ui);
-            click = crate::ring_page::framed(ui, "Monaka debug", front, crate::panels::KEYS, |ui| {
+            crate::ring_page::style(ui, &crate::ring_page::DEBUG);
+            click = crate::ring_page::framed(ui, &crate::ring_page::DEBUG, "Monaka debug", front, crate::panels::KEYS, |ui| {
                 egui::ScrollArea::vertical().id_salt("menu").auto_shrink([false, false]).show(ui, |ui| {
                     let (clicked, shown) = body(ui, menu, settings, status, Sense::click());
                     notes(ui, status, shown, true);
@@ -79,7 +79,7 @@ impl Panel {
                 })
                 .inner
             });
-            cursor.paint(ui.ctx());
+            cursor.paint(ui.ctx(), crate::ring_page::DEBUG.accent);
         })?;
         if image.is_some() {
             self.shown = Some(now);

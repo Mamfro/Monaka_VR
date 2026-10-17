@@ -46,3 +46,13 @@ fn a_lone_press_reaches_the_game_after_the_grace_and_a_quick_one_as_a_tap() {
     chord.step(&mut pad, ms(700));
     assert_eq!(pad.buttons, button::A | button::X);
 }
+
+#[test]
+fn a_menu_holding_the_pad_still_lets_the_chord_fire() {
+    let t = Instant::now();
+    let ms = |n: u64| t + Duration::from_millis(n);
+    let mut chord = Chord::default();
+    assert!(!chord.step_held(KEYS, ms(0)));
+    assert!(chord.step_held(KEYS, ms(500)));
+    assert!(!chord.step_held(KEYS, ms(800)), "once per hold");
+}

@@ -57,7 +57,7 @@ pub(super) fn send_due(due: Due) {
 pub(super) fn before_present(driver: &Driver, chain: &IDXGISwapChain) -> bool {
     let Some(game) = *GAME.locked() else { return true };
     if let Ok(swap) = chain.cast::<IDXGISwapChain3>()
-        && let Some(queue) = (game.queue)(&swap)
+        && let Some(queue) = crate::queue12::game_queue(Some(&swap))
         // SAFETY: COM calls on the game's live swapchain, on the thread that presents it.
         && let Ok(buffer) = unsafe { swap.GetBuffer::<ID3D12Resource>(swap.GetCurrentBackBufferIndex()) }
     {

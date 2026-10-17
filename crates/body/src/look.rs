@@ -28,7 +28,7 @@ use monaka_contract::manifest::{AIM_HAND, AIM_LOOK, AIM_MOTION, AIM_MOUSE, AIM_P
 use monaka_contract::protocol::HeadPose;
 use monaka_core::situation::Situation;
 use monaka_core::sync::Locked;
-use monaka_producer::game::{Component, Game, Lack, On, Start};
+use monaka_producer::game::{Component, Game, Lack, Need, On, Start};
 use monaka_producer::log;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::*};
@@ -72,8 +72,9 @@ pub enum Delivery<G: Game> {
     /// the view while [`Looks::stand_down`] says so, and the share then goes out; `holds`: whether
     /// the share stays in the angles as it was now (a camera that turns by the angles' changes, a
     /// mounted gun, would take the share going out as a turn; a menu during which the game leaves
-    /// its camera's angles alone keeps the share they had).
-    Command { head: fn() -> Option<HeadPose>, levels: fn() -> bool, holds: fn() -> bool },
+    /// its camera's angles alone keeps the share they had); `pitch`: whether the player's own pitch
+    /// stays under the head's ([`Pitch`]).
+    Command { head: fn() -> Option<HeadPose>, levels: fn() -> bool, holds: fn() -> bool, pitch: Pitch },
     /// The head's turn sent as mouse counts, the game kept on its pad where it says how
     /// ([`mouse::on_build`] at each view build).
     Mouse(mouse::Mouse<G>),
@@ -99,6 +100,7 @@ pub enum Carried {
 pub const fn look<G: Looks>() -> Component<G> {
     match G::DELIVERY {
         Delivery::Targets { .. } => Component {
+            needs: &[Need::Feature(Feature::Stereo)],
             name: "look",
             features: &[Feature::Look],
             reports: G::REPORTS,
@@ -155,6 +157,17 @@ pub struct StandDown {
 impl StandDown {
     /// Never: no other camera takes the player.
     pub const NEVER: Self = Self { now: false, changed: false };
+}
+
+/// What the command delivery does with the pitch the game's own input adds ([`Delivery::Command`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pitch {
+    /// Kept, with the head's on top (the mouse still pitches), and brought back toward level while
+    /// only the head pitches, where the game lets it (the delivery's `levels`).
+    Own,
+    /// The head's alone while it aims: what the game's own input pitched since the last command is
+    /// dropped (no pitch but the head's in a headset, the mouse's included).
+    HeadAlone,
 }
 
 /// The head's turn as one share (radians: yaw positive left, pitch positive up).

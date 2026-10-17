@@ -80,6 +80,12 @@ impl Chord {
         }
         false
     }
+
+    /// While one of Monaka's menus has the pad and leaves the game an idle one: the buttons as the
+    /// controllers hold them, so the chord still asks for a capture over a menu.
+    pub fn step_held(&mut self, buttons: u16, now: Instant) -> bool {
+        self.step(&mut Gamepad { buttons, ..Gamepad::default() }, now)
+    }
 }
 
 #[cfg(test)]

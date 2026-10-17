@@ -74,7 +74,7 @@ impl HeadsetPanels {
             .canvas
             .draw_with(device, context, events, |ui| {
                 asked = panels::ring_page(ui, id, content, front);
-                cursor.paint(ui.ctx());
+                cursor.paint(ui.ctx(), monaka_overlay::ring_page::DEBUG.accent);
             })
             .map_err(|e| format!("{} could not be drawn ({e})", id.label()))?;
         Ok((image.cloned(), asked))

@@ -30,7 +30,7 @@ use monaka_core::sync::Locked;
 use monaka_hook::module::Module;
 use monaka_hook::{InFlight, Original, Site, mem};
 use monaka_pad::mouse;
-use monaka_producer::game::{Component, Game, Lack, On, Start};
+use monaka_producer::game::{Component, Game, Lack, Need, On, Start};
 use monaka_producer::log;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering::*};
@@ -134,6 +134,7 @@ pub const fn keep_pad<G: Looks>() -> Component<G> {
         _ => panic!("keep_pad puts the pick back (Pad::put_back)"),
     }
     Component {
+        needs: &[Need::Feature(Feature::Gamepad)],
         name: "keep pad",
         on: |run| On::when(run.options.switch("pin_gamepad", true), "the game switches between pad and mouse"),
         install: hook_pick::<G>,

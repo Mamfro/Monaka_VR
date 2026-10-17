@@ -6,15 +6,16 @@
 //!
 //! What a game supplies once is the provider [`EyeSite`]: its site's hooks (installed by the loop
 //! its frames go out by), its counts, and how each eye is drawn (its frustum, the eyes'
-//! separation). The present loops read it: the pose each pair goes out with ([`report`],
-//! [`loop_report`]) and the rate line's count of eye views ([`work`]). Here too: the stereo
+//! separation). The present loops read it: the pose each pair goes out with ([`report`]) and the
+//! rate line's count of eye views ([`work`]). Here too: the stereo
 //! component ready-made ([`eyes`]), the site's counts ([`Tally`]) and whether the world is being
 //! drawn by them ([`world_hidden`]).
 
 pub mod checks;
 
-use crate::driver::{Driver, Flat};
+use crate::driver::Flat;
 use crate::feature::DRIVER;
+use crate::providers::EyeGeometry;
 use monaka_core::camera::{Base, EyeView, Frustum, Mat34};
 use monaka_core::feature::Feature;
 use monaka_contract::manifest::{EYE_SEPARATION, HEAD_MOVEMENT, LATENCY};
@@ -37,7 +38,7 @@ pub type InstallFn<G> = fn(&mut Start<'_, G>) -> Result<(), Lack>;
 /// A game's eye site: where its camera is read and an eye written into it, as the present loops
 /// see it. The loop the game's frames go out by installs it ([`EyeSite::install`]: the same-frame
 /// loop always, the alternate-eye loop as its `Loop::eye_site` says).
-pub trait EyeSite: Game {
+pub trait EyeSite: EyeGeometry {
     /// The site's hooks into the game, and what the run sets for it (at the loop's install, after
     /// the loop's own).
     fn install(start: &mut Start<'_, Self>) -> Result<(), Lack> {
@@ -46,11 +47,12 @@ pub trait EyeSite: Game {
     }
     /// The site's counts (its calls, the eye views drawn and refused).
     fn tally() -> &'static Tally;
-    /// The frustum eye `eye` of `pose` is drawn with, where it is not the pose's own (`None`: drawn
-    /// with the field of view the pose carries, or not known here).
-    fn frustum(pose: &HeadPose, eye: usize) -> Option<Frustum>;
-    /// The eyes' separation for `pose`, in the game's units (`None`: not known yet).
-    fn separation(pose: &HeadPose) -> Option<f32>;
+    /// The frustum a pair's eye goes out with in its pose record ([`report`]): `None` keeps the
+    /// field of view the pose carries. By default the frustum it was drawn with
+    /// ([`EyeGeometry::frustum`]).
+    fn reported_frustum(pose: &HeadPose, eye: usize) -> Option<Frustum> {
+        Self::frustum(pose, eye)
+    }
 }
 
 /// The pose a pair drawn at `G`'s site goes out with: the eye distance used, and each eye's field
@@ -61,15 +63,10 @@ pub fn report<G: EyeSite>(pose: &mut HeadPose) {
     }
     let drawn = *pose;
     for (eye, fov) in pose.fov.iter_mut().enumerate() {
-        if let Some(frustum) = G::frustum(&drawn, eye) {
+        if let Some(frustum) = G::reported_frustum(&drawn, eye) {
             *fov = frustum.fov();
         }
     }
-}
-
-/// [`report`] as the alternate-eye loop's step (`crate::feature::Loop::report`).
-pub fn loop_report<G: EyeSite>(_: &Driver, pose: &mut HeadPose) {
-    report::<G>(pose);
 }
 
 /// The present loop's rate line for `G`: what the site's calls are, and its eye views drawn.

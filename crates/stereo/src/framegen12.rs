@@ -49,8 +49,6 @@ use windows::core::Interface;
 /// What per-eye frame generation reads of its game.
 #[derive(Clone, Copy)]
 struct GameFns {
-    report: Option<fn(&Driver, &mut HeadPose)>,
-    queue: fn(&IDXGISwapChain3) -> Option<ID3D12CommandQueue>,
     units_per_metre: f32,
 }
 
@@ -80,7 +78,7 @@ pub const fn per_eye<G: Presents + FrameInputs>() -> Component<G> {
 
 fn install<G: Presents + FrameInputs>(start: &mut Start<'_, G>) -> Result<(), Lack> {
     *CHANNEL.locked() = Some(start.channel()?.clone());
-    *GAME.locked() = Some(GameFns { report: G::LOOP.report, queue: G::LOOP.queue.unwrap_or(crate::queue12::game_queue), units_per_metre: G::UNITS_PER_METRE });
+    *GAME.locked() = Some(GameFns { units_per_metre: G::UNITS_PER_METRE });
     inputs::want(Motion::Chained, None);
     ON.store(true, Release);
     crate::driver::join_present(present_step);
@@ -171,11 +169,8 @@ fn state_for<'a>(guard: &'a mut Option<State>, queue: &ID3D12CommandQueue) -> Op
 fn before_present(driver: &Driver, chain: &IDXGISwapChain) -> bool {
     let Some(game) = *GAME.locked() else { return true };
     let Ok(swap) = chain.cast::<IDXGISwapChain3>() else { return true };
-    let Some(queue) = (game.queue)(&swap) else { return true };
-    let report = |pose: &mut HeadPose| match game.report {
-        Some(report) => report(driver, pose),
-        None => driver.report_centred(pose),
-    };
+    let Some(queue) = crate::queue12::game_queue(Some(&swap)) else { return true };
+    let report = |pose: &mut HeadPose| driver.report(pose);
     let flat = driver.flat().is_some();
     match driver.take_label() {
         Some(label) if !flat => present(&swap, &queue, label.eye, label.pose, driver.head(), report, game.units_per_metre),

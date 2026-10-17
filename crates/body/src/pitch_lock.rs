@@ -7,10 +7,11 @@
 //! there asks [`pass`] for each input while head aim does not steer (while it steers, the look
 //! method holds that input neutral itself).
 
+use monaka_core::feature::Feature;
 use monaka_core::aim::Levelling;
 use monaka_contract::manifest::{Kind, Opt, line};
 use monaka_core::sync::Locked;
-use monaka_producer::game::{Component, Game, Lack, Start, Switch};
+use monaka_producer::game::{Component, Game, Lack, Need, Start, Switch};
 use monaka_producer::log;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -46,6 +47,7 @@ pub trait PitchInput: Game {
 /// says what it works on top of (its eyes) by struct update.
 pub const fn pitch_lock<G: PitchInput>() -> Component<G> {
     Component {
+        needs: &[Need::Feature(Feature::Stereo)],
         name: "pitch lock",
         options: &[LOCK_PITCH],
         switch: Some(Switch::new("lock_pitch", true, "vertical look as the game has it")),

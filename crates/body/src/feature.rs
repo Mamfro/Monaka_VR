@@ -3,7 +3,7 @@
 //! The finger rig ([`fingers`]): finger tracking's options and its on/off, for a game whose hand rig
 //! puts the fingers on with [`crate::finger_rig`]. A game lists `monaka_body::feature::fingers()`
 //! after its hand rig, saying what it works on top of (and its own help line) by struct update:
-//! `Component { needs: &[&ARMS], ..fingers() }`. Whether a frame's fingers follow tracking is then
+//! `Component { needs: &[Need::On(&ARMS)], ..fingers() }`. Whether a frame's fingers follow tracking is then
 //! `game::on` of its place.
 //!
 //! Room-scale following ([`room_scale`]): the character follows the player's real steps
@@ -13,12 +13,13 @@ use crate::roomscale;
 use monaka_core::feature::Feature;
 use monaka_contract::manifest::{BINARY_FINGERS, FINGER_TRACKING, Manifest, ROOM_SCALE};
 use monaka_core::options::{Options, Shared};
-use monaka_producer::game::{Component, Game, Lack, On, OrMissing, Run, Start};
+use monaka_producer::game::{Component, Game, Lack, Need, On, OrMissing, Run, Start};
 
 /// The finger rig component for game `G`: on with finger tracking, reading the controllers' finger
 /// block ([`crate::controllers`], opened here unless the hand rig has).
 pub const fn fingers<G: Game>() -> Component<G> {
     Component {
+        needs: &[Need::Feature(Feature::HandRig)],
         name: "fingers",
         features: &[Feature::FingerRig],
         options: &[FINGER_TRACKING, BINARY_FINGERS],
@@ -62,8 +63,10 @@ pub trait Steps: Game {
     }
     /// Puts back what the step hook changed in the game, the hooks still in.
     fn restore() {}
-    /// Logs the step hook's counts, the hooks out.
-    fn report() {}
+    /// The step hook's counts, for the stop's log (empty: nothing to say).
+    fn summary() -> String {
+        String::new()
+    }
 }
 
 /// Room-scale following for game `G` (`room_scale`, with the hand rig and a tracked head): its
@@ -71,6 +74,7 @@ pub trait Steps: Game {
 /// give-back.
 pub const fn room_scale<G: Steps>() -> Component<G> {
     Component {
+        needs: &[Need::Feature(Feature::HandRig)],
         name: "room scale",
         features: &[Feature::RoomScale],
         options: &[ROOM_SCALE],
@@ -79,7 +83,7 @@ pub const fn room_scale<G: Steps>() -> Component<G> {
         install: install_room_scale::<G>,
         quiet: roomscale::stop,
         give_back: <G as Steps>::restore,
-        release: <G as Steps>::report,
+        summary: Some(<G as Steps>::summary),
         ..Component::NONE
     }
 }

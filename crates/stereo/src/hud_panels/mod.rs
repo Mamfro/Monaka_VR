@@ -89,6 +89,9 @@ pub trait HudPieces: Game {
 
 /// A game whose pieces are cut out of its HUD layer ([`d3d12`]): where each lies in the layer.
 pub trait LayerPieces: HudPieces {
+    /// The layer's alpha is how much of what is behind shows through (1 where nothing is drawn, as
+    /// id Tech 6 keeps its GUI), not its coverage.
+    const SEE_THROUGH: bool = false;
     /// Each piece's box this frame, by its index in `PIECES` (left, top, right, bottom in the
     /// layer's pixels); `None` for a piece not shown. Asked at each present before the crops.
     fn boxes(boxes: &mut [Option<[f32; 4]>]);
@@ -131,8 +134,9 @@ struct State {
     pieces: &'static [Piece],
     masked: bool,
     margin: f32,
-    /// The game's boxes, for layer crops.
+    /// The game's boxes, for layer crops, and whether its layer's alpha is what shows through.
     boxes: Option<Boxes>,
+    see_through: bool,
     shown: Vec<Option<Shown>>,
     /// The pieces declared to the viewer, kept open while the panels run.
     _declared: Option<PanelsChannel>,
@@ -159,7 +163,7 @@ pub fn install<G: HudPieces>(start: &mut Start<'_, G>) -> Result<(), Lack> {
         }
     };
     let shown = vec![None; G::PIECES.len()];
-    *STATE.locked() = Some(State { channel, pieces: G::PIECES, masked: G::MASKED, margin: G::MARGIN, boxes: None, shown, _declared: declared });
+    *STATE.locked() = Some(State { channel, pieces: G::PIECES, masked: G::MASKED, margin: G::MARGIN, boxes: None, see_through: false, shown, _declared: declared });
     Ok(())
 }
 
@@ -169,6 +173,7 @@ pub fn install_layer<G: LayerPieces>(start: &mut Start<'_, G>) -> Result<(), Lac
     install::<G>(start)?;
     if let Some(state) = STATE.locked().as_mut() {
         state.boxes = Some(G::boxes);
+        state.see_through = G::SEE_THROUGH;
     }
     Ok(())
 }
@@ -271,6 +276,7 @@ struct Frame {
     channel: Arc<ChannelName>,
     pieces: &'static [Piece],
     masked: bool,
+    see_through: bool,
     rects: [Option<[f32; 4]>; PANEL_PIECES],
 }
 
@@ -278,7 +284,7 @@ fn frame() -> Option<Frame> {
     let state = STATE.locked();
     let state = state.as_ref()?;
     let rects = std::array::from_fn(|i| if i < state.pieces.len() { rect(state, i) } else { None });
-    Some(Frame { channel: state.channel.clone(), pieces: state.pieces, masked: state.masked, rects })
+    Some(Frame { channel: state.channel.clone(), pieces: state.pieces, masked: state.masked, see_through: state.see_through, rects })
 }
 
 /// A rectangle of fractions of a layout of `size` in its pixels (x, y, width, height).

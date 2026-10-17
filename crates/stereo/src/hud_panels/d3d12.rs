@@ -26,7 +26,7 @@ use windows::core::s;
 
 const SOURCE: &str = include_str!("panels12.hlsl");
 
-/// The crop shader's constants (8 root constants).
+/// The crop shader's constants (root constants).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Constants {
@@ -35,7 +35,12 @@ struct Constants {
     ui_width: u32,
     ui_height: u32,
     source: [f32; 4],
+    /// The layer's alpha is what shows through ([`super::LayerPieces::SEE_THROUGH`]).
+    see_through: u32,
+    pad: [u32; 3],
 }
+
+const CONSTANTS: u32 = (size_of::<Constants>() / 4) as u32;
 
 struct Panel {
     name: &'static str,
@@ -68,7 +73,7 @@ static PANELS: Lazy<Panels> = Lazy::new();
 impl Panels {
     fn new(device: &ID3D12Device, pieces: &[super::Piece]) -> Result<Self, String> {
         // Constants, then the layer (t0), then one panel (u0).
-        let root = compute::root_signature(device, (size_of::<Constants>() / 4) as u32, &[Table { srvs: 1, uavs: 0 }, Table { srvs: 0, uavs: 1 }])?;
+        let root = compute::root_signature(device, CONSTANTS, &[Table { srvs: 1, uavs: 0 }, Table { srvs: 0, uavs: 1 }])?;
         let pipeline = |entry| compute::shader_pipeline(device, &root, SOURCE, "panels12.hlsl", entry);
         let (crop, clear) = (pipeline(s!("Crop"))?, pipeline(s!("Clear"))?);
         let heap = DescriptorHeap::new(device, 1 + pieces.len().max(1) as u32)?;
@@ -90,7 +95,7 @@ impl Panels {
         let rgba = DXGI_FORMAT_R8G8B8A8_UNORM;
         // SAFETY: views of live textures into our own heap.
         unsafe {
-            self.device.CreateShaderResourceView(layer, Some(&srv_desc(rgba)), self.heap.cpu(0));
+            self.device.CreateShaderResourceView(layer, Some(&srv_desc(crate::framepass12::ui_view_format(layer.GetDesc().Format))), self.heap.cpu(0));
             for (i, panel) in self.panels.iter().enumerate() {
                 self.device.CreateUnorderedAccessView(&panel.texture, None, Some(&uav_desc(rgba)), self.heap.cpu(1 + i as u32));
             }
@@ -98,10 +103,11 @@ impl Panels {
         self.viewed = Some(layer.clone());
     }
 
-    /// Records this present's panels from `layer` (in COMMON, of `size`) for the shown pieces'
-    /// rectangles `rects` (by piece, the layer's pixels): which panels to publish and how (shown
-    /// ones and ones just cleared), by piece. `None` when no command list was free.
-    fn record(&mut self, layer: &ID3D12Resource, size: (u32, u32), rects: &[Option<[f32; 4]>; PANEL_PIECES]) -> windows::core::Result<Option<Outs>> {
+    /// Records this present's panels from `layer` (in COMMON, of `size`; its alpha what shows
+    /// through when `see_through`) for the shown pieces' rectangles `rects` (by piece, the layer's
+    /// pixels): which panels to publish and how (shown ones and ones just cleared), by piece.
+    /// `None` when no command list was free.
+    fn record(&mut self, layer: &ID3D12Resource, size: (u32, u32), see_through: bool, rects: &[Option<[f32; 4]>; PANEL_PIECES]) -> windows::core::Result<Option<Outs>> {
         let Some(list) = self.recorder.begin()? else { return Ok(None) };
         self.view(layer);
         let mut outs: Outs = [None; PANEL_PIECES];
@@ -117,7 +123,15 @@ impl Panels {
         let cleared = || outs.iter().enumerate().filter(|(_, out)| **out == Some(PanelOut::Cleared)).map(|(i, _)| i);
         let touched = || outs.iter().enumerate().filter(|(_, out)| out.is_some()).map(|(i, _)| i);
         const SRV: D3D12_RESOURCE_STATES = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-        let constants = |panel: &Panel, source: [f32; 4]| Constants { out_width: panel.size.0, out_height: panel.size.1, ui_width: size.0, ui_height: size.1, source };
+        let constants = |panel: &Panel, source: [f32; 4]| Constants {
+            out_width: panel.size.0,
+            out_height: panel.size.1,
+            ui_width: size.0,
+            ui_height: size.1,
+            source,
+            see_through: u32::from(see_through),
+            pad: [0; 3],
+        };
         if touched().next().is_none() {
             return Ok(Some(outs));
         }
@@ -135,7 +149,7 @@ impl Panels {
             for (i, rect) in cropped() {
                 let panel = &self.panels[i];
                 let c = constants(panel, rect);
-                list.SetComputeRoot32BitConstants(0, 8, &c as *const Constants as *const c_void, 0);
+                list.SetComputeRoot32BitConstants(0, CONSTANTS, &c as *const Constants as *const c_void, 0);
                 list.SetComputeRootDescriptorTable(2, self.heap.gpu(1 + i as u32));
                 list.Dispatch(panel.size.0.div_ceil(8), panel.size.1.div_ceil(8), 1);
             }
@@ -144,7 +158,7 @@ impl Panels {
             for i in cleared() {
                 let panel = &self.panels[i];
                 let c = constants(panel, [0.0; 4]);
-                list.SetComputeRoot32BitConstants(0, 8, &c as *const Constants as *const c_void, 0);
+                list.SetComputeRoot32BitConstants(0, CONSTANTS, &c as *const Constants as *const c_void, 0);
                 list.SetComputeRootDescriptorTable(2, self.heap.gpu(1 + i as u32));
                 list.Dispatch(panel.size.0.div_ceil(8), panel.size.1.div_ceil(8), 1);
             }
@@ -217,7 +231,7 @@ pub fn publish(queue: &ID3D12CommandQueue, layer: &ID3D12Resource) -> Rects {
         Ok(made)
     };
     let recorded = PANELS.with(queue, make, "dynamic HUD off", |panels| {
-        let touched = match panels.record(layer, size, &rects) {
+        let touched = match panels.record(layer, size, frame.see_through, &rects) {
             Ok(Some(touched)) => touched,
             Ok(None) => return false,
             Err(e) => {

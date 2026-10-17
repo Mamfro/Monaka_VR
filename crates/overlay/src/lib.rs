@@ -2,7 +2,8 @@
 //! ([`lines`]), each eye drawn with the pose and field of view it was rendered with ([`eye`]), so
 //! the runtime reprojects the drawing together with the image; and the in-headset menus, drawn
 //! with egui ([`canvas`]): the debug menu ([`menu`]), the panels beside it ([`panels`], the
-//! [`stats`] among them) and Monaka's home ([`home`]). The 2D window shows the same
+//! [`stats`] among them) and Monaka's home ([`home`]), the game blurred behind its panels
+//! ([`frost`]). The 2D window shows the same
 //! pages as windows of its own ([`window`]) over the picture ([`blit`]).
 
 pub mod blit;
@@ -10,6 +11,7 @@ pub mod canvas;
 pub mod console_view;
 pub mod eye;
 pub mod fake_vr;
+pub mod frost;
 mod gpu;
 pub mod home;
 pub mod lines;

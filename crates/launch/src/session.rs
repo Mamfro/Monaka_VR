@@ -16,6 +16,7 @@ use monaka_contract::host;
 use monaka_contract::protocol::LIVE_CHANNEL_FILE;
 use monaka_contract::manifest::{DEBUG_MENU_MARKER, DIAGNOSTIC_LOGGING, DIAGNOSTIC_MARKER, MONAKA};
 use monaka_contract::pack;
+use monaka_contract::status::{REJECTED_LINE, code};
 use monaka_core::home::{self, APPLY_LINE, DEBUG_MENU_ARG, FAILURE_LINE, SETTING_LINE};
 use std::io::{BufRead, BufReader};
 use std::os::windows::process::CommandExt;
@@ -208,7 +209,8 @@ fn session(game: &Game, values: &Values, paths: &Paths, console: Console, shows:
     report(Event::State(State::WaitingForGame));
     let mut restarts = 0;
     loop {
-        let Some(pid) = find_game(game, values, stop, report)? else { return Ok(()) };
+        // Play starts the game once; a restart is its own.
+        let Some(pid) = find_game(game, values, restarts == 0, stop, report)? else { return Ok(()) };
         let joined = Instant::now();
         // The headset view shows a run in the headset; the 2D window is a viewer of its own.
         let linked = linked.filter(|_| openxr.is_some());
@@ -316,9 +318,9 @@ fn play(
 }
 
 /// The moment a game started after VR can be attached ([`Launch::AtStart`]): the player starts
-/// it, and it is joined as soon as its process can take the producer, before it makes anything.
+/// it (or Play did), and it is joined as soon as its process can take the producer, before it
+/// makes anything.
 fn join_at_start(executables: &[&str], steam_app: u32, stop: &Stop, report: &mut dyn FnMut(Event)) -> Result<Option<u32>, String> {
-    report(Event::Info(format!("Start {} now: Monaka joins it as it starts.", executables.join(" or "))));
     loop {
         // The cheap check first; the Steam folder check once one is named so.
         if !system::processes_named(executables).is_empty()
@@ -342,7 +344,7 @@ fn join_at_start(executables: &[&str], steam_app: u32, stop: &Stop, report: &mut
 
 /// The game's process: already running, or started through Steam and given time to reach its menu
 /// (unless its `launch` option is off; `settle_seconds` overrides the wait).
-fn find_game(game: &Game, values: &Values, stop: &Stop, report: &mut dyn FnMut(Event)) -> Result<Option<u32>, String> {
+fn find_game(game: &Game, values: &Values, start: bool, stop: &Stop, report: &mut dyn FnMut(Event)) -> Result<Option<u32>, String> {
     let runs_as = game.runs_as(values);
     if runs_as.is_empty() {
         return Err(format!("Pick the game in {}'s Game option first.", game.name));
@@ -356,6 +358,13 @@ fn find_game(game: &Game, values: &Values, stop: &Stop, report: &mut dyn FnMut(E
         return Ok(Some(process.pid));
     }
     if game.launch == Launch::AtStart {
+        // One Steam game installed here is started by Play (`start`), the wait for it already on.
+        if start && !game.any_game() && system::steam_installed(&system::steam_libraries(), game.steam_app) {
+            report(Event::Info(format!("Starting {} through Steam: Monaka joins it as it starts.", game.name)));
+            system::launch_steam_game(game.steam_app)?;
+        } else {
+            report(Event::Info(format!("Start {} now: Monaka joins it as it starts.", executables.join(" or "))));
+        }
         return join_at_start(&executables, game.steam_app, stop, report);
     }
     let Launch::Auto { settle_seconds } = game.launch else {
@@ -503,10 +512,7 @@ fn one_run(
     }
     if outcome.code != 0 {
         log_tail(&log, 20, report);
-        return Err(fatal(format!(
-            "The mod refused to start in this game (code {}). The game may have updated to a version Monaka VR doesn't know yet; see the log.",
-            outcome.code
-        )));
+        return Err(fatal(refusal(&log, outcome.code)));
     }
 
     let viewed = {
@@ -534,7 +540,7 @@ fn one_run(
             dll = next;
             let outcome = attach::start(pid, &dll).map_err(|why| format!("attaching again failed: {why}"))?;
             if outcome.code != 0 {
-                return Err(format!("the producer refused to start again (code {}); see the log", outcome.code));
+                return Err(format!("the mod refused to start again: {}", refusal(&log, outcome.code)));
             }
             Ok(())
         };
@@ -771,6 +777,28 @@ fn view_linked(
 /// Why the viewer says the run cannot go on, if `line` says so (a [`FAILURE_LINE`]).
 fn failure(line: &str) -> Option<String> {
     line.strip_prefix(FAILURE_LINE).map(|why| why.trim().to_owned())
+}
+
+/// What the player is told when `MonakaStart` answered `code`: the reason the producer logged
+/// (its last [`REJECTED_LINE`] in `log`), else what the code alone says.
+pub(crate) fn refusal(log: &Path, code: u32) -> String {
+    let text = std::fs::read_to_string(log).unwrap_or_default();
+    refusal_from(&text, code)
+}
+
+fn refusal_from(log: &str, code: u32) -> String {
+    let reason = log.lines().rev().find_map(|line| line.split_once(REJECTED_LINE).map(|(_, why)| why.trim())).filter(|why| !why.is_empty());
+    match (reason, code) {
+        (Some(why), code::REVISION_MISMATCH) => format!("This game version isn't one Monaka VR knows ({why}). The game may have updated; see the log."),
+        (Some(why), _) => {
+            let mut chars = why.chars();
+            let first = chars.next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default();
+            let end = if why.ends_with(['.', '!', '?']) { "" } else { "." };
+            format!("{first}{}{end}", chars.as_str())
+        }
+        (None, code::REVISION_MISMATCH) => "This game version isn't one Monaka VR knows; the game may have updated. See the log.".to_owned(),
+        (None, code) => format!("The mod refused to start in this game (code {code}); see the log."),
+    }
 }
 
 /// The viewer's stdout and stderr lines, read on their own threads.

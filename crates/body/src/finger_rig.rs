@@ -13,18 +13,15 @@
 //! is found once per skeleton as a small skeleton of its own (the wrist and everything under it),
 //! its reference the engine's rest poses where it keeps them and the pose first seen elsewhere,
 //! and posed in the wrist's own frame (a scale in the world matrices, as one engine squashes its
-//! arms toward the camera, cancels there). A game with fingers and no hand rig says where they are
-//! by [`FingerRig`] and calls [`frame`].
+//! arms toward the camera, cancels there).
 
 use crate::fingers::{self, Finger, FingerJoints, Hand};
-use crate::held::Kind;
 use crate::skeleton::finger_chains;
-use crate::{Frames, Skeleton, Snapshot};
+use crate::{Frames, Skeleton};
 use monaka_core::camera::{self, IDENTITY_MATRIX, Mat34, position};
 use monaka_core::math::{Vec3, cross, distance, dot, sub, unit};
 use monaka_contract::protocol::{FingerPose, LEFT_HAND, RIGHT_HAND};
 use monaka_core::sync::Locked;
-use monaka_producer::game::Game;
 use monaka_producer::log;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
@@ -488,32 +485,6 @@ pub fn report() {
     if PLACED.iter().any(|p| p.load(Relaxed) > 0) {
         log!("{}", summary());
     }
-}
-
-/// A game with tracked fingers and no hand rig: where its fingers are.
-pub trait FingerRig: Game {
-    const CHAINS: ChainSource;
-    /// The kind of what hand `side` holds now: a hand that grips it keeps the game's grip
-    /// ([`Kind::grips`]).
-    fn held(_side: usize) -> Kind {
-        Kind::Nothing
-    }
-}
-
-/// A finger update of game `G` on `skeleton` (no hand rig): the skeleton read, each free hand's
-/// tracked fingers put on, the bones they changed written. False when nothing was written.
-pub fn frame<G: FingerRig>(skeleton: &dyn Skeleton) -> bool {
-    let Some(animated) = Snapshot::take(skeleton) else { return false };
-    let mut frames = Frames::new(&animated);
-    let mut placed = false;
-    for side in [LEFT_HAND, RIGHT_HAND] {
-        if !G::held(side).grips()
-            && let Some(tracked) = crate::controllers::fingers(side)
-        {
-            placed |= place(skeleton, &mut frames, &G::CHAINS, side, &tracked);
-        }
-    }
-    placed && !frames.flush(skeleton).is_empty()
 }
 
 #[cfg(test)]

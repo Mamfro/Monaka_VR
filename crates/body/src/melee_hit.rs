@@ -23,7 +23,7 @@ use crate::melee::{self, Physical};
 use monaka_core::feature::Feature;
 use monaka_core::math::{Vec3, distance, dot, length};
 use monaka_core::sync::Locked;
-use monaka_producer::game::{Component, Lack, On, Run, Start};
+use monaka_producer::game::{Component, Lack, Need, On, Run, Start, lines};
 use monaka_producer::log;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Mutex, OnceLock};
@@ -63,8 +63,10 @@ pub trait Hits: HeldItems {
         String::new()
     }
 
-    /// Logs the hooks' counts, the hooks out.
-    fn report() {}
+    /// The hooks' counts, for the stop's log (empty: nothing to say).
+    fn summary() -> String {
+        String::new()
+    }
 }
 
 /// How far ahead the blade's path is looked at (seconds): the press, the game's next update and
@@ -86,7 +88,7 @@ const EDGE_LEAD: f32 = 0.5;
 /// Physical melee for game `G`, with the hand rig (`physical_melee`, on by default; its lengths
 /// and press are [`Physical`]'s options). A game says what it works on top of by struct update.
 pub const fn physical_melee<G: Hits>() -> Component<G> {
-    Component { name: "melee", features: &[Feature::Melee], on: on::<G>, install: install::<G>, release: release::<G>, ..Component::NONE }
+    Component { needs: &[Need::Feature(Feature::HandRig)], name: "melee", features: &[Feature::Melee], on: on::<G>, install: install::<G>, summary: Some(summary::<G>), ..Component::NONE }
 }
 
 fn on<G: Hits>(run: &Run<'_, G>) -> On {
@@ -130,12 +132,9 @@ fn install<G: Hits>(start: &mut Start<'_, G>) -> Result<(), Lack> {
     Ok(())
 }
 
-fn release<G: Hits>() {
-    G::report();
+fn summary<G: Hits>() -> String {
     let looks = LOOK.looks();
-    if looks > 0 {
-        log!("physical melee: {looks} looks for what the blade reaches");
-    }
+    lines(&[G::summary(), if looks > 0 { format!("physical melee: {looks} looks for what the blade reaches") } else { String::new() }])
 }
 
 /// The blade's length for `held` (metres: the weapon in the hand, or a fist's reach), once

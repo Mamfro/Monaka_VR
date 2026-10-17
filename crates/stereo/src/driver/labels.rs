@@ -137,7 +137,7 @@ impl Driver {
         };
         match &mut state.publisher {
             Publisher::D3D11(publisher) => publisher.record_pose(n, pose),
-            Publisher::D3D12 { publisher, .. } => publisher.record_pose(n, pose),
+            Publisher::D3D12(publisher) => publisher.record_pose(n, pose),
         }
         Some(Taken { n, eye: Schedule::camera_eye(n), pose })
     }

@@ -134,6 +134,6 @@ pub const KEYS: &str = "Point and pull the trigger.  Right stick: scroll.  LB/RB
 /// scrolls when it holds more than shows, outlined while in `front`; used with the pointer as the
 /// 2D window's is with the mouse. What was asked on it.
 pub fn ring_page(ui: &mut egui::Ui, id: PanelId, content: &Content<'_>, front: bool) -> Option<Asked> {
-    crate::ring_page::style(ui);
-    crate::ring_page::framed(ui, id.label(), front, KEYS, |ui| egui::ScrollArea::vertical().id_salt(id.label()).auto_shrink([false, false]).show(ui, |ui| layout(ui, id, content)).inner)
+    crate::ring_page::style(ui, &crate::ring_page::DEBUG);
+    crate::ring_page::framed(ui, &crate::ring_page::DEBUG, id.label(), front, KEYS, |ui| egui::ScrollArea::vertical().id_salt(id.label()).auto_shrink([false, false]).show(ui, |ui| layout(ui, id, content)).inner)
 }

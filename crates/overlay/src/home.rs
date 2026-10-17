@@ -9,6 +9,7 @@
 use monaka_contract::manifest::{DEBUG_MENU, DEV_MODE, Kind, LIVE, MONAKA, Manifest, Opt, Shown, TABS, Values};
 use monaka_contract::pack::{self, About};
 use monaka_core::home::{self as files, Listed};
+use crate::ring_page::{self, Look};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -171,6 +172,8 @@ pub struct Home {
     read: [String; 4],
     /// Panels whose image is out of date.
     stale: [bool; 3],
+    /// The panels are frosted glass (`frosted_panels`): the viewer blurs the game behind them.
+    frosted: bool,
 }
 
 /// The files the home is made from, in [`Home::read`]'s order.
@@ -206,6 +209,7 @@ impl Home {
             leave: false,
             read: Default::default(),
             stale: [true; 3],
+            frosted: true,
         };
         if let Some(folder) = run_folder {
             home.sync(folder);
@@ -461,5 +465,22 @@ impl Home {
     /// Every panel must be drawn again (their images went somewhere new).
     pub fn all_stale(&mut self) {
         self.stale = [true; 3];
+    }
+
+    /// The panels as frosted glass or solid from now on; drawn again when that changes.
+    pub fn set_frosted(&mut self, frosted: bool) {
+        if self.frosted != frosted {
+            self.frosted = frosted;
+            self.all_stale();
+        }
+    }
+
+    pub fn frosted(&self) -> bool {
+        self.frosted
+    }
+
+    /// The panels' colours: the home's, as glass when frosted.
+    pub fn look(&self) -> Look {
+        if self.frosted { ring_page::HOME.frosted() } else { ring_page::HOME }
     }
 }

@@ -104,7 +104,7 @@ another button instead, either thumbstick pushed is the d-pad while that button 
 Valve Index controllers have no d-pad either: rest your left thumb on the left trackpad (without
 pressing it) and the right thumbstick is the d-pad.
 
-To try these layouts without the controllers, set "Controller test" on the Engine tab to Quest or
+To try these layouts without the controllers, set "Controller test" on the Controls tab to Quest or
 Index: your controllers then act like those (the buttons they lack are hidden), and your left grip
 stands in for the Quest thumbrest or the Index trackpad touch.
 

@@ -14,7 +14,7 @@
 //! others take a delay to click into the game.
 
 use crate::games::{self, Game, Values};
-use crate::session::{Event, forward, log_tail, version};
+use crate::session::{Event, forward, log_tail, refusal, version};
 use crate::{Paths, attach, system};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -133,7 +133,7 @@ pub fn run(game: &Game, values: &Values, paths: &Paths, check: &Check, delay_sec
     }
     if outcome.code != 0 {
         log_tail(&log, 30, report);
-        return Err(format!("The producer refused to start (code {}); see the log.", outcome.code));
+        return Err(refusal(&log, outcome.code));
     }
 
     let ran = match check {

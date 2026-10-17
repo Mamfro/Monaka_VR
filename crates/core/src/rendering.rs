@@ -53,6 +53,11 @@ impl StereoMethod {
         }
     }
 
+    /// Its name as the window shows it.
+    pub const fn label(self) -> &'static str {
+        self.names().1
+    }
+
     /// The method as a game offers it.
     pub const fn offer(self) -> Offer {
         let (value, label, _) = self.names();

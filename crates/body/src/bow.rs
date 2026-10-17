@@ -25,7 +25,7 @@ use monaka_core::feature::Feature;
 use monaka_core::gesture::PullRules;
 use monaka_core::math::{self, Vec3};
 use monaka_core::sync::Locked;
-use monaka_producer::game::{Component, Lack, On, Run, Start, Switch};
+use monaka_producer::game::{Component, Lack, Need, Start, Switch, lines};
 use monaka_producer::log;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -90,8 +90,10 @@ pub trait Bows: Fires + Draws + HeldItems {
         false
     }
 
-    /// Logs the hooks' counts, the hooks out.
-    fn report() {}
+    /// The hooks' counts, for the stop's log (empty: nothing to say).
+    fn summary() -> String {
+        String::new()
+    }
 }
 
 /// A draw the game has not confirmed for this long is over; a bow not seen held for this long is
@@ -103,18 +105,15 @@ const DRAW_FRESH: Duration = Duration::from_millis(200);
 /// it works on top of by struct update.
 pub const fn bow<G: Bows>() -> Component<G> {
     Component {
+        needs: &[Need::Feature(Feature::HandRig)],
         name: "bow",
         features: &[Feature::Bow],
         switch: Some(Switch::new("bow_by_hand", true, "the game's bow")),
-        on: on::<G>,
         install: install::<G>,
-        release: release::<G>,
+        release,
+        summary: Some(summary::<G>),
         ..Component::NONE
     }
-}
-
-fn on<G: Bows>(run: &Run<'_, G>) -> On {
-    On::when(run.shared.aim.rig, "aim is not motion controls")
 }
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -134,13 +133,14 @@ fn install<G: Bows>(start: &mut Start<'_, G>) -> Result<(), Lack> {
     Ok(())
 }
 
-fn release<G: Bows>() {
+fn release() {
     launch::aim_shots(Weapon::Bow, None);
     launch::draw_by(None);
-    <G as Bows>::report();
-    if INSTALLED.swap(false, Relaxed) {
-        from_nock::report();
-    }
+    INSTALLED.store(false, Relaxed);
+}
+
+fn summary<G: Bows>() -> String {
+    lines(&[<G as Bows>::summary(), from_nock::summary()])
 }
 
 /// Whether the bow by hand is on.

@@ -18,7 +18,7 @@ use monaka_producer::Rejection;
 use monaka_producer::game::{Component, Game, Lack, Start};
 use std::sync::atomic::AtomicU64;
 use windows::Win32::Graphics::Direct3D12::ID3D12CommandQueue;
-use windows::Win32::Graphics::Dxgi::{IDXGISwapChain, IDXGISwapChain3};
+use windows::Win32::Graphics::Dxgi::IDXGISwapChain;
 use windows::core::HRESULT;
 
 /// The present loop: the game's swapchain, the eye and pose of the next frame, the pairs.
@@ -51,11 +51,12 @@ pub struct Loop<G: Game> {
     pub entry: Entry,
     /// The game's draws of eye views, for the rate line: its name and counter.
     pub work: (&'static str, &'static AtomicU64),
-    /// D3D12: where the game's direct queue is, for the swapchain presenting (the game may make it
-    /// after the hooks go in). None: caught at `ExecuteCommandLists` ([`crate::queue12`]).
-    pub queue: Option<fn(&IDXGISwapChain3) -> Option<ID3D12CommandQueue>>,
+    /// D3D12: the game's own way to its direct queue, where it executes through one its swapchain
+    /// does not hold (Streamline's proxy). None: the swapchain's, else caught at
+    /// `ExecuteCommandLists` ([`crate::queue12::game_queue`]).
+    pub queue: Option<fn() -> Option<ID3D12CommandQueue>>,
     pub frame_end: Option<fn(&IDXGISwapChain)>,
-    pub report: Option<fn(&Driver, &mut HeadPose)>,
+    pub report: Option<fn(&mut HeadPose)>,
     pub before: Option<fn(&Driver, &IDXGISwapChain, u64) -> bool>,
     pub after: Option<fn(&Driver, u64, &HeadPose)>,
     pub adjust_pose: Option<fn(u64, &mut HeadPose)>,
@@ -118,8 +119,9 @@ fn install<G: Presents>(start: &mut Start<'_, G>) -> Result<(), Lack> {
     let graphics = (G::LOOP.graphics)(start.build);
     let publisher = match graphics {
         Graphics::D3D11 => Publisher::D3D11(AlternatePublisher::new(channel.clone(), shared.schedule)),
-        Graphics::D3D12 => Publisher::D3D12 { publisher: AlternatePublisher12::new(channel.clone(), shared.schedule), queue: G::LOOP.queue.unwrap_or(crate::queue12::game_queue) },
+        Graphics::D3D12 => Publisher::D3D12(AlternatePublisher12::new(channel.clone(), shared.schedule)),
     };
+    crate::queue12::use_own(G::LOOP.queue);
     let Loop { entry, work, frame_end, report, before, after, adjust_pose, flat, in_turn, pose_each_frame, finish, flat_picture, .. } = G::LOOP;
     DRIVER.install(Install { shared, publisher, poses, frame_end, report, work, before, after, adjust_pose, menu: None, in_turn, pose_each_frame, finish, flat_picture });
     if let Some(flat) = flat {

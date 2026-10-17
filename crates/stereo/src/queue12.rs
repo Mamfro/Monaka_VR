@@ -8,7 +8,9 @@
 
 use monaka_hook::{Hooks, InFlight, Original, thread_id};
 use monaka_producer::{Rejection, log, log_first};
+use monaka_core::sync::Locked;
 use std::ffi::c_void;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
 use windows::Win32::Graphics::Direct3D12::{D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_DESC, D3D12CreateDevice, ID3D12CommandQueue, ID3D12Device};
@@ -92,12 +94,28 @@ fn note(queue: usize) {
     log_first(1, format_args!("queue catcher: more than {SEEN} queues; {queue:#x} is not noted"));
 }
 
-/// The game's direct queue, asked on the thread that presents `swap`: the queue the swapchain
-/// presents on; where that cannot be read, the direct queue that thread executed work on last,
-/// else the only direct queue seen.
-pub fn game_queue(swap: &IDXGISwapChain3) -> Option<ID3D12CommandQueue> {
+/// A game's own way to its direct queue (a present loop's `queue`).
+pub type OwnQueue = fn() -> Option<ID3D12CommandQueue>;
+
+/// The game's own way to its direct queue, set by its present loop ([`use_own`]).
+static OWN: Mutex<Option<OwnQueue>> = Mutex::new(None);
+
+/// Sets the game's own way to its direct queue (a present loop's `queue`): where the game executes
+/// through a queue its swapchain does not hold (Streamline's proxy), only it answers [`game_queue`].
+pub fn use_own(own: Option<OwnQueue>) {
+    *OWN.locked() = own;
+}
+
+/// The game's direct queue, the one place every feature asks: the game's own way where it has one
+/// ([`use_own`]); else, asked on the thread that presents `swap`, the queue the swapchain presents
+/// on; where that cannot be read, the direct queue that thread executed work on last, else the
+/// only direct queue seen.
+pub fn game_queue(swap: Option<&IDXGISwapChain3>) -> Option<ID3D12CommandQueue> {
+    if let Some(own) = *OWN.locked() {
+        return own();
+    }
     // SAFETY: the swapchain being presented, alive for the call.
-    if let Some(queue) = unsafe { crate::swapchain_queue::of(swap.as_raw()) } {
+    if let Some(queue) = swap.and_then(|swap| unsafe { crate::swapchain_queue::of(swap.as_raw()) }) {
         log_first(1, format_args!("queue catcher: the swapchain presents on {:#x}", queue.as_raw() as usize));
         return Some(queue);
     }

@@ -27,7 +27,6 @@ pub(super) struct GameFns {
     pub(super) separation: fn(&HeadPose) -> Option<f32>,
     /// Each eye's pose as it goes out, as the loop reports it.
     pub(super) report: fn(&mut HeadPose),
-    pub(super) queue: fn(&IDXGISwapChain3) -> Option<ID3D12CommandQueue>,
     pub(super) units_per_metre: f32,
 }
 
@@ -50,25 +49,11 @@ impl GameFns {
     }
 }
 
-/// The alternate-eye loop's pose report for game `G` (its own, or the centred frustum around each
-/// eye's).
-pub(super) fn alternate_report<G: Presents>(pose: &mut HeadPose) {
-    match G::LOOP.report {
-        Some(report) => report(&DRIVER, pose),
-        None => DRIVER.report_centred(pose),
-    }
-}
-
 /// The same-frame loop's pose report for game `G` (its own, or as drawn).
 pub(super) fn same_frame_report<G: PresentsPairs>(pose: &mut HeadPose) {
     if let Some(report) = G::LOOP.report {
         report(pose);
     }
-}
-
-/// The same-frame loop's game queue for game `G`.
-pub(super) fn same_frame_queue<G: PresentsPairs>(_: &IDXGISwapChain3) -> Option<ID3D12CommandQueue> {
-    G::LOOP.queue.and_then(|queue| queue())
 }
 
 pub(super) static GAME: Mutex<Option<GameFns>> = Mutex::new(None);
@@ -127,8 +112,7 @@ pub(super) fn install<G: Presents + FrameInputs + HudLayer>(start: &mut Start<'_
         presenting: G::presenting,
         frustum: G::frustum,
         separation: G::separation,
-        report: alternate_report::<G>,
-        queue: G::LOOP.queue.unwrap_or(crate::queue12::game_queue),
+        report: |pose| DRIVER.report(pose),
         units_per_metre: G::UNITS_PER_METRE,
     };
     let options = start.options;
@@ -156,10 +140,9 @@ pub(super) fn install_pairs<G: PresentsPairs + EyeSite + FrameInputs + HudLayer>
     let game = GameFns {
         on: OnLoop::SameFrame,
         presenting: G::presenting,
-        frustum: <G as crate::providers::FrameLabels>::frustum,
-        separation: <G as crate::providers::FrameLabels>::separation,
+        frustum: G::frustum,
+        separation: G::separation,
         report: same_frame_report::<G>,
-        queue: same_frame_queue::<G>,
         units_per_metre: G::UNITS_PER_METRE,
     };
     start_warping(game);

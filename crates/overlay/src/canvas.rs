@@ -92,10 +92,10 @@ impl Cursor {
     }
 
     /// A dot where the pointer is, over everything else on the page.
-    pub fn paint(&self, ctx: &egui::Context) {
+    pub fn paint(&self, ctx: &egui::Context, colour: egui::Color32) {
         if let Some(at) = self.0 {
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("pointer cursor")));
-            painter.circle_filled(at, 5.0, egui::Color32::from_rgb(255, 170, 60));
+            painter.circle_filled(at, 5.0, colour);
             painter.circle_stroke(at, 9.0, egui::Stroke::new(2.0, egui::Color32::from_black_alpha(160)));
         }
     }

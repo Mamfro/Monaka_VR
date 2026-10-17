@@ -18,7 +18,7 @@ use monaka_core::gesture::{ReleaseRules, ThrowSpeed};
 use monaka_core::math::{Vec3, length};
 use monaka_contract::protocol::{LEFT_HAND, RIGHT_HAND};
 use monaka_core::sync::Locked;
-use monaka_producer::game::{Component, Lack, On, Run, Start, Switch};
+use monaka_producer::game::{Component, Lack, Need, Start, Switch, lines};
 use monaka_producer::log;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -49,18 +49,15 @@ pub trait ThrowsByHand: Throws + HandRig {
 /// test). A game says what it works on top of by struct update.
 pub const fn throw<G: ThrowsByHand>() -> Component<G> {
     Component {
+        needs: &[Need::Feature(Feature::HandRig)],
         name: "throw",
         features: &[Feature::Throw],
         switch: Some(Switch::new("throw_by_hand", true, "the game's throw")),
-        on: on::<G>,
         install: install::<G>,
-        release: release::<G>,
+        release,
+        summary: Some(summary::<G>),
         ..Component::NONE
     }
-}
-
-fn on<G: ThrowsByHand>(run: &Run<'_, G>) -> On {
-    On::when(run.shared.aim.rig, "aim is not motion controls")
 }
 
 /// The release read off a trail kept by `controllers`: the fastest over half a second, the way
@@ -139,12 +136,13 @@ fn install<G: ThrowsByHand>(start: &mut Start<'_, G>) -> Result<(), Lack> {
     Ok(())
 }
 
-fn release<G: ThrowsByHand>() {
+fn release() {
     launch::throw_by(None);
-    <G as Throws>::report();
-    if std::mem::take(&mut *INSTALLED.locked()) {
-        log!("throwing by hand: {} let go, {} throws", LET_GOS.load(Relaxed), THROWS.load(Relaxed));
-    }
+    *INSTALLED.locked() = false;
+}
+
+fn summary<G: ThrowsByHand>() -> String {
+    lines(&[<G as Throws>::summary(), format!("throwing by hand: {} let go, {} throws", LET_GOS.load(Relaxed), THROWS.load(Relaxed))])
 }
 
 #[cfg(test)]

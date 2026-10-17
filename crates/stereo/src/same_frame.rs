@@ -113,7 +113,8 @@ pub struct PairLoop<G: Game> {
     /// Whether a frame of this size (width, height) may be published: the channel is made at the
     /// first one's size (`crate::eye_size::ready`, while the game is asked for the eye size).
     pub ready: fn(u32, u32) -> bool,
-    /// D3D12: the game's direct queue, once known.
+    /// D3D12: the game's own way to its direct queue, where it executes through one its swapchain
+    /// does not hold (Streamline's proxy); None: the swapchain's ([`crate::queue12::game_queue`]).
     pub queue: Option<fn() -> Option<ID3D12CommandQueue>>,
     /// PC checks: the game's own synthetic head for the run's `synthetic_yaw` and `synthetic_pitch`
     /// (degrees); asked at each sample (it may move). By default a fixed one.
@@ -186,7 +187,6 @@ pub(crate) struct Settings {
     pub presenting: Option<fn() -> Option<Pending>>,
     pub pair: Option<fn() -> u64>,
     pub ready: fn(u32, u32) -> bool,
-    pub queue: Option<fn() -> Option<ID3D12CommandQueue>>,
     pub report: Option<fn(&mut HeadPose)>,
     pub hud: Option<PairHud>,
     pub flat: Option<fn() -> Option<Flat>>,
@@ -207,11 +207,6 @@ impl Settings {
             Some(pair) => pair(),
             None => pair_of(eye, counter),
         }
-    }
-
-    /// The game's queue, once known.
-    pub fn queue(&self) -> Option<ID3D12CommandQueue> {
-        self.queue.and_then(|queue| queue())
     }
 
     /// Each eye's pose as it goes out.
@@ -245,12 +240,12 @@ fn install<G: PresentsPairs + EyeSite>(start: &mut Start<'_, G>) -> Result<(), L
         };
         PAIRS.head.open(poses, synthetic);
     }
+    crate::queue12::use_own(game.queue);
     *PAIRS.settings.locked() = Some(Settings {
         output,
         presenting: game.presenting,
         pair: game.pair,
         ready: game.ready,
-        queue: game.queue,
         report: game.report,
         hud: game.hud,
         flat: game.flat,

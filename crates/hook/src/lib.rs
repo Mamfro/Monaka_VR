@@ -14,7 +14,8 @@
 //!   what runs only while the player does something, and the functions handed a value (64-bit only).
 //! - [`live`]: probes added while the game runs, at any address (64-bit only): each call's
 //!   thread, frame, arguments and caller, and the fields an action changes.
-//! - [`InFlight`]: counts detours in progress so a producer can stop only when none is running.
+//! - [`InFlight`]: counts detours in progress so a producer can stop only when none is running,
+//!   and names the ones still running when it cannot.
 //!
 //! It builds for 64-bit games and for 32-bit ones (`i686-pc-windows-msvc`): what differs between
 //! the two (jump encodings, the decoder's prefixes, register names) is in `arch/x64.rs` and
@@ -27,6 +28,7 @@ mod arch;
 pub mod coverage;
 pub mod crash;
 pub mod decode;
+mod in_flight;
 #[cfg(target_arch = "x86_64")]
 pub mod live;
 pub mod mem;
@@ -36,6 +38,7 @@ pub mod probe;
 mod threads;
 pub mod watch;
 
+pub use in_flight::InFlight;
 pub use patch::{Hooks, Instruction, Original, Placement, Site, slot};
 
 /// A float as an atomic (its bits in an `AtomicU32`), for values detours share across threads.
@@ -66,7 +69,7 @@ pub fn thread_id() -> u32 {
 }
 
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
 #[derive(Debug)]
 pub enum Error {
@@ -97,33 +100,3 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
-
-/// Held by every detour for its whole run, so a producer stops only when no detour is running.
-pub struct InFlight(());
-
-impl InFlight {
-    pub fn enter() -> Self {
-        IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
-        Self(())
-    }
-
-    /// Waits until no detour is running; false after `timeout_ms`.
-    pub fn wait_idle(timeout_ms: u64) -> bool {
-        let start = std::time::Instant::now();
-        while IN_FLIGHT.load(Ordering::Acquire) != 0 {
-            if start.elapsed().as_millis() as u64 >= timeout_ms {
-                return false;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        true
-    }
-}
-
-impl Drop for InFlight {
-    fn drop(&mut self) {
-        IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
-    }
-}

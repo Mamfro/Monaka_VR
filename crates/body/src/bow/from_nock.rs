@@ -20,6 +20,7 @@ use monaka_core::gesture::Pull;
 use monaka_core::math::{self, Vec3, dot, sub};
 use monaka_contract::protocol::LEFT_HAND;
 use monaka_core::sync::Locked;
+use monaka_producer::game::lines;
 use monaka_producer::log;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -287,13 +288,10 @@ pub(super) fn out_of_frame(frame: &Mat34, local: &Mat34) -> Mat34 {
     [x[0], y[0], z[0], frame[3] + at[0], x[1], y[1], z[1], frame[7] + at[1], x[2], y[2], z[2], frame[11] + at[2]]
 }
 
-pub(super) fn report() {
-    let n = ARROWS.load(Relaxed);
-    if n > 0 {
-        log!("bow by hand: {n} arrows loosed by hand");
-    }
-    let placed = PLACED.load(Relaxed);
-    if placed > 0 {
-        log!("bow by hand: the string drawn along the bow {placed} times");
-    }
+pub(super) fn summary() -> String {
+    let (n, placed) = (ARROWS.load(Relaxed), PLACED.load(Relaxed));
+    lines(&[
+        if n > 0 { format!("bow by hand: {n} arrows loosed by hand") } else { String::new() },
+        if placed > 0 { format!("bow by hand: the string drawn along the bow {placed} times") } else { String::new() },
+    ])
 }

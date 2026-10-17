@@ -1085,6 +1085,13 @@ pub const CONTROLLER_SMOOTHING: Opt = opt(
 .launcher()
 .to_viewer();
 
+/// The headset home's panels as frosted glass: the game shows through them blurred (the viewer
+/// blurs the eyes behind each panel). Off: solid panels, and no blur pass.
+pub const FROSTED_PANELS: Opt = opt("frosted_panels", "Frosted panels", "Off: Monaka's headset panels are solid, a little lighter on the GPU.", Kind::Switch { default: true })
+    .on(Shown::Monaka)
+    .launcher()
+    .to_viewer();
+
 /// Disabled view bobbing: Monaka's own setting (saved once, for every game), read by the producer of
 /// each game that can (the game lists it among its options, unchanged: [`Manifest::check`]).
 /// More detail in the producer's log, for a bug report. Not an options-file line: the launcher
@@ -1141,7 +1148,7 @@ pub const PANEL_NEAREST: &str = "panel_nearest";
 /// The options the viewer acts on the moment they change (by id): changed in the headset's home,
 /// they apply at once; any other applies with the next launch. Their help is left out: a game's own
 /// words for one (its menus by reach) are not the viewer's to know.
-pub const LIVE: &[Opt] = &[CONTROLLER_SMOOTHING, menu_reach(""), MENU_REACH_DEPTH, CONTROLLER_PROXY];
+pub const LIVE: &[Opt] = &[CONTROLLER_SMOOTHING, menu_reach(""), MENU_REACH_DEPTH, CONTROLLER_PROXY, FROSTED_PANELS];
 
 
 pub const DISABLE_VIEW_BOBBING: Opt = opt(
@@ -1178,7 +1185,7 @@ pub const MONAKA: Manifest = Manifest {
     launch: Launch::Manual,
     refused_arguments: &[],
     before: "",
-    options: &[CONTROLLER_SMOOTHING, DISABLE_VIEW_BOBBING, DOMINANT_EYE, DIAGNOSTIC_LOGGING, DEV_MODE, DEBUG_MENU],
+    options: &[CONTROLLER_SMOOTHING, FROSTED_PANELS, DISABLE_VIEW_BOBBING, DOMINANT_EYE, DIAGNOSTIC_LOGGING, DEV_MODE, DEBUG_MENU],
     licences: &[],
     left_hand_aims: false,
     weapon_ring: false,

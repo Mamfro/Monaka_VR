@@ -35,6 +35,9 @@ pub struct Params {
     /// Rectangles of the layer (x, y, width, height; frame pixels) left out: the pieces on the hands.
     pub pieces: [[f32; 4]; PIECES],
     pub piece_count: usize,
+    /// The layer's alpha is how much of what is behind shows through (1 where nothing is drawn, as
+    /// id Tech 6 keeps its GUI), not its coverage.
+    pub see_through: bool,
 }
 
 impl Params {
@@ -56,7 +59,8 @@ struct Constants {
     pieces: f32,
     rect: [f32; 4],
     aim: [f32; 2],
-    pad: [f32; 2],
+    see_through: f32,
+    pad: f32,
     piece_rects: [[f32; 4]; PIECES],
 }
 
@@ -133,7 +137,8 @@ fn record(over: &FramePass, list: &ID3D12GraphicsCommandList, frame: &ID3D12Reso
         pieces: params.piece_count as f32,
         rect: params.rect,
         aim: params.aim,
-        pad: [0.0; 2],
+        see_through: if params.see_through { 1.0 } else { 0.0 },
+        pad: 0.0,
         piece_rects,
     };
     const SRV: D3D12_RESOURCE_STATES = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;

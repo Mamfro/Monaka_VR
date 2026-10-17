@@ -15,11 +15,14 @@ use monaka_contract::protocol::HandPose;
 use monaka_core::hold::HoldToggle;
 use monaka_core::math::{Quat, Vec3};
 use monaka_openxr::{Layer, Session, Space};
+use monaka_overlay::eye::EyeView;
+use monaka_overlay::frost::FrostPass;
 use monaka_overlay::home::pages::Pages;
 use monaka_overlay::home::{Home, PAGES};
+use monaka_overlay::quad::Rectangle;
 use std::path::Path;
 use std::time::Instant;
-use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext};
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 
 /// What one read of the pad asked for.
@@ -54,6 +57,9 @@ pub struct HomeView<'s> {
     open_soon: bool,
     /// The ring goes round to where the head faces at the next read (the player recentred).
     recenter: bool,
+    /// The game blurred behind the panels while they are frosted, made at the first need; `Err`
+    /// once it failed (the panels are solid for the rest of the run).
+    frost: Option<Result<FrostPass, ()>>,
 }
 
 impl<'s> HomeView<'s> {
@@ -72,6 +78,31 @@ impl<'s> HomeView<'s> {
             held: 0,
             open_soon: false,
             recenter: false,
+            frost: None,
+        }
+    }
+
+    /// The panels frosted (the game blurred behind them) or solid, from now on.
+    pub fn set_frosted(&mut self, frosted: bool) {
+        self.home.set_frosted(frosted && !matches!(self.frost, Some(Err(()))));
+    }
+
+    /// Blurs eye `image` (made in `format`, a copy of `source`, seen as `eye`) behind the panels,
+    /// while they are open and frosted.
+    pub fn frost_eye(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, image: &ID3D11Texture2D, format: DXGI_FORMAT, source: &ID3D11Texture2D, eye: &EyeView) {
+        if !self.open || !self.home.frosted() {
+            return;
+        }
+        let made = self.frost.get_or_insert_with(|| FrostPass::new(device).map_err(|e| println!("Frosted panels: {e}; solid this run")));
+        let Ok(frost) = made else {
+            self.home.set_frosted(false);
+            return;
+        };
+        let panels: Vec<Rectangle> = (0..PAGES.len()).filter_map(|page| self.ring.rectangle(page)).collect();
+        if let Err(e) = frost.draw(device, context, image, format, source, eye, &panels) {
+            println!("Frosted panels: {e}; solid this run");
+            self.frost = Some(Err(()));
+            self.home.set_frosted(false);
         }
     }
 

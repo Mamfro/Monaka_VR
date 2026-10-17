@@ -247,8 +247,10 @@ pub trait Throws: Game {
     /// Whether the player's throw is under way now (winding up to the item leaving, and a moment
     /// after, as the game says): the hands stay apart on their controllers then.
     fn throwing() -> bool;
-    /// Logs the hooks' counts, the hooks out.
-    fn report() {}
+    /// The hooks' counts, for the stop's log (empty: nothing to say).
+    fn summary() -> String {
+        String::new()
+    }
 }
 
 #[cfg(test)]

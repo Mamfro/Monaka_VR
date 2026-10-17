@@ -30,7 +30,7 @@ use monaka_core::math::Vec3;
 use monaka_contract::protocol::{DepthParams, HeadPose};
 use monaka_core::rendering::StereoMethod;
 use monaka_framegen::inputs::Rendering;
-use monaka_producer::game::{Component, Every, Game, Lack, On, Start};
+use monaka_producer::game::{Component, Every, Game, Lack, Start};
 use monaka_warp::View;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::{Duration, Instant};
@@ -472,10 +472,5 @@ pub const fn component<G: Game>(
     summary: fn() -> String,
     own_channel: bool,
 ) -> Component<G> {
-    Component { name: NAME, needs_channel: own_channel, install, every, release, summary: Some(summary), ..Component::NONE }
-}
-
-/// On while the game's stereo method is AFW.
-pub fn on(method: StereoMethod) -> On {
-    On::when(method == StereoMethod::Afw, "AER chosen")
+    Component { name: NAME, methods: &[StereoMethod::Afw], needs_channel: own_channel, install, every, release, summary: Some(summary), ..Component::NONE }
 }

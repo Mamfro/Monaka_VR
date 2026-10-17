@@ -27,6 +27,8 @@ pub struct Link<'s> {
     pub producer: Description,
     pub input: FenceReader,
     pub swapchains: [Swapchain<'s>; 2],
+    /// The eye swapchains' format.
+    pub format: DXGI_FORMAT,
     /// The newest pair, copied out of the channel.
     pub sources: [ID3D11Texture2D; 2],
     pub hand_panels: panel::HandPanels<'s>,
@@ -86,6 +88,7 @@ impl<'s> Link<'s> {
             producer,
             input,
             swapchains,
+            format: DXGI_FORMAT(format as i32),
             sources,
             hand_panels,
             debug_views,

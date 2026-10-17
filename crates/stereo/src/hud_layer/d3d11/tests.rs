@@ -1,4 +1,5 @@
 use super::*;
+use crate::providers::EyeGeometry;
 
 #[test]
 fn a_scissor_moves_with_its_viewport() {
@@ -51,6 +52,9 @@ impl FrameLabels for Labelled {
     fn running() -> bool {
         true
     }
+}
+
+impl EyeGeometry for Labelled {
     fn frustum(pose: &HeadPose, eye: usize) -> Option<monaka_core::camera::Frustum> {
         (pose.valid != 0).then(|| monaka_core::camera::Frustum::from_fov(pose.fov[eye])).flatten()
     }
@@ -75,7 +79,7 @@ fn the_hud_is_placed_by_the_frame_labels() {
             let placed = rects::<Labelled>(Some((scale, distance)), &pose, width, height);
             for eye in [0, 1] {
                 let at = Labelled::frustum(&pose, eye).map(|frustum| HudPlacement::new(frustum, eye, pose.ipd, distance));
-                assert_eq!(place_eye::<Labelled>(&pose, eye, distance), at);
+                assert_eq!(crate::hud_layer::place_eye::<Labelled>(&pose, eye, distance), at);
                 let expected = at.map_or(base.array(), |at| at.rect(base, base.aspect(), scale).array());
                 assert_eq!(placed[eye], expected, "eye {eye}, {width}x{height}");
             }
@@ -83,7 +87,7 @@ fn the_hud_is_placed_by_the_frame_labels() {
         }
     }
     // The frame being drawn: its label's eye and pose.
-    assert_eq!(placement::<Labelled>(distance), place_eye::<Labelled>(&turned(), 1, distance));
+    assert_eq!(placement::<Labelled>(distance), crate::hud_layer::place_eye::<Labelled>(&turned(), 1, distance));
     assert!(placement::<Labelled>(distance).is_some());
     // Not installed: the whole image.
     assert_eq!(eye_rects::<Labelled>(&turned(), 800, 600), [Rect::sized(800.0, 600.0).array(); 2]);

@@ -99,7 +99,7 @@ const VIDEO: Component<Lived> = Component {
 const HANDS: Component<Lived> = Component {
     name: "hands",
     features: &[Feature::HandRig],
-    needs: &[&VIDEO],
+    needs: &[Need::On(&VIDEO)],
     install: |_| {
         call("hands install");
         if MISSING.load(Relaxed) { Err(Lack::Missing("no arms in this build".to_owned())) } else { Ok(()) }

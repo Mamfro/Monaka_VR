@@ -64,7 +64,7 @@ impl FramePass {
         // SAFETY: views of live textures into our own heap.
         unsafe {
             self.device.CreateShaderResourceView(&source, Some(&srv_desc(self.format)), self.heap.cpu(frame_slot));
-            self.device.CreateShaderResourceView(ui, Some(&srv_desc(DXGI_FORMAT_R8G8B8A8_UNORM)), self.heap.cpu(ui_slot));
+            self.device.CreateShaderResourceView(ui, Some(&srv_desc(ui_view_format(ui.GetDesc().Format))), self.heap.cpu(ui_slot));
             self.device.CreateUnorderedAccessView(&out, None, Some(&uav_desc(self.format)), self.heap.cpu(2));
         }
         self.viewed = Some((ui.clone(), source, out));
@@ -132,4 +132,10 @@ impl<T> Default for Lazy<T> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The format a UI layer of `format` is read as: its UNORM (or float) member, a layer of a family
+/// the pass does not know as R8G8B8A8 UNORM (a layer's bytes as they are).
+pub(crate) fn ui_view_format(format: DXGI_FORMAT) -> DXGI_FORMAT {
+    monaka_warp::reproject12::uav_format(format).unwrap_or(DXGI_FORMAT_R8G8B8A8_UNORM)
 }

@@ -21,7 +21,7 @@
 //! time, where the game lets it (the delivery's `levels`). Its option (not shown by the launcher):
 //! `pause_hold=0` drops the share at once after a pause.
 
-use super::{Delivery, Looks, Share};
+use super::{Delivery, Looks, Pitch, Share};
 use monaka_core::aim::Levelling;
 use monaka_contract::protocol::HeadPose;
 use monaka_core::sync::Locked;
@@ -40,6 +40,7 @@ struct GameFns {
     camera_taken: fn() -> bool,
     head: fn() -> Option<HeadPose>,
     holds: fn() -> bool,
+    pitch: Pitch,
 }
 
 static GAME: Mutex<Option<GameFns>> = Mutex::new(None);
@@ -61,11 +62,11 @@ fn never() -> bool {
 
 pub(super) fn install<G: Looks>(start: &mut Start<'_, G>) -> Result<(), Lack> {
     PAUSE_HOLD.store(start.options.switch("pause_hold", true), Release);
-    let (head, holds) = match G::DELIVERY {
-        Delivery::Command { head, holds, .. } => (head, holds),
-        _ => (no_head as fn() -> Option<HeadPose>, never as fn() -> bool),
+    let (head, holds, pitch) = match G::DELIVERY {
+        Delivery::Command { head, holds, pitch, .. } => (head, holds, pitch),
+        _ => (no_head as fn() -> Option<HeadPose>, never as fn() -> bool, Pitch::Own),
     };
-    *GAME.locked() = Some(GameFns { camera_taken: camera_taken::<G>, head, holds });
+    *GAME.locked() = Some(GameFns { camera_taken: camera_taken::<G>, head, holds, pitch });
     G::install(start)
 }
 
@@ -238,9 +239,13 @@ pub fn built(pitch: f32, yaw: f32) -> Option<(f32, f32)> {
     let head = sampled.map(|pose| head_share(pose.orientation));
     let next = next_share(aiming, resuming, taken, state.held, head);
     let (mut pitch, yaw) = reshare(pitch, yaw, state.held, next);
+    // The head's pitch alone: the game's own pitch input since the last command dropped.
+    if game.pitch == Pitch::HeadAlone && aiming && !taken {
+        pitch = degrees(next).1;
+    }
     // Each view's measure is used once: the next view shows the change.
     let own = f32::from_bits(OWN_PITCH.swap(f32::NAN.to_bits(), Relaxed));
-    if aiming && !resuming && LEVELLING.load(Relaxed) && !taken && own.is_finite() {
+    if game.pitch == Pitch::Own && aiming && !resuming && LEVELLING.load(Relaxed) && !taken && own.is_finite() {
         let change = LEVEL.step(own);
         if change != 0.0 {
             pitch += change;

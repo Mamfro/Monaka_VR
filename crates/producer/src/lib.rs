@@ -13,7 +13,7 @@ pub use monaka_contract::{manifest, pack, status};
 /// For [`producer!`]'s test that a game reads every option it offers.
 #[doc(hidden)]
 pub use monaka_core::options::unread_options;
-use monaka_contract::status::{State, code};
+use monaka_contract::status::{REJECTED_LINE, State, code};
 use monaka_contract::host;
 use monaka_contract::protocol::{ChannelName, LIVE_CHANNEL_FILE};
 use monaka_hook::module::Module;
@@ -94,7 +94,7 @@ pub fn remove_hooks(slot: &Mutex<Option<Hooks>>, idle_ms: u64) -> Result<(), Rej
         }
     }
     if !InFlight::wait_idle(idle_ms) {
-        return Err(Rejection::new(code::WAIT_TIMEOUT, "detours still running after the hooks were removed"));
+        return Err(Rejection::new(code::WAIT_TIMEOUT, format!("detours still running after the hooks were removed: {}", InFlight::running())));
     }
     Ok(())
 }
@@ -169,7 +169,7 @@ impl Lifecycle {
             }
             Err(rejection) => {
                 remove_crash_log();
-                session.log(format_args!("rejected: {}", rejection.reason));
+                session.log(format_args!("{REJECTED_LINE}{}", rejection.reason));
                 session.close();
                 self.set(State::Rejected);
                 rejection.code

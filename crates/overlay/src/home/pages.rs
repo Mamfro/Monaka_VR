@@ -8,8 +8,7 @@ use super::place::PIXELS;
 use super::{Home, LogSource, PAGES, Page, Setting};
 use crate::Result;
 use crate::canvas::{Canvas, Cursor};
-use crate::ring_page::{self, style};
-use crate::menu::panel::{ACCENT, DIM, ON, ROW, TEXT};
+use crate::ring_page::{self, Look, style};
 use egui::{Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, ScrollArea, Vec2};
 use monaka_contract::manifest::{Kind, TABS, number_text};
 use windows::Win32::Graphics::Direct3D11::*;
@@ -37,22 +36,23 @@ impl Pages {
         self.cursors[page].follow(&events);
         let cursor = self.cursors[page];
         let front = home.front == page;
+        let look = home.look();
         // A list stuck to its bottom (the log) learns its height in one pass and scrolls there in
         // the next: its panel is laid out once more first, so the image shows the newest lines.
         if PAGES[page] == Page::Log {
             let _ = self.canvases[page].draw_with(device, context, Vec::new(), |ui| {
-                style(ui);
-                framed(ui, PAGES[page], front, |ui| log(ui, home));
+                style(ui, &look);
+                framed(ui, &look, PAGES[page], front, |ui| log(ui, home));
             })?;
         }
         self.canvases[page].draw_with(device, context, events, |ui| {
-            style(ui);
-            framed(ui, PAGES[page], front, |ui| match PAGES[page] {
+            style(ui, &look);
+            framed(ui, &look, PAGES[page], front, |ui| match PAGES[page] {
                 Page::Games => games(ui, home),
                 Page::Settings => settings(ui, home),
                 Page::Log => log(ui, home),
             });
-            cursor.paint(ui.ctx());
+            cursor.paint(ui.ctx(), look.accent);
         })
     }
 }
@@ -61,18 +61,19 @@ impl Pages {
 const KEYS: &str = "Point and pull the trigger.  Right stick: scroll.  LB/RB: panels.  B or hold Start: close.";
 
 /// The home's frame round `body` ([`ring_page::framed`]).
-fn framed(ui: &mut egui::Ui, page: Page, front: bool, body: impl FnOnce(&mut egui::Ui)) {
-    ring_page::framed(ui, page.title(), front, KEYS, body);
+fn framed(ui: &mut egui::Ui, look: &Look, page: Page, front: bool, body: impl FnOnce(&mut egui::Ui)) {
+    ring_page::framed(ui, look, page.title(), front, KEYS, body);
 }
 
 /// The Games panel: the game shown, what can be done with it, and the games on offer. In the
 /// Monaka window's own headset view a game is picked from the list and played or stopped here.
 fn games(ui: &mut egui::Ui, home: &mut Home) {
+    let look = home.look();
     ScrollArea::vertical().id_salt("games").auto_shrink([false, false]).show(ui, |ui| {
         match home.game {
             Some(game) => {
                 ui.label(RichText::new(game.name).size(19.0).strong());
-                ui.label(RichText::new(format!("{}: {}", game.status.label(), game.status.meaning())).color(DIM));
+                ui.label(RichText::new(format!("{}: {}", game.status.label(), game.status.meaning())).color(look.dim));
                 let about = &home.about;
                 let mut made = String::new();
                 if !about.version.is_empty() {
@@ -82,18 +83,18 @@ fn games(ui: &mut egui::Ui, home: &mut Home) {
                     made.push_str(&format!("{}by {}", if made.is_empty() { "" } else { " " }, about.author));
                 }
                 if !made.is_empty() {
-                    ui.label(RichText::new(made).color(DIM));
+                    ui.label(RichText::new(made).color(look.dim));
                 }
             }
             None if home.window => {
-                ui.label(RichText::new("No game picked yet: pick one below.").color(DIM));
+                ui.label(RichText::new("No game picked yet: pick one below.").color(look.dim));
             }
             None => {
-                ui.label(RichText::new("Started without the launcher: no game to show.").color(DIM));
+                ui.label(RichText::new("Started without the launcher: no game to show.").color(look.dim));
             }
         }
         ui.add_space(10.0);
-        let stop = |ui: &mut egui::Ui, label: &str| ui.add(egui::Button::new(RichText::new(label).strong()).fill(Color32::from_rgb(120, 40, 36))).clicked();
+        let stop = |ui: &mut egui::Ui, label: &str| ui.add(egui::Button::new(RichText::new(label).strong()).fill(look.stop)).clicked();
         ui.horizontal(|ui| {
             if !home.window {
                 if stop(ui, "Stop VR") {
@@ -107,7 +108,7 @@ fn games(ui: &mut egui::Ui, home: &mut Home) {
                 let can = home.status.can_play;
                 // A game that runs already is joined, not started.
                 let label = if home.current_runs() { "Attach" } else { "Play" };
-                if ui.add_enabled(can, egui::Button::new(RichText::new(label).strong()).fill(if can { ROW } else { Color32::TRANSPARENT })).clicked() {
+                if ui.add_enabled(can, egui::Button::new(RichText::new(label).strong()).fill(if can { look.row } else { Color32::TRANSPARENT })).clicked() {
                     home.ask_play();
                 }
                 if home.status.can_start_game && ui.button("Start game").clicked() {
@@ -122,12 +123,12 @@ fn games(ui: &mut egui::Ui, home: &mut Home) {
             }
         });
         if let Some(in_vr) = home.in_vr().filter(|g| home.window && !g.current) {
-            ui.label(RichText::new(format!("In VR now: {}", in_vr.name)).color(ON));
+            ui.label(RichText::new(format!("In VR now: {}", in_vr.name)).color(look.on));
         }
         // What Play does or why it cannot yet, then how a run goes (starting, waiting).
         if home.window {
             let status = &home.status;
-            for (text, colour) in [(&status.why, DIM), (&status.line, TEXT)] {
+            for (text, colour) in [(&status.why, look.dim), (&status.line, look.text)] {
                 if !text.is_empty() {
                     ui.add(egui::Label::new(RichText::new(text).size(14.0).color(colour)).wrap());
                 }
@@ -142,11 +143,11 @@ fn games(ui: &mut egui::Ui, home: &mut Home) {
         for listed in &home.games {
             // In VR (its run linked in), playing (its process runs), or how far its pack is.
             let (state, colour) = match (listed.in_vr, listed.running) {
-                (true, _) => ("Playing in VR", ON),
-                (false, true) => ("Playing", ON),
-                (false, false) => (listed.status.as_str(), DIM),
+                (true, _) => ("Playing in VR", look.on),
+                (false, true) => ("Playing", look.on),
+                (false, false) => (listed.status.as_str(), look.dim),
             };
-            let row = Frame::new().fill(if listed.current { ROW } else { Color32::TRANSPARENT }).corner_radius(CornerRadius::same(6)).inner_margin(Margin::symmetric(10, 4)).show(ui, |ui| {
+            let row = Frame::new().fill(if listed.current { look.row } else { Color32::TRANSPARENT }).corner_radius(CornerRadius::same(6)).inner_margin(Margin::symmetric(10, 4)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(&listed.name);
@@ -164,15 +165,16 @@ fn games(ui: &mut egui::Ui, home: &mut Home) {
             home.ask_select(&id);
         }
         if !home.window {
-            ui.label(RichText::new("Starting another game from the headset is not here yet: use the window.").size(12.0).color(DIM));
+            ui.label(RichText::new("Starting another game from the headset is not here yet: use the window.").size(12.0).color(look.dim));
         }
     });
 }
 
 fn settings(ui: &mut egui::Ui, home: &mut Home) {
+    let look = home.look();
     let tabs = home.tabs();
     if tabs.is_empty() {
-        ui.label(RichText::new("Nothing to set: the viewer was started without the launcher.").color(DIM));
+        ui.label(RichText::new("Nothing to set: the viewer was started without the launcher.").color(look.dim));
         return;
     }
     if !tabs.contains(&home.tab) {
@@ -202,7 +204,8 @@ fn apply_bar(ui: &mut egui::Ui, home: &mut Home) {
     if home.pending.is_empty() && !home.applying && home.problem.is_none() {
         return;
     }
-    Frame::new().fill(ROW).corner_radius(CornerRadius::same(8)).inner_margin(Margin::symmetric(10, 6)).show(ui, |ui| {
+    let look = home.look();
+    Frame::new().fill(look.row).corner_radius(CornerRadius::same(8)).inner_margin(Margin::symmetric(10, 6)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             let said = if home.applying {
@@ -215,14 +218,14 @@ fn apply_bar(ui: &mut egui::Ui, home: &mut Home) {
             ui.label(RichText::new(said).size(14.0));
             if !home.applying && home.can_apply() && !home.pending.is_empty() {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.add(egui::Button::new(RichText::new("Apply now").strong()).fill(Color32::from_rgb(70, 110, 60))).clicked() {
+                    if ui.add(egui::Button::new(RichText::new("Apply now").strong()).fill(look.apply)).clicked() {
                         home.ask_apply();
                     }
                 });
             }
         });
         if let Some(problem) = &home.problem {
-            ui.label(RichText::new(problem).size(12.0).color(ACCENT));
+            ui.label(RichText::new(problem).size(12.0).color(look.accent));
         }
     });
     ui.add_space(4.0);
@@ -231,13 +234,14 @@ fn apply_bar(ui: &mut egui::Ui, home: &mut Home) {
 /// One setting: its label and when a change applies, its control, its help line.
 fn setting_row(ui: &mut egui::Ui, home: &mut Home, setting: &Setting) {
     let value = home.value(setting);
-    Frame::new().fill(Color32::from_white_alpha(6)).corner_radius(CornerRadius::same(8)).inner_margin(Margin::symmetric(10, 6)).show(ui, |ui| {
+    let look = home.look();
+    Frame::new().fill(look.card).corner_radius(CornerRadius::same(8)).inner_margin(Margin::symmetric(10, 6)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             ui.label(RichText::new(setting.opt.label).size(16.0));
             // When a change applies: at once, or (while its game plays) once VR restarts in it;
             // with no game playing, simply when it starts.
-            let when = if setting.live() { Some(("applies now", ON)) } else { home.can_apply().then_some(("applies on restart", DIM)) };
+            let when = if setting.live() { Some(("applies now", look.on)) } else { home.can_apply().then_some(("applies on restart", look.dim)) };
             if let Some((when, colour)) = when {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(RichText::new(when).size(11.0).color(colour));
@@ -276,16 +280,16 @@ fn setting_row(ui: &mut egui::Ui, home: &mut Home, setting: &Setting) {
                     if ui.add_enabled(now < max, egui::Button::new(RichText::new("  +  ").strong())).clicked() {
                         home.set(setting, number_text((now + step).clamp(min, max)));
                     }
-                    ui.label(RichText::new(format!("{} to {}", number_text(min), number_text(max))).size(11.0).color(DIM));
+                    ui.label(RichText::new(format!("{} to {}", number_text(min), number_text(max))).size(11.0).color(look.dim));
                 });
             }
             Kind::Text | Kind::Size => {
                 let shown = if value.is_empty() { "(none)" } else { value.as_str() };
-                ui.label(RichText::new(format!("{shown}   (typed in the window)")).color(DIM));
+                ui.label(RichText::new(format!("{shown}   (typed in the window)")).color(look.dim));
             }
         }
         if !setting.opt.help.is_empty() {
-            ui.label(RichText::new(setting.opt.help).size(12.0).color(DIM));
+            ui.label(RichText::new(setting.opt.help).size(12.0).color(look.dim));
         }
     });
 }

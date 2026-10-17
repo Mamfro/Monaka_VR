@@ -8,12 +8,13 @@
 //! `crate::held`). The barrel is that line where the gun is ([`crate::held::in_world`]: where the
 //! hand rig last posed the holder, or where the game put the gun itself), the muzzle at its end.
 
+use monaka_core::feature::Feature;
 use crate::held::{self, HeldItems};
 use crate::launch::{self, Fired, Fires, Shot, Weapon};
 use crate::held::Kind;
 use monaka_core::math::{self, Vec3};
 use monaka_core::sync::Locked;
-use monaka_producer::game::{Component, Lack, On, Run, Start, Switch};
+use monaka_producer::game::{Component, Lack, Need, On, Run, Start, Switch};
 use monaka_producer::log;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -26,6 +27,7 @@ const POSED_FRESH: u64 = 100;
 /// the eye along the aim, for a test). A game says what it works on top of by struct update.
 pub const fn gun<G: Fires + HeldItems>() -> Component<G> {
     Component {
+        needs: &[Need::Feature(Feature::HandRig)],
         name: "gun",
         switch: Some(Switch::new("shoot_from_barrel", true, "shots from the eye")),
         on: on::<G>,

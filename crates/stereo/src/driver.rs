@@ -46,7 +46,7 @@ mod tests;
 
 pub use flat::{Flat, FlatPicture};
 pub use labels::{Label, Taken};
-pub use own_pairs::{OwnPairs, Report, join_present, leave_present};
+pub use own_pairs::{OwnPairs, join_present, leave_present};
 
 use crate::alternate::{Step, d3d11::AlternatePublisher};
 use flat::shaped;
@@ -62,7 +62,6 @@ use monaka_hook::InFlight;
 use monaka_producer::{log, log_first};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering::*};
 use std::sync::Mutex;
-use windows::Win32::Graphics::Direct3D12::ID3D12CommandQueue;
 use windows::Win32::Graphics::Dxgi::{IDXGISwapChain, IDXGISwapChain3};
 use windows::core::{HRESULT, Interface};
 use monaka_core::sync::Locked;
@@ -83,7 +82,7 @@ pub enum Publisher {
     D3D11(AlternatePublisher),
     /// The fence channel, copies on the game's direct queue (`queue`, looked up at each present
     /// for the swapchain presenting: the game may make it after the hooks go in).
-    D3D12 { publisher: AlternatePublisher12, queue: fn(&IDXGISwapChain3) -> Option<ID3D12CommandQueue> },
+    D3D12(AlternatePublisher12),
 }
 
 /// What a game gives the driver at start.
@@ -98,7 +97,7 @@ pub struct Install {
     /// The pose each eye of a published pair goes out with (the field of view it was rendered
     /// with, the eye distance used). None: [`Driver::report_centred`], the centred frustum around
     /// each eye's from the headset's, or the game's own field of view ([`Driver::note_game_fov`]).
-    pub report: Option<fn(&Driver, &mut HeadPose)>,
+    pub report: Option<fn(&mut HeadPose)>,
     /// The game's draws of eye views, for the rate line: its name and counter.
     pub work: (&'static str, &'static AtomicU64),
     /// Before each present `n` (the game's swapchain, capturing), ahead of the publisher: true
@@ -133,7 +132,6 @@ struct State {
     shared: Shared,
     publisher: Publisher,
     frame_end: Option<fn(&IDXGISwapChain)>,
-    report: Option<fn(&Driver, &mut HeadPose)>,
     work: (&'static str, &'static AtomicU64),
     before: Option<fn(&Driver, &IDXGISwapChain, u64) -> bool>,
     after: Option<fn(&Driver, u64, &HeadPose)>,
@@ -191,7 +189,7 @@ pub struct Driver {
     /// while `state` is held and asks for them ([`Driver::report_centred`]).
     settings: Mutex<Option<Shared>>,
     /// The game's pose report ([`Install::report`]), apart from `state` as the settings are.
-    report: Mutex<Option<Report>>,
+    report: Mutex<Option<fn(&mut HeadPose)>>,
     state: Mutex<Cell>,
     head: HeadSource,
     frames: Mutex<Frames>,
@@ -250,7 +248,6 @@ impl Driver {
             shared: install.shared,
             publisher: install.publisher,
             frame_end: install.frame_end,
-            report: install.report,
             work: install.work,
             before: install.before,
             after: install.after,
@@ -384,7 +381,7 @@ impl Driver {
     pub fn report(&self, pose: &mut HeadPose) {
         let report = *self.report.locked();
         match report {
-            Some(report) => report(self, pose),
+            Some(report) => report(pose),
             None => self.report_centred(pose),
         }
     }
@@ -405,7 +402,7 @@ impl Driver {
     /// The latest pair published (D3D12): its sequence and the poses it went out with.
     pub fn last_pair(&self) -> Option<(u64, [HeadPose; 2])> {
         match self.state.locked().0.as_ref().map(|s| &s.publisher) {
-            Some(Publisher::D3D12 { publisher, .. }) => publisher.last_pair(),
+            Some(Publisher::D3D12(publisher)) => publisher.last_pair(),
             _ => None,
         }
     }
@@ -415,7 +412,7 @@ impl Driver {
         let cell = self.state.locked();
         let (pairs, failures, with_depth) = match cell.0.as_ref().map(|s| &s.publisher) {
             Some(Publisher::D3D11(p)) => (p.pairs(), p.failures(), 0),
-            Some(Publisher::D3D12 { publisher, .. }) => (publisher.pairs(), publisher.failures(), publisher.pairs_with_depth()),
+            Some(Publisher::D3D12(publisher)) => (publisher.pairs(), publisher.failures(), publisher.pairs_with_depth()),
             None => (0, 0, 0),
         };
         let t = &self.tally;
@@ -540,11 +537,7 @@ impl Driver {
         }
         let mut cell = self.state.locked();
         let Some(state) = cell.0.as_mut() else { return };
-        let report_fn = state.report;
-        let report = |pose: &mut HeadPose| match report_fn {
-            Some(report) => report(self, pose),
-            None => self.report_centred(pose),
-        };
+        let report = |pose: &mut HeadPose| self.report(pose);
         let label = self.take_label();
         let labelling = self.frames.locked().labelling;
         // D3D12: each frame's depth to the headset with its pair, while it goes there (not asked
@@ -560,7 +553,7 @@ impl Driver {
                 None => publisher.publish_flat(&device, &context, &image, n, &self.head),
             }),
             Publisher::D3D11(publisher) => Some(publisher.before_present(chain, n, &self.head, report)),
-            Publisher::D3D12 { publisher, queue } => chain.cast::<IDXGISwapChain3>().ok().and_then(|swap| match (queue(&swap), label) {
+            Publisher::D3D12(publisher) => chain.cast::<IDXGISwapChain3>().ok().and_then(|swap| match (crate::queue12::game_queue(Some(&swap)), label) {
                 (Some(queue), _) if flat.is_some() => Some(publisher.show_flat(&swap, &queue, n, &self.head)),
                 // The frame's own label: its eye and pose exactly, whatever the timing.
                 (Some(queue), Some(label)) => {
@@ -588,7 +581,7 @@ impl Driver {
             Some(Step::Published) => {
                 let (pairs, (w, h)) = match &state.publisher {
                     Publisher::D3D11(p) => (p.pairs(), p.size()),
-                    Publisher::D3D12 { publisher, .. } => (publisher.pairs(), publisher.size()),
+                    Publisher::D3D12(publisher) => (publisher.pairs(), publisher.size()),
                 };
                 if pairs == 1 {
                     log!("first pair published at present {n}: {w}x{h} per eye");
@@ -646,7 +639,7 @@ impl Driver {
             let pose = state.pair_pose;
             match &mut state.publisher {
                 Publisher::D3D11(publisher) => publisher.record_pose(n, pose),
-                Publisher::D3D12 { publisher, .. } => publisher.record_pose(n, pose),
+                Publisher::D3D12(publisher) => publisher.record_pose(n, pose),
             }
         }
         let pose = state.pair_pose;
@@ -682,7 +675,7 @@ impl Driver {
     pub fn release(&self) {
         let mut cell = self.state.locked();
         if let Some(mut state) = cell.0.take()
-            && let Publisher::D3D12 { publisher, .. } = &mut state.publisher
+            && let Publisher::D3D12(publisher) = &mut state.publisher
         {
             publisher.close();
         }

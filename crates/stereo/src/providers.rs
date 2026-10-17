@@ -1,13 +1,14 @@
 //! Capability providers: what a game says once and every ready-made feature reads, so a feature is
 //! one line in a game's component list.
 //!
+//! - [`EyeGeometry`]: how each eye is drawn (its frustum, the eyes' separation), read by the eye
+//!   site and by the features that rebuild an eye's view.
 //! - [`FrameLabels`]: which eye, drawn from which head pose, the frame being rendered and the one
-//!   being presented are, and how each eye is drawn (its frustum, the eyes' separation).
+//!   being presented are.
 //! - [`FrameInputs`]: each eye's depth, motion vectors, camera and render size, collected from the
 //!   calls the game makes for its upscaler ([`Sources`]: Streamline's for DLSS, FSR's dispatch) by
 //!   the ready-made [`frame_inputs`] component for the features that ask
 //!   (`monaka_framegen::inputs`); the features read the same inputs whichever upscaler runs.
-//! - [`GameQueue`]: the game's D3D12 direct queue (its device, the command lists it executes).
 //! - [`HudLayer`]: the game's HUD kept out of its frames as a layer and laid back over each eye at
 //!   its present request, also over the images features make of their own ([`before_hud`],
 //!   [`lay_hud_beside`]); on D3D12 the layer itself ([`HudLayer12`]), for the lay-over
@@ -35,10 +36,22 @@ use std::sync::Mutex;
 use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12GraphicsCommandList, ID3D12Resource};
 use windows::core::Interface;
 
+// --- Eye geometry --------------------------------------------------------------------------------
+
+/// How the game draws each eye: what the eye site writes and the features that rebuild an eye's
+/// view read (`crate::eye_site::EyeSite`, [`FrameLabels`]).
+pub trait EyeGeometry: Game {
+    /// The frustum eye `eye` of `pose` is drawn with (`None`: not known here; the field of view the
+    /// pose carries, or the game's own).
+    fn frustum(pose: &HeadPose, eye: usize) -> Option<Frustum>;
+    /// The eyes' separation for `pose`, in the game's units (`None`: not known yet).
+    fn separation(pose: &HeadPose) -> Option<f32>;
+}
+
 // --- Frame labels --------------------------------------------------------------------------------
 
 /// Which eye each frame is.
-pub trait FrameLabels: Game {
+pub trait FrameLabels: EyeGeometry {
     /// The eye (0 left) and head pose of the frame the renderer records now, once the game knows it;
     /// `None` for a frame of no eye (a menu, a centre view). What the frame's inputs are kept as.
     fn labelled() -> Option<Pending>;
@@ -51,23 +64,10 @@ pub trait FrameLabels: Game {
     fn presenting() -> Option<Pending>;
     /// Whether the eyes are drawn now (stereo runs).
     fn running() -> bool;
-    /// The frustum eye `eye` of `pose` is drawn with (`None`: the game's own).
-    fn frustum(pose: &HeadPose, eye: usize) -> Option<Frustum>;
     /// The game camera's own frustum, for a frame no eye camera drew.
     fn own_frustum() -> Option<Frustum> {
         None
     }
-    /// The eyes' separation for `pose`, in the game's units.
-    fn separation(pose: &HeadPose) -> Option<f32>;
-}
-
-// --- The game queue ------------------------------------------------------------------------------
-
-/// A D3D12 game's direct queue: where a feature finds the game's device and the command lists it
-/// executes (`crate::lists12`).
-pub trait GameQueue: Game {
-    /// The game's direct queue, once known (none on D3D11, or before the queue is seen).
-    fn game_queue() -> Option<ID3D12CommandQueue>;
 }
 
 // --- Frame inputs --------------------------------------------------------------------------------

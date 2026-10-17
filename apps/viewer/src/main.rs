@@ -120,6 +120,7 @@ enum Live {
     Reach,
     ReachDepth,
     Proxy,
+    Frosted,
 }
 
 /// The viewer's part in live option `id`, if it has one.
@@ -138,8 +139,8 @@ fn note_display_period(period: i64) {
 }
 
 fn live_setting(id: &str) -> Option<Live> {
-    use monaka_contract::manifest::{CONTROLLER_PROXY, CONTROLLER_SMOOTHING, MENU_REACH_DEPTH, menu_reach};
-    [(CONTROLLER_SMOOTHING.id, Live::Smoothing), (menu_reach("").id, Live::Reach), (MENU_REACH_DEPTH.id, Live::ReachDepth), (CONTROLLER_PROXY.id, Live::Proxy)]
+    use monaka_contract::manifest::{CONTROLLER_PROXY, CONTROLLER_SMOOTHING, FROSTED_PANELS, MENU_REACH_DEPTH, menu_reach};
+    [(CONTROLLER_SMOOTHING.id, Live::Smoothing), (menu_reach("").id, Live::Reach), (MENU_REACH_DEPTH.id, Live::ReachDepth), (CONTROLLER_PROXY.id, Live::Proxy), (FROSTED_PANELS.id, Live::Frosted)]
         .into_iter()
         .find_map(|(live, what)| (live == id).then_some(what))
 }
@@ -199,6 +200,8 @@ struct Args {
     proxy: pad::Proxy,
     /// How hard the controllers' poses are steadied ([`smooth`]; 0 off, 10 strongest).
     controller_smoothing: f32,
+    /// The home's panels as frosted glass, the game blurred behind them (`frosted_panels`).
+    frosted_panels: bool,
     /// Where captures of what the headset shows go ([`capture`]; the run's folder).
     captures: Option<PathBuf>,
     /// Back held opens the debug menu (`--debug-menu`); without it Back is a plain button.
@@ -238,7 +241,8 @@ const VALUE_FLAGS: &[&str] = &[
 /// does not know is skipped (a newer game pack's); a value it cannot read for an id it knows is an
 /// error, as the launcher checked it.
 fn apply_option(args: &mut Args, id: &str, value: &str) -> Result<(), String> {
-    use monaka_contract::manifest::{CONTROLLER_PROXY, CONTROLLER_SMOOTHING, DPAD_MENUS, MENU_PICK, MENU_REACH_DEPTH, PANEL_NEAREST, menu_reach};
+    use monaka_contract::manifest::{CONTROLLER_PROXY, CONTROLLER_SMOOTHING, DPAD_MENUS, FROSTED_PANELS, MENU_PICK, MENU_REACH_DEPTH, PANEL_NEAREST, menu_reach, parse_switch};
+    const FROSTED: &str = FROSTED_PANELS.id;
     const MENU_REACH: &str = menu_reach("").id;
     const REACH_DEPTH: &str = MENU_REACH_DEPTH.id;
     const PROXY: &str = CONTROLLER_PROXY.id;
@@ -267,6 +271,7 @@ fn apply_option(args: &mut Args, id: &str, value: &str) -> Result<(), String> {
         }
         // A layout test: the controllers act like Quest's or Index's.
         PROXY => args.proxy = pad::Proxy::parse(value)?,
+        FROSTED => args.frosted_panels = parse_switch(value).ok_or_else(|| format!("{id} is on or off"))?,
         // The hand panels sit no nearer the head than this (metres; 0: on the hand as it is).
         PANEL_NEAREST => args.panel_nearest = number()? as f32,
         _ => println!("Viewer: option {id} is not one this viewer acts on; skipped"),
@@ -294,6 +299,7 @@ impl Args {
             menu_reach_depth: reach::DEPTH,
             proxy: pad::Proxy::None,
             controller_smoothing: smoothing_default(),
+            frosted_panels: matches!(monaka_contract::manifest::FROSTED_PANELS.kind, monaka_contract::manifest::Kind::Switch { default: true }),
             captures: None,
             debug_menu: false,
             run_folder: None,
@@ -774,6 +780,7 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
     let home_folder = if args.home { args.run_folder.take() } else { None };
     let base_args = args.clone();
     let mut home = home::HomeView::new(DXGI_FORMAT(format as i32), home_folder.as_deref().or(args.run_folder.as_deref()), args.debug_menu);
+    home.set_frosted(args.frosted_panels);
     if args.home {
         home.for_window();
     }
@@ -976,6 +983,8 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                     buzz(&session, haptic.as_ref(), &hand_paths, reach.update(&mut gamepad, head, at, Instant::now()));
                 }
                 let head = last_head.as_ref().map(|h| (h.orientation, h.position));
+                // As held, for the capture chord: an open menu leaves the game an idle pad.
+                let held = gamepad.buttons;
                 // Start held: Monaka's home, unless the debug menu has the pad. A setting it
                 // changes is saved by the launcher (from the line it prints) and, when the viewer
                 // owns it, applies at once.
@@ -993,6 +1002,10 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                             reach = make_reach(reach_pick, reach_depth, args.dpad_hold, args.menu_pick);
                         }
                         Live::Proxy => pad.set_proxy(pad::Proxy::parse(&value).unwrap_or_default()),
+                        Live::Frosted => {
+                            args.frosted_panels = monaka_contract::manifest::parse_switch(&value).unwrap_or(args.frosted_panels);
+                            home.set_frosted(args.frosted_panels);
+                        }
                     }
                 }
                 // The home's viewer stays: the window stops the game's run.
@@ -1040,7 +1053,9 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                 if capture_drawn {
                     capture::start(capture.as_mut());
                 }
-                if chord.step(&mut gamepad, Instant::now()) && capture::start(capture.as_mut()) {
+                let menu_has_pad = home.is_open() || link.as_ref().is_some_and(|l| l.debug_views.menu_open());
+                let chorded = if menu_has_pad { chord.step_held(held, Instant::now()) } else { chord.step(&mut gamepad, Instant::now()) };
+                if chorded && capture::start(capture.as_mut()) {
                     buzz(&session, haptic.as_ref(), &hand_paths, [LEFT_HAND, RIGHT_HAND].map(|hand| (hand, 0.6, 0.15)));
                 }
                 if let Some(out) = link.as_mut().and_then(|l| l.hands_out.as_mut()) {
@@ -1092,6 +1107,7 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                 }
                 capture = args.captures.clone().map(capture::Capture::new);
                 home.show_run(args.run_folder.as_deref(), args.debug_menu);
+                home.set_frosted(args.frosted_panels);
             }
         }
         if !frame.should_render || relinking.is_some() || link.is_none() {
@@ -1150,7 +1166,7 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
             let now = Instant::now();
             home.show(&session, &device, &context, now);
             if let Some(link) = link.as_mut() {
-                let link::Link { input, swapchains, sources, hand_panels, debug_views, seen, depth_chains, pair_depth, rendered, screen, image_aspect, depth_refused_said, poses, reticle_aims, console_feed, .. } = link;
+                let link::Link { input, swapchains, format: eye_format, sources, hand_panels, debug_views, seen, depth_chains, pair_depth, rendered, screen, image_aspect, depth_refused_said, poses, reticle_aims, console_feed, .. } = link;
                 let eyes = [&sources[0], &sources[1]];
                 // A frozen frame stays: no pairs are read, and the silence check is told they need not be.
                 let read = if debug_views.frozen() {
@@ -1202,6 +1218,11 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                 for (eye, (swapchain, source)) in swapchains.iter().zip(sources.iter()).enumerate() {
                     let filled = swapchain.fill(|image| {
                         d3d::copy_texture(&context, image, source);
+                        // Frosted panels: the game blurred behind them, in the eye as it was rendered.
+                        if let Some(e) = rendered.as_ref().map(|pair| &pair.eyes[eye]) {
+                            let seen_as = monaka_overlay::eye::EyeView { orientation: e.orientation, position: math::eye_position(e, eye), fov: e.fov[eye] };
+                            home.frost_eye(&device, &context, image, *eye_format, source, &seen_as);
+                        }
                         debug_views.draw_eye(&device, &context, image, eye, rendered.as_ref(), *seen, eyes, pair_depth.as_ref().zip(input.depth_textures()));
                     });
                     if let Err(e) = filled {

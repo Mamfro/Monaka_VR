@@ -822,6 +822,7 @@ impl App {
         }
         match (checks.game_up, checks.game_installed, game.launch) {
             (true, _, _) => (true, "Joins the running game."),
+            (false, true, Launch::AtStart) if !game.any_game() => (true, "Starts the game through Steam: Monaka joins it as it starts."),
             (false, _, Launch::AtStart) => (true, "Then start the game: Monaka joins it as it starts."),
             (false, false, _) => (false, "The game is not installed in Steam."),
             (false, true, Launch::Auto { .. }) => (true, "Starts the game through Steam."),

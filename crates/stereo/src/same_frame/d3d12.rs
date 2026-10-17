@@ -75,13 +75,13 @@ pub fn present(swap: &IDXGISwapChain3, own: impl FnOnce(&ID3D12Resource) -> Opti
     if let Some(label) = label
         && crate::framegen12::pairs::enabled()
     {
-        let Some(queue) = settings.queue() else { return false };
+        let Some(queue) = crate::queue12::game_queue(None) else { return false };
         return crate::framegen12::pairs::present(&queue, &buffer, label.eye.min(1), label.pose, settings.hud);
     }
     match label {
         Some(label) => eye(&settings, &buffer, label.eye.min(1), label.pose),
         // Frame warping takes every frame of no eye too (its own flat and unlabelled frames).
-        None if crate::afw::d3d12::on_same_frame() => settings.queue().is_some_and(|queue| crate::afw::d3d12::pair_present(&queue, &buffer, D3D12_RESOURCE_STATE_PRESENT, None)),
+        None if crate::afw::d3d12::on_same_frame() => crate::queue12::game_queue(None).is_some_and(|queue| crate::afw::d3d12::pair_present(&queue, &buffer, D3D12_RESOURCE_STATE_PRESENT, None)),
         None => {
             if !PAIRS.recent_pair() {
                 sink([(&buffer, D3D12_RESOURCE_STATE_PRESENT); 2], None, None);
@@ -104,7 +104,7 @@ fn channel_ready(settings: &Settings, buffer: &ID3D12Resource) -> bool {
     if !(settings.ready)(desc.Width as u32, desc.Height) {
         return false;
     }
-    let Some(queue) = settings.queue() else {
+    let Some(queue) = crate::queue12::game_queue(None) else {
         log_first(3, format_args!("game queue unavailable; not publishing yet"));
         return false;
     };
@@ -118,7 +118,7 @@ fn channel_ready(settings: &Settings, buffer: &ID3D12Resource) -> bool {
 /// Eye `eye`'s frame (`buffer`, drawn from `pose`): the HUD laid over it, then held (left) or its
 /// pair published (right). Whether it was taken.
 fn eye(settings: &Settings, buffer: &ID3D12Resource, eye: usize, pose: HeadPose) -> bool {
-    let queue = settings.queue();
+    let queue = crate::queue12::game_queue(None);
     let hud = queue.as_ref().zip(settings.hud).and_then(|(queue, hud)| (hud.take)(queue, buffer, eye));
     let shown = queue.as_ref().zip(hud.as_ref()).and_then(|(queue, hud)| lay(queue, buffer, hud, eye));
     if let (Some(queue), Some(pair_hud)) = (&queue, settings.hud) {
