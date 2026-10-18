@@ -926,6 +926,7 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
         }
         let mut aiming: [Option<(HandPose, HandPose)>; 2] = [None, None];
         let mut grip_poses = [HandPose::default(); 2];
+        let mut aim_poses = [HandPose::default(); 2];
         if let Some(poses_of) = &controllers
             && synced
         {
@@ -944,6 +945,7 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                 (hands[hand], grips[hand]) = smoother.smooth(hand, frame.display_time, hands[hand], grips[hand]);
             }
             grip_poses = grips;
+            aim_poses = hands;
             if let Some(link) = link.as_mut() {
                 link.debug_views.controllers(last_head.as_ref(), &hands, &grips);
             }
@@ -1273,7 +1275,7 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                         });
                     }
                     if controllers.is_some() {
-                        layers.extend(hand_panels.layers(&local, &grip_poses, last_head.as_ref(), args.panel_nearest));
+                        layers.extend(hand_panels.layers(&local, &grip_poses, &aim_poses, last_head.as_ref(), args.panel_nearest));
                     }
                 } else {
                     cadence.refresh(None, None, now);

@@ -78,7 +78,7 @@ impl<'s> Link<'s> {
         ];
         // HUD pieces the game publishes on their own, on the hands where it says.
         let declared = side_channel("HUD panels block", monaka_channel::panels::PanelsChannel::open(name));
-        let hand_panels = panel::HandPanels::new(name, format, declared);
+        let hand_panels = panel::HandPanels::new(name, offered, declared);
         let mut desc = simple_texture_desc(producer.width, producer.height, DXGI_FORMAT(producer.format as i32));
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32;
         let sources = [create_texture(device, &desc)?, create_texture(device, &desc)?];

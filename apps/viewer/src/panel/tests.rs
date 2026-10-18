@@ -54,3 +54,15 @@ fn axes_round_trip_through_a_quaternion() {
         assert!(close(rotate(q, [1.0, 0.0, 0.0]), x) && close(rotate(q, [0.0, 1.0, 0.0]), y) && close(rotate(q, [0.0, 0.0, 1.0]), z), "{x:?} {y:?} {z:?}");
     }
 }
+
+#[test]
+fn the_top_panel_faces_up_and_back_to_the_eyes_its_top_toward_the_muzzle() {
+    let q = on_top();
+    let face = rotate(q, [0.0, 0.0, 1.0]);
+    assert!(face[1] > 0.5 && face[2] > 0.3 && face[0].abs() < 1e-5, "faces up and back toward the wrist: {face:?}");
+    let top = rotate(q, [0.0, 1.0, 0.0]);
+    assert!(top[1] > 0.0 && top[2] < 0.0, "its top up and toward the muzzle: {top:?}");
+    assert!(close(rotate(q, [1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]), "its right to the right");
+    assert_eq!(facing(Side::Top, RIGHT_HAND), 0.0);
+    assert!(offset(Side::Top, RIGHT_HAND)[1] > 0.0 && offset(Side::Top, RIGHT_HAND)[2] < 0.0, "above and ahead of the handle");
+}
