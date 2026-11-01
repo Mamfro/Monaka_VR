@@ -57,10 +57,21 @@ function Get-WorkspaceVersion {
     $line.Matches[0].Groups[1].Value
 }
 
-# A zip of $Folder (the folder itself at the zip's top) at $Zip, replacing an older one.
+# A zip of $Folder (the folder itself at the zip's top) at $Zip, replacing an older one. Its paths
+# use forward slashes, as zips should (Windows PowerShell's Compress-Archive writes backslashes).
 function New-ReleaseZip {
     param([Parameter(Mandatory)][string]$Folder, [Parameter(Mandatory)][string]$Zip)
     if (Test-Path -LiteralPath $Zip) { Remove-Item -LiteralPath $Zip }
-    Compress-Archive -Path $Folder -DestinationPath $Zip
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+    $top = Split-Path -Parent (Resolve-Path -LiteralPath $Folder).Path
+    $archive = [System.IO.Compression.ZipFile]::Open($Zip, 'Create')
+    try {
+        foreach ($file in Get-ChildItem -LiteralPath $Folder -Recurse -File) {
+            $name = $file.FullName.Substring($top.Length + 1).Replace('\', '/')
+            [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file.FullName, $name, 'Optimal')
+        }
+    } finally {
+        $archive.Dispose()
+    }
     $Zip
 }

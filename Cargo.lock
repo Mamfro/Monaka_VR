@@ -1507,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "monaka"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "eframe",
  "egui_kittest",
@@ -1520,7 +1520,7 @@ dependencies = [
 
 [[package]]
 name = "monaka_channel"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "monaka_contract",
  "monaka_core",
@@ -1529,18 +1529,18 @@ dependencies = [
 
 [[package]]
 name = "monaka_contract"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "monaka_core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "monaka_contract",
 ]
 
 [[package]]
 name = "monaka_launch"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "monaka_contract",
  "monaka_core",
@@ -1549,21 +1549,21 @@ dependencies = [
 
 [[package]]
 name = "monaka_loader"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "monaka_launch",
 ]
 
 [[package]]
 name = "monaka_openxr"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "windows",
 ]
 
 [[package]]
 name = "monaka_overlay"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "egui",
  "monaka_channel",
@@ -1574,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "monaka_viewer"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "jpeg-encoder",
  "monaka_channel",
