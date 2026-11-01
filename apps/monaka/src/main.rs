@@ -1041,7 +1041,8 @@ impl App {
             area = area.vertical_scroll_offset(offset);
         }
         let running = self.running.is_some();
-        let changed = area.show(ui, |ui| options::show(ui, &mut self.settings, game, &rows, self.tab, running)).inner;
+        let dev = self.dev_mode();
+        let changed = area.show(ui, |ui| options::show(ui, &mut self.settings, game, &rows, self.tab, running, dev)).inner;
         if changed.is_some() {
             self.settings_changed();
         }

@@ -4,7 +4,7 @@
 
 use crate::look;
 use eframe::egui::{self, Align, Checkbox, ComboBox, Label, Layout, RichText, Slider, TextEdit};
-use monaka_contract::manifest::{DEBUG_MENU, DIAGNOSTIC_LOGGING};
+use monaka_contract::manifest::{DEBUG_MENU, DEV_MODE, DIAGNOSTIC_LOGGING};
 use monaka_launch::games::{Game, HowTo, Kind, MONAKA, Manifest, Opt, Shown, TABS, Values, number_text};
 use monaka_launch::settings::Settings;
 
@@ -81,8 +81,14 @@ fn items(game: &Game, rows: &[Row], values: &Values, tab: Shown) -> Vec<Item> {
 /// Draws tab `tab`'s options for `game` and keeps what the player changes (the window saves it). While a session runs
 /// only diagnostic logging may change (the producer follows it mid-run). Returns the id of the
 /// option changed, if any.
-pub fn show(ui: &mut egui::Ui, settings: &mut Settings, game: &Game, rows: &[Row], tab: Shown, running: bool) -> Option<&'static str> {
-    let values = settings.values(game.id);
+pub fn show(ui: &mut egui::Ui, settings: &mut Settings, game: &Game, rows: &[Row], tab: Shown, running: bool, dev: bool) -> Option<&'static str> {
+    let saved = settings.values(game.id);
+    // Developer mode as the rows have it (a build tree's too), for the choices on offer; its own
+    // switch shows what is saved.
+    let mut values = saved.clone();
+    if dev {
+        values.set(DEV_MODE.id, "1");
+    }
     let mut changed = None;
     for item in items(game, rows, &values, tab) {
         match item {
@@ -95,7 +101,7 @@ pub fn show(ui: &mut egui::Ui, settings: &mut Settings, game: &Game, rows: &[Row
                 ui.add_space(10.0);
             }
             Item::Row(row) => {
-                if let Some(value) = option_row(ui, &values, row, running) {
+                if let Some(value) = option_row(ui, if row.opt.id == DEV_MODE.id { &saved } else { &values }, row, running) {
                     let saved = if row.owner.id == MONAKA.id { &mut settings.monaka } else { settings.values.entry(game.id.to_owned()).or_default() };
                     saved.set(row.opt.id, value);
                     changed = Some(row.opt.id);
