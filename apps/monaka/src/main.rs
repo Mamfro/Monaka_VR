@@ -498,10 +498,6 @@ impl App {
                 self.stop_session();
                 continue;
             }
-            if said == home::START_GAME_LINE {
-                self.start_game();
-                continue;
-            }
             // Closing the home matters only to a run, to bring its game to the front.
             if said == home::HOME_CLOSED_LINE && self.running.as_ref().is_none_or(|r| r.to_headset.is_none()) {
                 continue;
@@ -548,7 +544,6 @@ impl App {
         let status = home::Status {
             can_play: can_play && idle,
             why: if idle { why.to_owned() } else { String::new() },
-            can_start_game: game.is_some_and(|g| self.can_start_game(g)),
             line: if idle { String::new() } else { self.state_line.clone() },
         };
         if let Some(headset) = &mut self.headset {
@@ -822,10 +817,10 @@ impl App {
         }
         match (checks.game_up, checks.game_installed, game.launch) {
             (true, _, _) => (true, "Joins the running game."),
-            (false, true, Launch::AtStart) if !game.any_game() => (true, "Starts the game through Steam: Monaka joins it as it starts."),
+            (false, true, Launch::AtStart) if !game.any_game() => (true, "Starts the game: Monaka joins it as it starts."),
             (false, _, Launch::AtStart) => (true, "Then start the game: Monaka joins it as it starts."),
             (false, false, _) => (false, "The game is not installed in Steam."),
-            (false, true, Launch::Auto { .. }) => (true, "Starts the game through Steam."),
+            (false, true, Launch::Auto { .. }) => (true, "Starts the game."),
             (false, true, Launch::Manual) => (false, "Start the game first and load into gameplay."),
         }
     }
@@ -852,10 +847,13 @@ impl App {
                 ui.set_width(PLAY_WIDTH);
                 ui.with_layout(Layout::top_down_justified(Align::Center), |ui| {
                     let stopping = self.running.as_ref().is_some_and(|r| r.stop.requested());
+                    // A game that runs already is joined; one Monaka cannot start is joined once
+                    // it runs; any other is launched and joined. Detached, it runs on.
                     let label = match (idle, stopping) {
-                        (true, _) => "Play",
-                        (false, false) => "Stop",
-                        (false, true) => "Stopping...",
+                        (true, _) if self.checks.game_up || game.launch == Launch::Manual => "Attach",
+                        (true, _) => "Launch",
+                        (false, false) => "Detach",
+                        (false, true) => "Detaching...",
                     };
                     let mut play = Button::new(RichText::new(label).family(look::semibold()).size(look::BIG)).min_size(egui::vec2(PLAY_WIDTH, 40.0));
                     if idle && can_press {
@@ -932,17 +930,17 @@ impl App {
         });
     }
 
-    /// Whether `game` can be started through Steam from here: nothing runs, it is installed and
-    /// not running, and it is one Steam game.
+    /// Whether `game` is started from here by its own button: one Launch cannot start (attached
+    /// to once it runs), installed, not running, nothing in VR, and one Steam game.
     fn can_start_game(&self, game: &Game) -> bool {
-        self.running.is_none() && !self.checks.game_up && self.checks.game_installed && !game.any_game()
+        game.launch == Launch::Manual && self.running.is_none() && !self.checks.game_up && self.checks.game_installed && !game.any_game()
     }
 
-    /// Starts the game shown through Steam.
+    /// Starts the game shown.
     fn start_game(&mut self) {
         let Some(game) = self.game().filter(|g| self.can_start_game(g)) else { return };
-        match self.pc.launch_steam_game(game.steam_app) {
-            Ok(()) => self.say(&format!("Starting {} through Steam...", game.name), false),
+        match self.pc.launch_game(game.steam_app, game.executables) {
+            Ok(()) => self.say(&format!("Starting {}...", game.name), false),
             Err(why) => self.say(&why, true),
         }
     }

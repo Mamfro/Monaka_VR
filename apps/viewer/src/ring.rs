@@ -80,6 +80,20 @@ impl<'s> RingView<'s> {
         self.settle();
     }
 
+    /// Where the ring stands (none until placed).
+    pub fn centre(&self) -> Option<Ring> {
+        self.ring
+    }
+
+    /// The room's origin moved to the ring's centre, turned the way it faces: the ring stands
+    /// where it did, now at the origin facing straight ahead.
+    pub fn at_origin(&mut self) {
+        if self.ring.is_some() {
+            self.ring = Some(Ring { eye: [0.0; 3], yaw: 0.0 });
+            self.stand();
+        }
+    }
+
     /// Brings panel `page` in front at once (the ring opened on it).
     pub fn show_in_front(&mut self, page: usize) {
         self.front = page.min(self.quads.len().saturating_sub(1));

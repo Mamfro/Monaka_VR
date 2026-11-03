@@ -61,6 +61,9 @@ impl Pc for FakePc {
     fn launch_steam_game(&self, _: u32) -> Result<(), String> {
         Ok(())
     }
+    fn launch_game(&self, _: u32, _: &[&str]) -> Result<(), String> {
+        Ok(())
+    }
     fn open(&self, target: &str) -> Result<(), String> {
         self.0.opened.borrow_mut().push(target.to_owned());
         Ok(())
@@ -195,7 +198,7 @@ fn with_no_game_only_a_pack_can_be_added() {
     pc.steamvr.set(true);
     let harness = window(&dir, &pc);
     assert!(shows(&harness, "No games yet"));
-    assert!(!shows(&harness, "Play"), "nothing to play");
+    assert!(!shows(&harness, "Launch"), "nothing to launch");
     assert!(!shows(&harness, "Remove pack"), "nothing to remove");
     assert!(!disabled(&harness, "Add game pack..."));
 }
@@ -252,15 +255,15 @@ fn play_waits_for_steamvr_and_for_no_other_session() {
     install_kit(&dir);
     let pc = Rc::new(PcState::default());
     let mut harness = window(&dir, &pc);
-    assert!(disabled(&harness, "Play"), "SteamVR is not running");
+    assert!(disabled(&harness, "Launch"), "SteamVR is not running");
     pc.steamvr.set(true);
     harness.state_mut().refresh_checks();
     harness.run();
-    assert!(!disabled(&harness, "Play"), "a game started with the window needs only SteamVR");
+    assert!(!disabled(&harness, "Launch"), "a game started with the window needs only SteamVR");
     pc.viewer.set(true);
     harness.state_mut().refresh_checks();
     harness.run();
-    assert!(disabled(&harness, "Play"), "another session's viewer runs");
+    assert!(disabled(&harness, "Launch"), "another session's viewer runs");
 }
 
 #[test]

@@ -575,11 +575,16 @@ impl Session<'_> {
 
     /// A reference space (`sys::REFERENCE_SPACE_TYPE_*`) with an identity offset.
     pub fn reference_space(&self, kind: i32) -> Result<Space<'_>> {
+        self.reference_space_at(kind, Posef::IDENTITY)
+    }
+
+    /// A reference space (`sys::REFERENCE_SPACE_TYPE_*`) whose origin is `origin` in that space.
+    pub fn reference_space_at(&self, kind: i32, origin: Posef) -> Result<Space<'_>> {
         let info = sys::ReferenceSpaceCreateInfo {
             ty: sys::TYPE_REFERENCE_SPACE_CREATE_INFO,
             next: std::ptr::null(),
             referenceSpaceType: kind,
-            poseInReferenceSpace: Posef::IDENTITY,
+            poseInReferenceSpace: origin,
         };
         let mut handle = sys::NULL_HANDLE;
         // SAFETY: typed in and out.

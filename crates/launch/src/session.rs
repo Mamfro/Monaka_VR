@@ -240,6 +240,12 @@ const FOCUS_GAME_AT: [Duration; 2] = [Duration::from_millis(1000), Duration::fro
 /// How long the viewer waits for the first frame of a game joined as it starts.
 const AT_START_PRODUCER_WAIT: Duration = Duration::from_secs(600);
 
+/// A game joined as it starts whose producer is not ready yet is asked again this often
+/// ([`one_run`]), each time with another copy of the producer loaded, for at most
+/// [`AT_START_NOT_READY`].
+const AT_START_RETRY: Duration = Duration::from_secs(2);
+const AT_START_NOT_READY: Duration = Duration::from_secs(180);
+
 /// One game process played until it exits or a stop is asked for.
 #[allow(clippy::too_many_arguments)]
 fn play(
@@ -361,8 +367,8 @@ fn find_game(game: &Game, values: &Values, start: bool, stop: &Stop, report: &mu
     if game.launch == Launch::AtStart {
         // One Steam game installed here is started by Play (`start`), the wait for it already on.
         if start && !game.any_game() && system::steam_installed(&system::steam_libraries(), game.steam_app) {
-            report(Event::Info(format!("Starting {} through Steam: Monaka joins it as it starts.", game.name)));
-            system::launch_steam_game(game.steam_app)?;
+            report(Event::Info(format!("Starting {}: Monaka joins it as it starts.", game.name)));
+            system::launch_game(game.steam_app, game.executables)?;
         } else {
             report(Event::Info(format!("Start {} now: Monaka joins it as it starts.", executables.join(" or "))));
         }
@@ -375,8 +381,8 @@ fn find_game(game: &Game, values: &Values, start: bool, stop: &Stop, report: &mu
         return Err(format!("{} is not running.", game.name));
     }
     let settle_seconds = if game.option("settle_seconds").is_some() { values.number(game, "settle_seconds").round() as u64 } else { settle_seconds };
-    report(Event::Info(format!("Starting {} through Steam...", game.name)));
-    system::launch_steam_game(game.steam_app)?;
+    report(Event::Info(format!("Starting {}...", game.name)));
+    system::launch_game(game.steam_app, game.executables)?;
     let deadline = Instant::now() + Duration::from_secs(180);
     let pid = loop {
         if let Some(process) = system::game_processes(&executables, game.steam_app).first() {
@@ -504,10 +510,30 @@ fn one_run(
 
     report(Event::State(State::Attaching));
     let log = folder.join(game.log);
-    let outcome = attach::start(pid, &dll).map_err(|why| {
+    let mut outcome = attach::start(pid, &dll).map_err(|why| {
         log_tail(&log, 20, report);
         fatal(format!("Attaching failed: {why}"))
     })?;
+    // Joined as it starts, a game may not be far enough along for the producer yet (its engine not
+    // up): asked again, a fresh copy each time (a copy starts once), until it is.
+    let waited = Instant::now();
+    let mut tries = 0;
+    while outcome.code == code::NOT_READY && game.launch == Launch::AtStart && waited.elapsed() < AT_START_NOT_READY {
+        if tries == 0 {
+            report(Event::Info(format!("{} is still starting; joining it once it is up.", game.name)));
+        }
+        if stop.sleep(AT_START_RETRY) || !system::alive(pid) {
+            break;
+        }
+        tries += 1;
+        let next = folder.join(format!("{}-{version}-wait{tries}.dll", game.producer));
+        std::fs::copy(producer, &next).map_err(|e| fatal(format!("cannot copy the producer: {e}")))?;
+        dll = next;
+        outcome = attach::start(pid, &dll).map_err(|why| {
+            log_tail(&log, 20, report);
+            fatal(format!("Attaching failed: {why}"))
+        })?;
+    }
     for note in outcome.notes {
         report(Event::Detail(note));
     }
@@ -520,7 +546,15 @@ fn one_run(
         // Settings applied in the headset: the producer started again with them, in the same run
         // folder on the same channel (a fresh copy of its DLL), the game and the viewer running on.
         let mut restarts = 0;
+        let mut eye = eye;
         let mut apply = |values: &Values| -> Result<(), String> {
+            // The eye size settled again from the values changed: the headset's own as the headset
+            // view knows it (a run's own viewer keeps the size it has).
+            eye = match crate::games::eye_size(values, game) {
+                EyeSize::GameOwn => None,
+                EyeSize::Fixed(w, h) => Some((w, h)),
+                EyeSize::Headset => linked.and_then(Linked::eye_size).or(eye),
+            };
             let plan = crate::games::plan(values, game, eye);
             for (name, contents) in &plan.files {
                 std::fs::write(folder.join(name), contents).map_err(|e| format!("cannot write {name}: {e}"))?;

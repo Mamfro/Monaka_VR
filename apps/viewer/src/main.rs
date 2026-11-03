@@ -56,6 +56,7 @@ mod pointer;
 mod recorder;
 mod ring;
 mod smooth;
+mod tunnel;
 mod view_commands;
 
 use monaka_channel::d3d::{self, find_adapter, simple_texture_desc};
@@ -121,6 +122,7 @@ enum Live {
     ReachDepth,
     Proxy,
     Frosted,
+    Tunnel,
 }
 
 /// The viewer's part in live option `id`, if it has one.
@@ -139,8 +141,15 @@ fn note_display_period(period: i64) {
 }
 
 fn live_setting(id: &str) -> Option<Live> {
-    use monaka_contract::manifest::{CONTROLLER_PROXY, CONTROLLER_SMOOTHING, FROSTED_PANELS, MENU_REACH_DEPTH, menu_reach};
-    [(CONTROLLER_SMOOTHING.id, Live::Smoothing), (menu_reach("").id, Live::Reach), (MENU_REACH_DEPTH.id, Live::ReachDepth), (CONTROLLER_PROXY.id, Live::Proxy), (FROSTED_PANELS.id, Live::Frosted)]
+    use monaka_contract::manifest::{CONTROLLER_PROXY, CONTROLLER_SMOOTHING, FROSTED_PANELS, MENU_REACH_DEPTH, TUNNEL_VISION, menu_reach};
+    [
+        (CONTROLLER_SMOOTHING.id, Live::Smoothing),
+        (menu_reach("").id, Live::Reach),
+        (MENU_REACH_DEPTH.id, Live::ReachDepth),
+        (CONTROLLER_PROXY.id, Live::Proxy),
+        (FROSTED_PANELS.id, Live::Frosted),
+        (TUNNEL_VISION.id, Live::Tunnel),
+    ]
         .into_iter()
         .find_map(|(live, what)| (live == id).then_some(what))
 }
@@ -202,6 +211,10 @@ struct Args {
     controller_smoothing: f32,
     /// The home's panels as frosted glass, the game blurred behind them (`frosted_panels`).
     frosted_panels: bool,
+    /// The view's edges darken while the sticks move the player ([`tunnel`], `tunnel_vision`).
+    tunnel_vision: bool,
+    /// The game turns by snaps (`turn=snap`): the right stick is no smooth turn for the tunnel.
+    snap_turn: bool,
     /// Where captures of what the headset shows go ([`capture`]; the run's folder).
     captures: Option<PathBuf>,
     /// Back held opens the debug menu (`--debug-menu`); without it Back is a plain button.
@@ -241,8 +254,10 @@ const VALUE_FLAGS: &[&str] = &[
 /// does not know is skipped (a newer game pack's); a value it cannot read for an id it knows is an
 /// error, as the launcher checked it.
 fn apply_option(args: &mut Args, id: &str, value: &str) -> Result<(), String> {
-    use monaka_contract::manifest::{CONTROLLER_PROXY, CONTROLLER_SMOOTHING, DPAD_MENUS, FROSTED_PANELS, MENU_PICK, MENU_REACH_DEPTH, PANEL_NEAREST, menu_reach, parse_switch};
+    use monaka_contract::manifest::{CONTROLLER_PROXY, CONTROLLER_SMOOTHING, DPAD_MENUS, FROSTED_PANELS, MENU_PICK, MENU_REACH_DEPTH, PANEL_NEAREST, TUNNEL_VISION, TURN, menu_reach, parse_switch};
     const FROSTED: &str = FROSTED_PANELS.id;
+    const TUNNEL: &str = TUNNEL_VISION.id;
+    const TURNING: &str = TURN.id;
     const MENU_REACH: &str = menu_reach("").id;
     const REACH_DEPTH: &str = MENU_REACH_DEPTH.id;
     const PROXY: &str = CONTROLLER_PROXY.id;
@@ -272,6 +287,8 @@ fn apply_option(args: &mut Args, id: &str, value: &str) -> Result<(), String> {
         // A layout test: the controllers act like Quest's or Index's.
         PROXY => args.proxy = pad::Proxy::parse(value)?,
         FROSTED => args.frosted_panels = parse_switch(value).ok_or_else(|| format!("{id} is on or off"))?,
+        TUNNEL => args.tunnel_vision = parse_switch(value).ok_or_else(|| format!("{id} is on or off"))?,
+        TURNING => args.snap_turn = value.eq_ignore_ascii_case("snap"),
         // The hand panels sit no nearer the head than this (metres; 0: on the hand as it is).
         PANEL_NEAREST => args.panel_nearest = number()? as f32,
         _ => println!("Viewer: option {id} is not one this viewer acts on; skipped"),
@@ -300,6 +317,8 @@ impl Args {
             proxy: pad::Proxy::None,
             controller_smoothing: smoothing_default(),
             frosted_panels: matches!(monaka_contract::manifest::FROSTED_PANELS.kind, monaka_contract::manifest::Kind::Switch { default: true }),
+            tunnel_vision: matches!(monaka_contract::manifest::TUNNEL_VISION.kind, monaka_contract::manifest::Kind::Switch { default: true }),
+            snap_turn: false,
             captures: None,
             debug_menu: false,
             run_folder: None,
@@ -704,7 +723,8 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
     });
 
     let session = instance.create_session(system, &device)?;
-    let local = session.reference_space(sys::REFERENCE_SPACE_TYPE_LOCAL)?;
+    // The room: the runtime's own, or (a game linked in) turned to face the home's middle panel.
+    let mut local = session.reference_space(sys::REFERENCE_SPACE_TYPE_LOCAL)?;
     let view_space = session.reference_space(sys::REFERENCE_SPACE_TYPE_VIEW)?;
     // The action set is attached once, with all its actions: the controllers' and the gaze's.
     let attached = actions
@@ -784,6 +804,25 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
     if args.home {
         home.for_window();
     }
+    // EXPERIMENT (blurry while it has focus): frames of quads alone, no eye images (the home with
+    // no game linked, the game's flat screen), came out blurry; SteamVR may treat such frames
+    // differently. A dark eye image under them, filled once: a layer keeps showing the last image
+    // released.
+    let backdrop = match eye_size {
+        Some((width, height)) => {
+            let dark = d3d::create_texture_with(&device, &simple_texture_desc(width, height, DXGI_FORMAT(format as i32)), &[12, 12, 16, 255].repeat((width * height) as usize))?;
+            let made = [session.create_swapchain(format as i64, width, height)?, session.create_swapchain(format as i64, width, height)?];
+            for swapchain in &made {
+                swapchain.fill(|target| d3d::copy_texture(&context, target, &dark))?;
+            }
+            d3d::flush(&context);
+            Some(made)
+        }
+        _ => None,
+    };
+    let mut backdrop_views: Option<[sys::View; 2]> = None;
+    // Tunnel vision's ring ([`tunnel`]), made the first time it is on.
+    let mut tunnel: Option<tunnel::Tunnel> = None;
     if pad_actions.is_some() {
         println!("Monaka home: hold Start");
     }
@@ -814,6 +853,9 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
     let mut home_read: Option<Instant> = None;
     // When what hangs in the room is placed again, after a recentre.
     let mut recentre_at: Option<Instant> = None;
+    // A game shows for the first time: the room turns to face the home's middle panel at the next
+    // frame. Whether it is turned (a recentre gives the runtime's own back).
+    let (mut face_home, mut faced_home) = (false, false);
     // Frames whose layers the runtime refused.
     let mut refused: u64 = 0;
 
@@ -889,8 +931,32 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
         session.begin_frame()?;
         // The actions are read once a frame, before the head pose: the gaze goes out with it.
         let synced = attached.is_some_and(|set| session.sync(set).is_ok());
+        // The game in front of the home's middle panel, not wherever the head faced when it
+        // started: the room as a recentre facing that panel would leave it. The panels stay where
+        // they float; the hands' history and the shoulders were in the old room.
+        if std::mem::take(&mut face_home)
+            && let Some(ring) = home.centre()
+        {
+            match session.reference_space_at(sys::REFERENCE_SPACE_TYPE_LOCAL, Posef::new(math::yaw_rotation(ring.yaw), ring.eye)) {
+                Ok(turned) => {
+                    local = turned;
+                    faced_home = true;
+                    home.at_origin();
+                    if let Some(link) = link.as_mut() {
+                        let (orientation, position) = math::ahead_of(math::IDENTITY, [0.0; 3], SCREEN_DISTANCE);
+                        link.screen = Some(Posef::new(orientation, position));
+                    }
+                    last_head = None;
+                    smoother = smooth::Smoother::new(args.controller_smoothing);
+                    reach = make_reach(reach_pick, reach_depth, args.dpad_hold, args.menu_pick);
+                    println!("The game faces the home's middle panel");
+                }
+                Err(e) => println!("The game could not be turned to face the home: {e}"),
+            }
+        }
         // The head sent to the game is predicted for when the pair drawn with it will be shown.
         if let Some(located) = session.locate_views(&local, ahead.time(frame.display_time, frame.display_period))? {
+            backdrop_views = Some(located);
             let positions = [located[0].pose.position.xyz(), located[1].pose.position.xyz()];
             let fov = [fov_angles(located[0].fov), fov_angles(located[1].fov)];
             let mut head = math::head_from_views(located[0].pose.orientation.xyzw(), positions, fov);
@@ -905,6 +971,7 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
             if link.as_mut().and_then(|l| l.poses.as_mut()).is_some_and(|p| p.write_head(&head)) {
                 stats.poses_written += 1;
                 meter.head(true);
+                ahead.sent(head.orientation, frame.display_time);
             }
             // A runtime that moves the room's origin without saying so: the head jumps.
             if last_head.as_ref().is_some_and(|before| recentred(before, &head)) {
@@ -916,6 +983,13 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
         if recentre_at.is_some_and(|at| now >= at) {
             recentre_at = None;
             println!("Recentred: the panels and the screen come round in front");
+            // Forward is where the player now faces: the runtime's own room again.
+            if std::mem::take(&mut faced_home) {
+                match session.reference_space(sys::REFERENCE_SPACE_TYPE_LOCAL) {
+                    Ok(own) => local = own,
+                    Err(e) => println!("The room could not be the runtime's own again: {e}"),
+                }
+            }
             home.recenter();
             if let Some(link) = link.as_mut() {
                 link.screen = None;
@@ -925,6 +999,8 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
             reach = make_reach(reach_pick, reach_depth, args.dpad_hold, args.menu_pick);
         }
         let mut aiming: [Option<(HandPose, HandPose)>; 2] = [None, None];
+        // How hard the sticks move the player this frame, for the tunnel (0 while a menu has the pad).
+        let mut stick_moving = 0.0;
         let mut grip_poses = [HandPose::default(); 2];
         let mut aim_poses = [HandPose::default(); 2];
         if let Some(poses_of) = &controllers
@@ -1008,6 +1084,7 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                             args.frosted_panels = monaka_contract::manifest::parse_switch(&value).unwrap_or(args.frosted_panels);
                             home.set_frosted(args.frosted_panels);
                         }
+                        Live::Tunnel => args.tunnel_vision = monaka_contract::manifest::parse_switch(&value).unwrap_or(args.tunnel_vision),
                     }
                 }
                 // The home's viewer stays: the window stops the game's run.
@@ -1056,6 +1133,7 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                     capture::start(capture.as_mut());
                 }
                 let menu_has_pad = home.is_open() || link.as_ref().is_some_and(|l| l.debug_views.menu_open());
+                stick_moving = if menu_has_pad { 0.0 } else { tunnel::moving(&gamepad, args.snap_turn) };
                 let chorded = if menu_has_pad { chord.step_held(held, Instant::now()) } else { chord.step(&mut gamepad, Instant::now()) };
                 if chorded && capture::start(capture.as_mut()) {
                     buzz(&session, haptic.as_ref(), &hand_paths, [LEFT_HAND, RIGHT_HAND].map(|hand| (hand, 0.6, 0.15)));
@@ -1129,6 +1207,7 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                 Some(Ok(again)) => {
                     if first {
                         println!("The game shows ({} s)", since.elapsed().as_secs());
+                        face_home = true;
                     } else {
                         println!("The game is back, its settings applied ({} s)", since.elapsed().as_secs());
                     }
@@ -1164,6 +1243,8 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
             }
         }
         let mut layers = Vec::new();
+        // Where the tunnel goes among the layers: over the game in 3D, under what hangs in front.
+        let mut tunnel_at: Option<usize> = None;
         if frame.should_render {
             let now = Instant::now();
             home.show(&session, &device, &context, now);
@@ -1203,6 +1284,10 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                     stats.pairs += 1;
                     last_pair_at = tick();
                     *rendered = poses.as_mut().and_then(|p| p.read_pair(*seen)).filter(|p| p.eyes.iter().all(|e| e.valid != 0));
+                    // How long a head takes from here to the headset in this pair, for the next heads sent.
+                    if let Some(line) = rendered.as_ref().and_then(|r| ahead.shown(r.eyes[0].orientation, frame.display_time)) {
+                        println!("{line}");
+                    }
                     if let Some(capture) = capture.as_mut().filter(|_| !debug_views.captures_drawn()) {
                         capture.arrived(&device, &context, eyes, *seen, rendered.as_ref());
                     }
@@ -1259,6 +1344,7 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                     };
                     layers.push(Layer::Projection { space: &local, views: [view(0), view(1)] });
                     stats.projected += 1;
+                    tunnel_at = Some(layers.len());
                     cadence.refresh(Some((*seen, pair.eyes[0].orientation)), last_head.as_ref().map(|h| h.orientation), now);
                     // In play, where the game's aim ray goes: from the head along the controller, or
                     // where a weapon in the palm points.
@@ -1297,6 +1383,27 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                 stats.visible += 1;
                 layers.extend(debug_views.layers(&local));
             }
+        }
+        // Tunnel vision: made the first time it is on, eased every frame (open while it is off, or
+        // the game is not in 3D), over the game.
+        if args.tunnel_vision && tunnel.is_none() && frame.should_render {
+            tunnel = tunnel::Tunnel::new(&session, &device, DXGI_FORMAT(format as i32)).map_err(|e| println!("Tunnel vision: {e}; off this run")).ok();
+            args.tunnel_vision = tunnel.is_some();
+        }
+        if let Some(ring) = tunnel.as_mut()
+            && frame.should_render
+        {
+            ring.step(&context, if args.tunnel_vision && tunnel_at.is_some() { stick_moving } else { 0.0 }, Instant::now());
+        }
+        if let (Some(at), Some(ring)) = (tunnel_at, tunnel.as_ref())
+            && let Some(layer) = ring.layer(&view_space)
+        {
+            layers.insert(at, layer);
+        }
+        let projected = layers.iter().any(|layer| matches!(layer, Layer::Projection { .. }));
+        if let (true, Some(chains), Some(views)) = (frame.should_render && !projected, &backdrop, &backdrop_views) {
+            let view = |eye: usize| ProjectionView { pose: views[eye].pose, fov: views[eye].fov, swapchain: &chains[eye], depth: None };
+            layers.insert(0, Layer::Projection { space: &local, views: [view(0), view(1)] });
         }
         layers.extend(home.layers(&local));
         // One flush for every swapchain filled this frame, so the compositor finds them all done.

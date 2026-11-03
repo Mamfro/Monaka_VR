@@ -165,7 +165,6 @@ pub struct Home {
     debug_menu: bool,
     select: Option<String>,
     play: bool,
-    start_game: bool,
     leave: bool,
     /// The files' texts as last read ([`Home::sync`]): the manifest, the values, the games, the
     /// status.
@@ -205,7 +204,6 @@ impl Home {
             debug_menu: false,
             select: None,
             play: false,
-            start_game: false,
             leave: false,
             read: Default::default(),
             stale: [true; 3],
@@ -383,15 +381,6 @@ impl Home {
 
     pub fn take_play(&mut self) -> bool {
         std::mem::take(&mut self.play)
-    }
-
-    /// The player asked to start the game shown through Steam.
-    pub fn ask_start_game(&mut self) {
-        self.start_game = true;
-    }
-
-    pub fn take_start_game(&mut self) -> bool {
-        std::mem::take(&mut self.start_game)
     }
 
     /// The player asked to leave VR: the headset view closes (the window stays).

@@ -299,10 +299,48 @@ pub fn open(target: &str) -> Result<(), String> {
     if result.0 as usize > 32 { Ok(()) } else { Err(format!("Could not open {target}")) }
 }
 
-/// Starts a Steam game.
+/// Starts a Steam app through Steam (SteamVR; a game is [`launch_game`]).
 pub fn launch_steam_game(app: u32) -> Result<(), String> {
     open(&format!("steam://rungameid/{app}"))
 }
+
+/// Starts Steam game `app`: its executable (the first of `executables` found in its install
+/// folder) directly, as Steam's app, when Steam installed it here; else through Steam. Started
+/// through Steam while SteamVR runs, a flat game goes to SteamVR's Theater screen, in front of
+/// the headset view. Steam's launch options for the game are not passed on.
+pub fn launch_game(app: u32, executables: &[&str]) -> Result<(), String> {
+    let Some(exe) = steam_install_folder(&steam_libraries(), app).and_then(|folder| find_executable(&folder, executables)) else {
+        return launch_steam_game(app);
+    };
+    let id = app.to_string();
+    std::process::Command::new(&exe)
+        .current_dir(exe.parent().unwrap_or(&exe))
+        .env("SteamAppId", &id)
+        .env("SteamGameId", &id)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(drop)
+        .map_err(|e| format!("Could not start {}: {e}", exe.display()))
+}
+
+/// The first of `executables` in `folder` or a folder up to [`EXECUTABLE_DEPTH`] below it,
+/// shallowest first.
+fn find_executable(folder: &Path, executables: &[&str]) -> Option<PathBuf> {
+    let mut level = vec![folder.to_path_buf()];
+    for _ in 0..=EXECUTABLE_DEPTH {
+        if let Some(found) = level.iter().flat_map(|dir| executables.iter().map(move |name| dir.join(name))).find(|path| path.is_file()) {
+            return Some(found);
+        }
+        level = level.iter().filter_map(|dir| std::fs::read_dir(dir).ok()).flatten().filter_map(Result::ok).filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.path()).collect();
+    }
+    None
+}
+
+/// How many folders below its install folder a game's executable is looked for (Unreal's
+/// `<Game>\Binaries\Win64`).
+const EXECUTABLE_DEPTH: usize = 3;
 
 #[cfg(test)]
 mod tests;

@@ -10,7 +10,7 @@ use crate::Result;
 use crate::canvas::{Canvas, Cursor};
 use crate::ring_page::{self, Look, style};
 use egui::{Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, ScrollArea, Vec2};
-use monaka_contract::manifest::{Kind, TABS, number_text};
+use monaka_contract::manifest::{Kind, Launch, TABS, number_text};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 
@@ -96,23 +96,18 @@ fn games(ui: &mut egui::Ui, home: &mut Home) {
         ui.add_space(10.0);
         let stop = |ui: &mut egui::Ui, label: &str| ui.add(egui::Button::new(RichText::new(label).strong()).fill(look.stop)).clicked();
         ui.horizontal(|ui| {
-            if !home.window {
-                if stop(ui, "Stop VR") {
+            // In VR: the game let go, left running.
+            if !home.window || home.in_vr().is_some() {
+                if stop(ui, "Detach") {
                     home.ask_stop();
                 }
-            } else if home.in_vr().is_some() {
-                if stop(ui, "Stop game") {
-                    home.ask_stop();
-                }
-            } else if home.game.is_some() {
+            } else if let Some(game) = home.game {
                 let can = home.status.can_play;
-                // A game that runs already is joined, not started.
-                let label = if home.current_runs() { "Attach" } else { "Play" };
+                // A game that runs already is joined; one Monaka cannot start is joined once it
+                // runs (the status says how); any other is launched and joined.
+                let label = if home.current_runs() || game.launch == Launch::Manual { "Attach" } else { "Launch" };
                 if ui.add_enabled(can, egui::Button::new(RichText::new(label).strong()).fill(if can { look.row } else { Color32::TRANSPARENT })).clicked() {
                     home.ask_play();
-                }
-                if home.status.can_start_game && ui.button("Start game").clicked() {
-                    home.ask_start_game();
                 }
             }
             if ui.button("Recenter panels").clicked() {

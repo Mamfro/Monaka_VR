@@ -10,7 +10,7 @@ use crate::debug_menu::Buzz;
 use crate::menu_quad;
 use crate::ring::RingView;
 use monaka_contract::gamepad::{Gamepad, button};
-use monaka_core::home::{HOME_CLOSED_LINE, PLAY_LINE, SELECT_LINE, SETTING_LINE, START_GAME_LINE};
+use monaka_core::home::{HOME_CLOSED_LINE, PLAY_LINE, SELECT_LINE, SETTING_LINE};
 use monaka_contract::protocol::HandPose;
 use monaka_core::hold::HoldToggle;
 use monaka_core::math::{Quat, Vec3};
@@ -18,6 +18,7 @@ use monaka_openxr::{Layer, Session, Space};
 use monaka_overlay::eye::EyeView;
 use monaka_overlay::frost::FrostPass;
 use monaka_overlay::home::pages::Pages;
+use monaka_overlay::home::place::Ring;
 use monaka_overlay::home::{Home, PAGES};
 use monaka_overlay::quad::Rectangle;
 use std::path::Path;
@@ -128,6 +129,17 @@ impl<'s> HomeView<'s> {
         self.recenter = true;
     }
 
+    /// Where the ring stands (none until it first opened): its middle panel is straight ahead of
+    /// it.
+    pub fn centre(&self) -> Option<Ring> {
+        self.ring.centre()
+    }
+
+    /// The room's origin moved to the ring's centre ([`RingView::at_origin`]).
+    pub fn at_origin(&mut self) {
+        self.ring.at_origin();
+    }
+
     /// Takes what the window changed in the files in `folder`.
     pub fn sync(&mut self, folder: &Path) {
         self.home.sync(folder);
@@ -164,9 +176,6 @@ impl<'s> HomeView<'s> {
         }
         if self.home.take_play() {
             println!("{PLAY_LINE}");
-        }
-        if self.home.take_start_game() {
-            println!("{START_GAME_LINE}");
         }
         asked.leave = self.home.take_leave();
         if let (true, Some(head)) = (self.recenter, head) {

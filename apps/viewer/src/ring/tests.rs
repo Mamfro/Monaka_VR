@@ -34,6 +34,24 @@ fn the_panel_in_front_stands_ahead_and_the_rest_round_the_ring_the_same_size() {
 }
 
 #[test]
+fn the_room_moved_to_the_rings_centre_leaves_the_panels_where_they_float() {
+    let mut r = ring(3);
+    r.place_at((math::yaw_rotation(0.9), [0.4, 1.5, -0.3]));
+    let centre = r.centre().unwrap();
+    let before: Vec<_> = (0..3).map(|page| r.rectangle(page).unwrap()).collect();
+    r.at_origin();
+    // The new room's origin is the ring's centre, turned the way it faces.
+    let origin = math::yaw_rotation(centre.yaw);
+    for (page, was) in before.iter().enumerate() {
+        let now = r.rectangle(page).unwrap();
+        let in_old = math::add(math::rotate(origin, now.position), centre.eye);
+        assert!((0..3).all(|i| (in_old[i] - was.position[i]).abs() < 1e-4), "panel {page}: {in_old:?} was {:?}", was.position);
+        assert!(math::angle_between(math::multiply(origin, now.orientation), was.orientation) < 1e-3, "panel {page} turned");
+    }
+    assert!(angle(&r, 0).abs() < 1e-4, "the middle panel straight ahead");
+}
+
+#[test]
 fn a_turn_brings_the_next_panel_in_front_going_round() {
     let mut r = ring(3);
     r.place_at(HEAD);

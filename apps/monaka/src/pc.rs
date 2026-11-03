@@ -31,6 +31,8 @@ pub trait Pc {
     /// The player's pick of a game pack file (a .zip, or a lone .dll), if any.
     fn pick_pack_file(&self) -> Option<PathBuf>;
     fn launch_steam_game(&self, steam_app: u32) -> Result<(), String>;
+    /// Starts a game: its executable directly when Steam installed it here (no Theater screen), else through Steam.
+    fn launch_game(&self, steam_app: u32, executables: &[&str]) -> Result<(), String>;
     /// Opens a folder or a web page as the shell does.
     fn open(&self, target: &str) -> Result<(), String>;
 }
@@ -88,6 +90,10 @@ impl Pc for ThisPc {
 
     fn launch_steam_game(&self, steam_app: u32) -> Result<(), String> {
         system::launch_steam_game(steam_app)
+    }
+
+    fn launch_game(&self, steam_app: u32, executables: &[&str]) -> Result<(), String> {
+        system::launch_game(steam_app, executables)
     }
 
     fn open(&self, target: &str) -> Result<(), String> {
