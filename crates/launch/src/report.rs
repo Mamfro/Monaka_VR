@@ -79,19 +79,27 @@ fn tail(file: &Path) -> Option<String> {
     Some(if from > 0 { text.split_once('\n').map_or(String::new(), |(_, rest)| rest.to_owned()) } else { text.into_owned() })
 }
 
-/// Zips the folder `staging`'s contents as `out` with Windows' own `tar.exe` (bsdtar; `-a` makes a
-/// zip from the name).
+/// Windows' own `tar.exe` (bsdtar).
+fn tar() -> PathBuf {
+    let system = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    system.join(r"System32\tar.exe")
+}
+
+/// Zips the folder `staging`'s contents as `out` with [`tar`] (`-a` makes a zip from the name):
+/// its files and folders by name, so the zip holds them at its top (`.` would put each under `./`).
 fn zip(staging: &Path, out: &Path) -> Result<(), String> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let system = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-    let tar = system.join(r"System32\tar.exe");
+    let tar = tar();
+    let entries = std::fs::read_dir(staging).map_err(|e| format!("cannot read {}: {e}", staging.display()))?;
+    let mut names: Vec<_> = entries.filter_map(|e| e.ok()).map(|e| e.file_name()).collect();
+    names.sort();
     let output = Command::new(&tar)
         .arg("-a")
         .arg("-cf")
         .arg(out)
         .arg("-C")
         .arg(staging)
-        .arg(".")
+        .args(&names)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("cannot run {}: {e}", tar.display()))?;

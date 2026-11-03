@@ -53,6 +53,11 @@ fn a_report_is_one_zip_and_leaves_nothing_else() {
     assert!(zip.is_file() && std::fs::metadata(&zip).unwrap().len() > 100, "{}", zip.display());
     assert_eq!(std::fs::read(&zip).unwrap()[..2], *b"PK", "a zip");
     assert_eq!(std::fs::read_dir(&reports).unwrap().count(), 1, "the staging folder gone");
+    let listed = Command::new(tar()).arg("-tf").arg(&zip).output().unwrap();
+    let names = String::from_utf8_lossy(&listed.stdout).into_owned();
+    let run_name = run.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(names.lines().any(|n| n == "about.txt") && names.lines().any(|n| n == format!("{run_name}/monaka.log")), "{names}");
+    assert!(names.lines().all(|n| !n.starts_with("./") && n != "."), "no '.' folder: {names}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
