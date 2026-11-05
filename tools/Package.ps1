@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param()
 # Makes Monaka's release zip: dist\monaka_vr-<version>.zip, holding a monaka_vr-<version> folder with
-# the window (monaka.exe), monaka_play, the viewer and the loader, the README and the licence. The
+# the window (monaka.exe), monaka_play, the viewer and the loader, the README and the licence, and
+# the home's rooms (scenes\*.monakaroom, where the viewer looks for them: beside it). The
 # build is the release one of tools\Release.ps1 (C runtime linked in, no paths of this PC inside).
 # Upload the zip to a GitHub release of the same version; nothing here publishes anything.
 $ErrorActionPreference = 'Stop'
@@ -18,6 +19,11 @@ New-Item -ItemType Directory $folder -Force | Out-Null
 $programs = 'monaka.exe', 'monaka_play.exe', 'monaka_viewer.exe', 'monaka_loader.exe'
 foreach ($program in $programs) { Copy-Item -LiteralPath (Join-Path $built $program) -Destination $folder }
 Copy-Item -LiteralPath (Join-Path $repo 'README.md'), (Join-Path $repo 'LICENSE') -Destination $folder
+$rooms = Get-ChildItem -LiteralPath (Join-Path $repo 'scenes') -Filter '*.monakaroom' -ErrorAction SilentlyContinue
+if ($rooms) {
+    $scenes = New-Item -ItemType Directory (Join-Path $folder 'scenes') -Force
+    $rooms | Copy-Item -Destination $scenes
+}
 Assert-NoPersonalPaths ($programs | ForEach-Object { Join-Path $folder $_ })
 
 $zip = New-ReleaseZip -Folder $folder -Zip (Join-Path $dist "$name.zip")

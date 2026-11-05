@@ -29,15 +29,38 @@ enum Item {
 }
 
 /// The game's options with a place in the window: the Rendering tab's in Monaka's order, every
-/// other tab's in the game's, then Monaka's own settings. Command-line-only options have none, the
-/// debug menu's switch none unless `debug_menu` (it is found from the About page), and the
-/// settings for testers ([`Opt::dev`]) none unless `dev`.
-pub fn rows(game: &Game, debug_menu: bool, dev: bool) -> Vec<Row> {
-    let owned = |owner: &'static Manifest| owner.options.iter().map(move |opt| Row { owner, opt });
-    let mut rows: Vec<Row> = owned(game.manifest).filter(|r| r.opt.shown != Shown::Monaka).collect();
+/// other tab's in the game's. Command-line-only options have none, and the settings for testers
+/// ([`Opt::dev`]) none unless `dev`. Monaka's own settings have a page of their own
+/// ([`show_monaka`]).
+pub fn rows(game: &Game, dev: bool) -> Vec<Row> {
+    let owner = game.manifest;
+    let mut rows: Vec<Row> = owner.options.iter().map(|opt| Row { owner, opt }).filter(|r| r.opt.shown != Shown::Monaka).collect();
     rows.sort_by_key(|r| monaka_core::rendering::place(r.opt));
-    let shown = |r: &Row| r.opt.shown != Shown::Line && (debug_menu || r.opt.id != DEBUG_MENU.id) && (dev || !r.opt.dev);
-    rows.into_iter().chain(owned(&MONAKA)).filter(shown).collect()
+    rows.into_iter().filter(|r| r.opt.shown != Shown::Line && (dev || !r.opt.dev)).collect()
+}
+
+/// Draws Monaka's own settings on its tab `ids` (of [`monaka_contract::manifest::MONAKA_TABS`]) and keeps what the player
+/// changes, as [`show`] does a game's: the debug menu's switch only when `debug_menu` (it is found
+/// from the About page), the settings for testers only when `dev`. Returns the id of the setting
+/// changed, if any.
+pub fn show_monaka(ui: &mut egui::Ui, settings: &mut Settings, ids: &[&str], running: bool, dev: bool, debug_menu: bool) -> Option<&'static str> {
+    let saved = settings.monaka.clone();
+    let mut values = saved.clone();
+    if dev {
+        values.set(DEV_MODE.id, "1");
+    }
+    let mut changed = None;
+    for opt in ids.iter().filter_map(|id| MONAKA.options.iter().find(|o| o.id == *id)) {
+        let row = Row { owner: &MONAKA, opt };
+        if (!debug_menu && opt.id == DEBUG_MENU.id) || (!dev && opt.dev) || !offered(&values, &row) {
+            continue;
+        }
+        if let Some(value) = option_row(ui, if opt.id == DEV_MODE.id { &saved } else { &values }, row, running) {
+            settings.monaka.set(opt.id, value);
+            changed = Some(opt.id);
+        }
+    }
+    changed
 }
 
 /// Whether a how-to names `opt`: it is shown under that how-to, on the Controls tab.

@@ -1,4 +1,4 @@
-//! `monaka --screenshot FILE.bmp [--game ID] [--tab NAME|About] [--scroll PIXELS] [--theme dark|light]`:
+//! `monaka --screenshot FILE.bmp [--game ID] [--tab NAME|Monaka[:TAB]|About] [--scroll PIXELS] [--theme dark|light]`:
 //! draws the window off-screen without ever activating it, saves its inside as a BMP and quits. For
 //! checking the layout while a game runs: nothing takes the game's focus, so it doesn't pause.
 
@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 pub struct Request {
     pub file: PathBuf,
     pub game: Option<String>,
-    /// The options tab to show (Main, Controls, HUD, Skeleton, Rendering, Game, Monaka), or About.
+    /// The game's options tab to show (Main, Controls, HUD, Skeleton, Rendering, Game), Monaka's
+    /// settings (`Monaka`, or `Monaka:View` for one of their tabs), or About.
     pub tab: Option<String>,
     /// `--scroll`: how far the options are scrolled, when they overflow.
     pub scroll: f32,

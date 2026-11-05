@@ -12,6 +12,7 @@ monaka_core.workspace = true
 monaka_channel.workspace = true
 monaka_openxr.workspace = true
 monaka_overlay.workspace = true
+monaka_sound.workspace = true
 jpeg-encoder = "0.7"
 
 [dependencies.windows]

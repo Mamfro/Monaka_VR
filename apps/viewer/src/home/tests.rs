@@ -143,7 +143,7 @@ fn the_shoulders_turn_the_ring_round() {
     let settled = h.ring.rectangle(0).unwrap().position;
     assert!(settled[0].abs() < 1e-3, "Games came round to the front: {settled:?}");
     // Log left the right end and went round behind to the left.
-    assert!(h.ring.rectangle(2).unwrap().position[0] < -0.5);
+    assert!(h.ring.rectangle(Page::Log.index()).unwrap().position[0] < -0.5);
 }
 
 #[test]
@@ -174,4 +174,29 @@ fn a_stop_asked_on_the_games_panel_reaches_the_viewer() {
     h.home.ask_stop();
     let mut pad = Gamepad::default();
     assert!(h.pad(&mut pad, Some(HEAD), &ahead(), Instant::now(), false).stop);
+}
+
+#[test]
+fn the_volume_steps_are_even_to_the_ear() {
+    assert_eq!(volume_gain(100.0), 1.0);
+    assert_eq!(volume_gain(0.0), 0.0);
+    assert!((volume_gain(35.0) - 0.05).abs() < 0.001, "the default is a twentieth: {}", volume_gain(35.0));
+    // Every 15 steps is the same ratio quieter.
+    assert!((volume_gain(85.0) / volume_gain(100.0) - volume_gain(50.0) / volume_gain(65.0)).abs() < 1e-4);
+}
+
+#[test]
+fn the_home_opens_where_the_player_recentred_not_where_they_look() {
+    let mut h = home();
+    // Opened with the head turned a quarter left and a step aside.
+    let turned = (math::yaw_rotation(std::f32::consts::FRAC_PI_2), [0.4, 1.6, 0.3]);
+    let t = Instant::now();
+    let mut pad = Gamepad { buttons: button::START, ..Default::default() };
+    h.pad(&mut pad, Some(turned), &ahead(), t, false);
+    let mut pad = Gamepad { buttons: button::START, ..Default::default() };
+    h.pad(&mut pad, Some(turned), &ahead(), t + HOLD, false);
+    assert!(h.is_open());
+    let front = h.ring.rectangle(h.home.front).unwrap().position;
+    assert!(front[0].abs() < 1e-3 && front[2] < -1.0, "the front panel straight ahead of the recentred forward: {front:?}");
+    assert!((front[1] - (1.6 - monaka_overlay::home::place::BELOW_EYES)).abs() < 0.05, "at eye level: {front:?}");
 }

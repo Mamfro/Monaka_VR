@@ -1,0 +1,19 @@
+[package]
+name = "monaka_sound"
+description = "Sound in the headset: a looped recording whose channels each come from a place in the room, heard as the head turns."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+monaka_core.workspace = true
+# Ogg Vorbis, decoded once into memory.
+lewton = "0.10"
+
+[dependencies.windows]
+workspace = true
+features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_Audio_XAudio2", "Win32_System_Com"]
+
+[lints]
+workspace = true

@@ -1,12 +1,12 @@
-//! Monaka's home in the headset: three flat panels round the player, Games, Settings and Log,
-//! pointed at with a controller ([`place`]). The launcher leaves what they show in a folder
+//! Monaka's home in the headset: four flat panels round the player, Games, Game Settings, Monaka
+//! (its own settings) and Log, pointed at with a controller ([`place`]). The launcher leaves what they show in a folder
 //! (`monaka_core::home`): the game's manifest, every setting's value and the games on offer; the
 //! logs are the run's own and the game's. A setting changed here goes back to the launcher, which
 //! saves it; one the viewer acts on ([`LIVE`]) applies at once, the rest with the next launch.
 //! The Monaka window's own headset view reads that folder again as the window changes it
 //! ([`Home::sync`]), and asks the window to show, play and stop games. [`pages`] draws them.
 
-use monaka_contract::manifest::{DEBUG_MENU, DEV_MODE, Kind, LIVE, MONAKA, Manifest, Opt, Shown, TABS, Values};
+use monaka_contract::manifest::{DEBUG_MENU, DEV_MODE, Kind, LIVE, MONAKA, MONAKA_TABS, Manifest, Opt, Shown, TABS, Values};
 use monaka_contract::pack::{self, About};
 use monaka_core::home::{self as files, Listed};
 use crate::ring_page::{self, Look};
@@ -24,19 +24,28 @@ mod tests;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Games,
+    /// The game's settings, in its tabs.
     Settings,
+    /// Monaka's own settings ([`MONAKA`]), for every game.
+    Monaka,
     Log,
 }
 
-pub const PAGES: [Page; 3] = [Page::Games, Page::Settings, Page::Log];
+pub const PAGES: [Page; 4] = [Page::Games, Page::Settings, Page::Monaka, Page::Log];
 
 impl Page {
     pub fn title(self) -> &'static str {
         match self {
             Page::Games => "Games",
-            Page::Settings => "Settings",
+            Page::Settings => "Game Settings",
+            Page::Monaka => "Monaka",
             Page::Log => "Log",
         }
+    }
+
+    /// Where the panel stands among [`PAGES`].
+    pub const fn index(self) -> usize {
+        self as usize
     }
 }
 
@@ -143,8 +152,10 @@ pub struct Home {
     pub status: files::Status,
     /// Every setting's value as saved (the launcher's, then the player's changes here).
     pub values: Values,
-    /// The Settings panel's tab.
+    /// The Game Settings panel's tab.
     pub tab: Shown,
+    /// The Monaka panel's tab (of [`MONAKA_TABS`], by name).
+    pub monaka_tab: &'static str,
     pub log: LogTail,
     /// The panel in front of the player ([`PAGES`]).
     pub front: usize,
@@ -160,7 +171,6 @@ pub struct Home {
     pub problem: Option<String>,
     apply: bool,
     stop: bool,
-    recenter: bool,
     capture: bool,
     debug_menu: bool,
     select: Option<String>,
@@ -170,7 +180,7 @@ pub struct Home {
     /// status.
     read: [String; 4],
     /// Panels whose image is out of date.
-    stale: [bool; 3],
+    stale: [bool; PAGES.len()],
     /// The panels are frosted glass (`frosted_panels`): the viewer blurs the game behind them.
     frosted: bool,
 }
@@ -189,6 +199,7 @@ impl Home {
             status: files::Status::default(),
             values: Values::default(),
             tab: Shown::Main,
+            monaka_tab: MONAKA_TABS[0].0,
             log: LogTail::new(run_folder, None),
             front: 1,
             debug: false,
@@ -199,14 +210,13 @@ impl Home {
             problem: None,
             apply: false,
             stop: false,
-            recenter: false,
             capture: false,
             debug_menu: false,
             select: None,
             play: false,
             leave: false,
             read: Default::default(),
-            stale: [true; 3],
+            stale: [true; PAGES.len()],
             frosted: true,
         };
         if let Some(folder) = run_folder {
@@ -249,9 +259,9 @@ impl Home {
         self.read = texts;
         let tabs = self.tabs();
         if !tabs.contains(&self.tab) {
-            self.tab = tabs.first().copied().unwrap_or(Shown::Monaka);
+            self.tab = tabs.first().copied().unwrap_or(Shown::Main);
         }
-        self.stale = [true; 3];
+        self.stale = [true; PAGES.len()];
         true
     }
 
@@ -260,7 +270,7 @@ impl Home {
         let source = self.log.source;
         self.log = LogTail::new(run_folder, self.game.map(|g| g.log));
         self.log.show(source);
-        self.stale[2] = true;
+        self.stale[Page::Log.index()] = true;
     }
 
     /// The game shown in the headset now, as the launcher listed it.
@@ -293,10 +303,29 @@ impl Home {
             .collect()
     }
 
-    /// The tabs that have settings, in the window's order.
+    /// The Game Settings panel's tabs that have settings, in the window's order (Monaka's own
+    /// have a panel of their own).
     pub fn tabs(&self) -> Vec<Shown> {
         let settings = self.settings();
-        TABS.iter().map(|(tab, _)| *tab).filter(|tab| settings.iter().any(|s| s.opt.shown == *tab)).collect()
+        TABS.iter().map(|(tab, _)| *tab).filter(|tab| *tab != Shown::Monaka && settings.iter().any(|s| s.opt.shown == *tab)).collect()
+    }
+
+    /// The Monaka panel's tabs that have settings on offer, each with them in its order.
+    pub fn monaka_tabs(&self) -> Vec<(&'static str, Vec<Setting>)> {
+        let offered: Vec<Setting> = self.settings().into_iter().filter(|s| s.owner.id == MONAKA.id).collect();
+        MONAKA_TABS
+            .iter()
+            .map(|(tab, ids)| (*tab, ids.iter().filter_map(|id| offered.iter().find(|s| s.opt.id == *id).copied()).collect::<Vec<_>>()))
+            .filter(|(_, settings)| !settings.is_empty())
+            .collect()
+    }
+
+    /// The Monaka panel shows `tab`.
+    pub fn show_monaka_tab(&mut self, tab: &'static str) {
+        if self.monaka_tab != tab {
+            self.monaka_tab = tab;
+            self.stale[Page::Monaka.index()] = true;
+        }
     }
 
     /// A setting's value as the panel shows it.
@@ -315,7 +344,7 @@ impl Home {
         if !setting.live() && self.can_apply() && !self.pending.contains(&setting.opt.id) {
             self.pending.push(setting.opt.id);
         }
-        self.stale[1] = true;
+        self.settings_stale();
     }
 
     /// The settings changed since last asked: each id and its new value.
@@ -341,7 +370,7 @@ impl Home {
         if asked {
             self.applying = true;
             self.problem = None;
-            self.stale[1] = true;
+            self.settings_stale();
         }
         asked
     }
@@ -353,7 +382,7 @@ impl Home {
             self.applying = false;
         }
         self.problem = problem;
-        self.stale[1] = true;
+        self.settings_stale();
     }
 
     /// The player asked to stop VR.
@@ -392,15 +421,6 @@ impl Home {
         std::mem::take(&mut self.leave)
     }
 
-    /// The player asked for the panels round where the head is now.
-    pub fn ask_recenter(&mut self) {
-        self.recenter = true;
-    }
-
-    pub fn take_recenter(&mut self) -> bool {
-        std::mem::take(&mut self.recenter)
-    }
-
     /// The player asked for a capture of what the headset shows.
     pub fn ask_capture(&mut self) {
         self.capture = true;
@@ -422,27 +442,27 @@ impl Home {
     /// Turns the ring by `steps` (negative: to the left), bringing another panel in front.
     pub fn turn(&mut self, steps: isize) {
         self.front = (self.front as isize + steps).rem_euclid(PAGES.len() as isize) as usize;
-        self.stale = [true; 3];
+        self.stale = [true; PAGES.len()];
     }
 
     /// The Settings panel shows `tab`.
     pub fn show_tab(&mut self, tab: Shown) {
         if self.tab != tab {
             self.tab = tab;
-            self.stale[1] = true;
+            self.stale[Page::Settings.index()] = true;
         }
     }
 
     /// The Log panel shows `source`.
     pub fn show_log(&mut self, source: LogSource) {
         self.log.show(source);
-        self.stale[2] = true;
+        self.stale[Page::Log.index()] = true;
     }
 
     /// Reads the shown log again when it is time.
     pub fn refresh(&mut self, now: Instant) {
         if self.log.refresh(now) {
-            self.stale[2] = true;
+            self.stale[Page::Log.index()] = true;
         }
     }
 
@@ -451,9 +471,15 @@ impl Home {
         std::mem::take(&mut self.stale[page])
     }
 
+    /// Both settings panels must be drawn again: a value changed, or what waits to apply.
+    fn settings_stale(&mut self) {
+        self.stale[Page::Settings.index()] = true;
+        self.stale[Page::Monaka.index()] = true;
+    }
+
     /// Every panel must be drawn again (their images went somewhere new).
     pub fn all_stale(&mut self) {
-        self.stale = [true; 3];
+        self.stale = [true; PAGES.len()];
     }
 
     /// The panels as frosted glass or solid from now on; drawn again when that changes.

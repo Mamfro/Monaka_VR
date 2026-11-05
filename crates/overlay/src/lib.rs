@@ -3,7 +3,7 @@
 //! the runtime reprojects the drawing together with the image; and the in-headset menus, drawn
 //! with egui ([`canvas`]): the debug menu ([`menu`]), the panels beside it ([`panels`], the
 //! [`stats`] among them) and Monaka's home ([`home`]), the game blurred behind its panels
-//! ([`frost`]). The 2D window shows the same
+//! ([`frost`]), a room round it while no game shows ([`scene`]), captured or made ([`pattern`]). The 2D window shows the same
 //! pages as windows of its own ([`window`]) over the picture ([`blit`]).
 
 pub mod blit;
@@ -17,8 +17,10 @@ pub mod home;
 pub mod lines;
 pub mod menu;
 pub mod panels;
+pub mod pattern;
 pub mod quad;
 pub mod ring_page;
+pub mod scene;
 pub mod stats;
 pub mod views;
 pub mod window;

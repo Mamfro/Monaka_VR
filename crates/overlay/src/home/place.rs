@@ -1,5 +1,6 @@
 //! Where a ring's panels float and where a controller points on them, the same for Monaka's home
-//! and the debug menu. The panels stand on a ring round where the head was when it opened, each
+//! and the debug menu. The panels stand on a ring round a centre (the home's: where the player
+//! last recentred; the debug menu's: where the head was when it opened), each
 //! turned to face it, flat (not curved): the one in front straight ahead of where the head faced,
 //! the others to its sides. Turning the ring (LB, RB) brings another panel in front, so none needs
 //! the head turned far to use.

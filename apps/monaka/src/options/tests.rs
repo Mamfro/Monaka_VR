@@ -18,10 +18,12 @@ fn settings_for_testers_show_only_in_developer_mode() {
         manifests: Vec::new(),
     }));
     let game = Game { manifest: &TRIED, origin: monaka_launch::games::Origin::Pack(pack) };
-    let ids = |dev: bool| rows(&game, false, dev).iter().map(|r| r.opt.id).collect::<Vec<_>>();
+    let ids = |dev: bool| rows(&game, dev).iter().map(|r| r.opt.id).collect::<Vec<_>>();
     assert!(!ids(false).contains(&"trial") && ids(true).contains(&"trial"));
-    // The switch itself is always there, among Monaka's own.
-    assert!(ids(false).contains(&monaka_contract::manifest::DEV_MODE.id));
+    // Monaka's own (the switch among them) are on a page of their own, not among the game's.
+    assert!(!ids(true).contains(&monaka_contract::manifest::DEV_MODE.id));
+    let advanced = monaka_contract::manifest::MONAKA_TABS.iter().find(|(tab, _)| *tab == "Advanced").map(|(_, ids)| *ids).unwrap_or_default();
+    assert!(advanced.contains(&monaka_contract::manifest::DEV_MODE.id), "the switch itself is on Monaka's Advanced tab");
 }
 
 #[test]

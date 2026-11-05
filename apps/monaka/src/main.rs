@@ -21,7 +21,7 @@ mod reload;
 mod screenshot;
 
 use eframe::egui::{self, Align, Button, Color32, Layout, RichText, ScrollArea, Sense, Stroke, TextEdit, ViewportCommand};
-use monaka_contract::manifest::{DEBUG_MENU, DEV_MODE, DIAGNOSTIC_LOGGING, DIAGNOSTIC_MARKER, Manifest};
+use monaka_contract::manifest::{DEBUG_MENU, DEV_MODE, DIAGNOSTIC_LOGGING, DIAGNOSTIC_MARKER, MONAKA_TABS, Manifest};
 use monaka_core::home::{CLOSED_BY_PLAYER, SETTING_LINE};
 use monaka_contract::pack;
 use monaka_core::home;
@@ -104,6 +104,8 @@ enum Dialog {
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Page {
     Game,
+    /// Monaka's own settings, for every game, in their tabs ([`MONAKA_TABS`]).
+    Monaka,
     About,
     /// A pack folder that cannot run here (its index among the catalogue's left out).
     LeftOut(usize),
@@ -131,6 +133,8 @@ struct App {
     left_out: Vec<packs::LeftOut>,
     selected: usize,
     tab: Shown,
+    /// The Monaka settings page's tab (of [`MONAKA_TABS`], by name).
+    monaka_tab: &'static str,
     /// Scrolls the options here on the next frame (to the top after a game or tab change).
     scroll_to: Option<f32>,
     page: Page,
@@ -185,8 +189,14 @@ impl App {
         let mut selected = settings.selected.as_deref().and_then(|id| list.iter().position(|g| g.id == id)).unwrap_or(0);
         let mut tab = Shown::Main;
         let mut scroll_to = Some(0.0);
-        let about = screenshot.as_ref().is_some_and(|r| r.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("about")));
-        let page = if about { Page::About } else { Page::Game };
+        let asked = |name: &str| screenshot.as_ref().is_some_and(|r| r.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case(name)));
+        let page = if asked("about") {
+            Page::About
+        } else if screenshot.as_ref().and_then(|r| r.tab.as_deref()).is_some_and(|t| t.to_ascii_lowercase().starts_with("monaka")) {
+            Page::Monaka
+        } else {
+            Page::Game
+        };
         if let Some(request) = &screenshot {
             tab = request.tab.as_deref().and_then(|name| TABS.iter().find(|(_, n)| n.eq_ignore_ascii_case(name))).map_or(Shown::Main, |(t, _)| *t);
             selected = request.game.as_deref().and_then(|id| list.iter().position(|g| g.id == id)).unwrap_or(selected);
@@ -202,6 +212,11 @@ impl App {
             left_out,
             selected,
             tab,
+            monaka_tab: screenshot
+                .as_ref()
+                .and_then(|r| r.tab.as_deref()?.split_once(':'))
+                .and_then(|(_, name)| MONAKA_TABS.iter().find(|(tab, _)| tab.eq_ignore_ascii_case(name.trim())))
+                .map_or(MONAKA_TABS[0].0, |(tab, _)| *tab),
             scroll_to,
             page,
             version_clicks: (0, None),
@@ -731,6 +746,10 @@ impl App {
             if ui.selectable_label(self.page == Page::About, "About").clicked() {
                 self.page = if self.page == Page::About { Page::Game } else { Page::About };
             }
+            if ui.selectable_label(self.page == Page::Monaka, "Monaka settings").clicked() {
+                self.page = if self.page == Page::Monaka { Page::Game } else { Page::Monaka };
+                self.scroll_to = Some(0.0);
+            }
             ui.horizontal(|ui| {
                 if ui.add_enabled(idle, Button::new("Add game pack...")).clicked() {
                     self.add_pack();
@@ -994,6 +1013,7 @@ impl App {
     fn game_panel(&mut self, ui: &mut egui::Ui) {
         match self.page {
             Page::About => return self.about_page(ui),
+            Page::Monaka => return self.monaka_page(ui),
             Page::LeftOut(index) => return self.left_out_page(ui, index),
             Page::Game => {}
         }
@@ -1006,7 +1026,7 @@ impl App {
         self.game_header(ui, game);
         ui.add_space(14.0);
 
-        let rows = options::rows(game, self.debug_menu_shown(), self.dev_mode());
+        let rows = options::rows(game, self.dev_mode());
         let tabs = options::tabs(game, &rows);
         // A tab the game lacks falls back to its first (Main, where it has one).
         if !tabs.contains(&self.tab) {
@@ -1041,6 +1061,44 @@ impl App {
         let running = self.running.is_some();
         let dev = self.dev_mode();
         let changed = area.show(ui, |ui| options::show(ui, &mut self.settings, game, &rows, self.tab, running, dev)).inner;
+        if changed.is_some() {
+            self.settings_changed();
+        }
+        if changed == Some(DIAGNOSTIC_LOGGING.id) {
+            self.mark_diagnostics();
+        }
+    }
+
+    /// Right: Monaka's own settings, for every game, a tab at a time (as the headset's Monaka
+    /// panel has them).
+    fn monaka_page(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Monaka settings");
+        ui.label(RichText::new("These apply to every game.").size(look::SMALL).weak());
+        ui.add_space(14.0);
+        if !MONAKA_TABS.iter().any(|(tab, _)| *tab == self.monaka_tab) {
+            self.monaka_tab = MONAKA_TABS[0].0;
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 18.0;
+            for (tab, _) in MONAKA_TABS {
+                if tab_button(ui, self.monaka_tab == *tab, tab).clicked() && self.monaka_tab != *tab {
+                    self.monaka_tab = tab;
+                    self.scroll_to = Some(0.0);
+                }
+            }
+        });
+        let line = ui.visuals().widgets.noninteractive.bg_stroke;
+        let (left, right) = (ui.max_rect().left(), ui.max_rect().right());
+        let y = ui.cursor().top();
+        ui.painter().hline(left..=right, y, line);
+        ui.add_space(10.0);
+        let mut area = ScrollArea::vertical().id_salt(("monaka", self.monaka_tab)).auto_shrink(false);
+        if let Some(offset) = self.scroll_to.take() {
+            area = area.vertical_scroll_offset(offset);
+        }
+        let ids = MONAKA_TABS.iter().find(|(tab, _)| *tab == self.monaka_tab).map_or(&[][..], |(_, ids)| *ids);
+        let (running, dev, debug_menu) = (self.running.is_some(), self.dev_mode(), self.debug_menu_shown());
+        let changed = area.show(ui, |ui| options::show_monaka(ui, &mut self.settings, ids, running, dev, debug_menu)).inner;
         if changed.is_some() {
             self.settings_changed();
         }

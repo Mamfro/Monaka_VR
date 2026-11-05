@@ -18,6 +18,7 @@ monaka_core = { path = "../monaka_sdk/crates/core" }
 monaka_launch = { path = "crates/launch" }
 monaka_openxr = { path = "crates/openxr" }
 monaka_overlay = { path = "crates/overlay" }
+monaka_sound = { path = "crates/sound" }
 windows = "0.62"
 
 [workspace.lints.rust]

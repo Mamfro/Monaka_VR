@@ -14,16 +14,16 @@ use monaka_contract::manifest::{Kind, Launch, TABS, number_text};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 
-/// The three panels' images and where the pointer is on each (points).
+/// The panels' images and where the pointer is on each (points).
 pub struct Pages {
-    canvases: [Canvas; 3],
-    cursors: [Cursor; 3],
+    canvases: [Canvas; PAGES.len()],
+    cursors: [Cursor; PAGES.len()],
 }
 
 impl Pages {
     /// Panels drawn in `format` (the headset's image format).
     pub fn new(format: DXGI_FORMAT) -> Self {
-        Self { canvases: std::array::from_fn(|_| Canvas::new(format, PIXELS)), cursors: [Cursor::default(); 3] }
+        Self { canvases: std::array::from_fn(|_| Canvas::new(format, PIXELS)), cursors: [Cursor::default(); PAGES.len()] }
     }
 
     /// A panel's size in points, where the pointer's events are given.
@@ -50,12 +50,16 @@ impl Pages {
             framed(ui, &look, PAGES[page], front, |ui| match PAGES[page] {
                 Page::Games => games(ui, home),
                 Page::Settings => settings(ui, home),
+                Page::Monaka => monaka(ui, home),
                 Page::Log => log(ui, home),
             });
             cursor.paint(ui.ctx(), look.accent);
         })
     }
 }
+
+/// A choice of more values than this is stepped through (as a number is), not shown as buttons.
+const STEPPED: usize = 8;
 
 /// The keys, at the foot of each panel.
 const KEYS: &str = "Point and pull the trigger.  Right stick: scroll.  LB/RB: panels.  B or hold Start: close.";
@@ -110,9 +114,6 @@ fn games(ui: &mut egui::Ui, home: &mut Home) {
                     home.ask_play();
                 }
             }
-            if ui.button("Recenter panels").clicked() {
-                home.ask_recenter();
-            }
             if home.window && ui.button("Leave VR").clicked() {
                 home.ask_leave();
             }
@@ -165,11 +166,13 @@ fn games(ui: &mut egui::Ui, home: &mut Home) {
     });
 }
 
+/// The Game Settings panel: the game's settings, a tab at a time.
 fn settings(ui: &mut egui::Ui, home: &mut Home) {
     let look = home.look();
     let tabs = home.tabs();
     if tabs.is_empty() {
-        ui.label(RichText::new("Nothing to set: the viewer was started without the launcher.").color(look.dim));
+        let said = if home.game.is_none() { "No game picked: pick one on the Games panel." } else { "This game has nothing to set here." };
+        ui.label(RichText::new(said).color(look.dim));
         return;
     }
     if !tabs.contains(&home.tab) {
@@ -187,6 +190,31 @@ fn settings(ui: &mut egui::Ui, home: &mut Home) {
     apply_bar(ui, home);
     let shown: Vec<Setting> = home.settings().into_iter().filter(|s| s.opt.shown == home.tab).collect();
     ScrollArea::vertical().id_salt(("settings", home.tab as u8)).auto_shrink([false, false]).show(ui, |ui| {
+        for setting in shown {
+            setting_row(ui, home, &setting);
+            ui.add_space(4.0);
+        }
+    });
+}
+
+/// The Monaka panel: Monaka's own settings, for every game, a tab at a time (`MONAKA_TABS`).
+fn monaka(ui: &mut egui::Ui, home: &mut Home) {
+    let tabs = home.monaka_tabs();
+    let Some(first) = tabs.first().map(|(tab, _)| *tab) else { return };
+    if !tabs.iter().any(|(tab, _)| *tab == home.monaka_tab) {
+        home.show_monaka_tab(first);
+    }
+    ui.horizontal_wrapped(|ui| {
+        for (tab, _) in &tabs {
+            if ui.add(egui::Button::selectable(home.monaka_tab == *tab, *tab)).clicked() {
+                home.show_monaka_tab(tab);
+            }
+        }
+    });
+    ui.separator();
+    apply_bar(ui, home);
+    let shown = tabs.into_iter().find(|(tab, _)| *tab == home.monaka_tab).map(|(_, settings)| settings).unwrap_or_default();
+    ScrollArea::vertical().id_salt(("monaka", home.monaka_tab)).auto_shrink([false, false]).show(ui, |ui| {
         for setting in shown {
             setting_row(ui, home, &setting);
             ui.add_space(4.0);
@@ -253,6 +281,22 @@ fn setting_row(ui: &mut egui::Ui, home: &mut Home, setting: &Setting) {
                     if ui.add(egui::Button::selectable(!on, "Off")).clicked() {
                         home.set(setting, "0".to_owned());
                     }
+                });
+            }
+            Kind::Choice { .. } if home.values.shown_choices(setting.owner, setting.opt).len() > STEPPED => {
+                // Too many to show as buttons (a time of day's hours): stepped through, as a
+                // number is.
+                let choices = home.values.shown_choices(setting.owner, setting.opt);
+                let at = choices.iter().position(|(id, _)| *id == value).unwrap_or(0);
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(at > 0, egui::Button::new(RichText::new("  -  ").strong())).clicked() {
+                        home.set(setting, choices[at - 1].0.to_owned());
+                    }
+                    ui.label(RichText::new(choices[at].1).size(17.0).strong());
+                    if ui.add_enabled(at + 1 < choices.len(), egui::Button::new(RichText::new("  +  ").strong())).clicked() {
+                        home.set(setting, choices[at + 1].0.to_owned());
+                    }
+                    ui.label(RichText::new(format!("{} to {}", choices[0].1, choices[choices.len() - 1].1)).size(11.0).color(look.dim));
                 });
             }
             Kind::Choice { .. } => {

@@ -1,7 +1,7 @@
-//! Monaka's home in the headset ([`monaka_overlay::home`]): the Games, Settings and Log panels,
-//! opened and closed by holding Start for half a second (a short press still reaches the game).
-//! They stand on a ring round where the head was when it opened ([`crate::ring`], as the debug
-//! menu's), the Settings panel in front; LB and RB turn the ring, the panels going round to their
+//! Monaka's home in the headset ([`monaka_overlay::home`]): the Games, Game Settings, Monaka and
+//! Log panels, opened and closed by holding Start for half a second (a short press still reaches
+//! the game). They stand on a ring round where the player last recentred, facing the way they
+//! faced then ([`centre`]; [`crate::ring`], as the debug menu's), the Game Settings panel in front; LB and RB turn the ring, the panels going round to their
 //! new places. A controller points at them, B closes. While open the home takes the pad (the game gets it idle). A setting changed
 //! here is printed as a [`SETTING_LINE`] for the launcher to save, and acted on at once when the
 //! viewer owns it.
@@ -23,6 +23,13 @@ use monaka_overlay::home::{Home, PAGES};
 use monaka_overlay::quad::Rectangle;
 use std::path::Path;
 use std::time::Instant;
+
+/// Where the ring stands, the head at `head`: over the room's origin, where the player last
+/// recentred, facing its forward; at the head's height, so the panels are at eye level sitting or
+/// standing.
+fn centre(head: Option<(Quat, Vec3)>) -> (Quat, Vec3) {
+    (monaka_core::math::IDENTITY, [0.0, head.map_or(0.0, |(_, position)| position[1]), 0.0])
+}
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 
@@ -43,6 +50,12 @@ pub struct Asked {
     pub apply: bool,
     /// The player asked to leave VR (the Monaka window's own headset view closes).
     pub leave: bool,
+}
+
+/// The gain for volume setting `percent` (0 to 100): 100 the recording as it is, each percent
+/// 0.4 dB quieter, 0 silent.
+pub fn volume_gain(percent: f32) -> f32 {
+    if percent <= 0.0 { 0.0 } else { 10f32.powf(-0.4 * (100.0 - percent.min(100.0)) / 20.0) }
 }
 
 pub struct HomeView<'s> {
@@ -105,6 +118,36 @@ impl<'s> HomeView<'s> {
             self.frost = Some(Err(()));
             self.home.set_frosted(false);
         }
+    }
+
+    /// What surrounds the home while no game shows (`background`, Monaka's setting): none for the
+    /// plain dark.
+    pub fn background(&self) -> Option<crate::scene::Background> {
+        use monaka_contract::manifest::{BACKGROUND, MONAKA};
+        match self.home.values.text(&MONAKA, BACKGROUND.id).as_str() {
+            "home" => Some(crate::scene::Background::Home),
+            "drift" => Some(crate::scene::Background::Drift),
+            _ => None,
+        }
+    }
+
+    /// The background shows round a game's flat screen too (`background_flat`).
+    pub fn background_flat(&self) -> bool {
+        use monaka_contract::manifest::{BACKGROUND_FLAT, MONAKA};
+        self.home.values.switch(&MONAKA, BACKGROUND_FLAT.id)
+    }
+
+    /// The hour the scene stays at (`scene_time`), or none while it follows the clock.
+    pub fn scene_hour(&self) -> Option<u8> {
+        use monaka_contract::manifest::{MONAKA, SCENE_TIME};
+        self.home.values.text(&MONAKA, SCENE_TIME.id).parse::<u8>().ok().filter(|h| *h < 24)
+    }
+
+    /// How loud the scene's sound is (`scene_volume`), as a gain on the recording (0 to 1): the
+    /// setting's steps are even to the ear, 40 dB from 1 to 100.
+    pub fn scene_volume(&self) -> f32 {
+        use monaka_contract::manifest::{MONAKA, SCENE_VOLUME};
+        volume_gain(self.home.values.number(&MONAKA, SCENE_VOLUME.id) as f32)
     }
 
     pub fn is_open(&self) -> bool {
@@ -178,9 +221,8 @@ impl<'s> HomeView<'s> {
             println!("{PLAY_LINE}");
         }
         asked.leave = self.home.take_leave();
-        if let (true, Some(head)) = (self.recenter, head) {
-            self.recenter = false;
-            self.ring.place_at(head);
+        if std::mem::take(&mut self.recenter) {
+            self.ring.place_at(centre(head));
         }
         if self.open_soon && !self.open && head.is_some() {
             self.open_soon = false;
@@ -212,11 +254,6 @@ impl<'s> HomeView<'s> {
                 asked.buzzes.push(menu_quad::pressed(false));
             }
         }
-        if self.home.take_recenter()
-            && let Some(head) = head
-        {
-            self.ring.place_at(head);
-        }
         self.ring.step(now);
         asked.buzzes.extend(self.ring.point(pad, hands, |_| true));
         *pad = Gamepad::default();
@@ -230,10 +267,10 @@ impl<'s> HomeView<'s> {
         }
         self.open = open;
         if open {
-            match head {
-                Some(head) => self.ring.place_at(head),
-                None => self.ring.show_in_front(self.home.front),
-            }
+            // Where the player recentred, facing the way they did: not wherever the head turned
+            // since, so the panels are always found in the same place.
+            self.ring.place_at(centre(head));
+            self.ring.show_in_front(self.home.front);
             self.home.all_stale();
         } else {
             self.ring.leave();

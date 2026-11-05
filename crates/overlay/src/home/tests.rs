@@ -50,7 +50,7 @@ fn the_launchers_files_make_the_home() {
     assert_eq!((home.about.author.as_str(), home.about.version.as_str()), ("Someone", "1.2.3"));
     assert_eq!(home.games.len(), 2);
     assert!(home.games[0].current && !home.games[1].current);
-    assert_eq!(PAGES[home.front], Page::Settings, "Settings in front, Games left, Log right");
+    assert_eq!(PAGES[home.front], Page::Settings, "Game Settings in front, Games left, Monaka right");
     // The game's settings, then Monaka's own; not a command-line one, not a choice of one, not a
     // tester's outside developer mode, not the debug menu's switch while it is off.
     let shown = ids(&home);
@@ -59,7 +59,11 @@ fn the_launchers_files_make_the_home() {
     for hidden in ["extra_line", "only", "trial", DEBUG_MENU.id] {
         assert!(!shown.contains(&hidden), "{hidden} shown: {shown:?}");
     }
-    assert_eq!(home.tabs(), [Shown::Hud, Shown::Rendering, Shown::Monaka]);
+    assert_eq!(home.tabs(), [Shown::Hud, Shown::Rendering], "Monaka's own are on a panel of their own");
+    let monaka: Vec<&str> = home.monaka_tabs().iter().map(|(tab, _)| *tab).collect();
+    assert_eq!(monaka, ["Home", "View", "Controllers", "Advanced"]);
+    let advanced = &home.monaka_tabs()[3].1;
+    assert!(advanced.iter().all(|s| s.opt.id != DEBUG_MENU.id), "the debug menu's switch stays hidden while it is off");
     assert_eq!(home.tab, Shown::Hud);
     let _ = std::fs::remove_dir_all(&folder);
 }
@@ -95,12 +99,14 @@ fn a_change_is_kept_and_told_once() {
 fn the_ring_turns_round() {
     let mut home = Home::load(None);
     home.turn(1);
+    assert_eq!(PAGES[home.front], Page::Monaka);
+    home.turn(1);
     assert_eq!(PAGES[home.front], Page::Log);
     home.turn(1);
     assert_eq!(PAGES[home.front], Page::Games);
     home.turn(-1);
     assert_eq!(PAGES[home.front], Page::Log);
-    assert!((0..3).all(|page| home.take_stale(page)), "every panel drawn again");
+    assert!((0..PAGES.len()).all(|page| home.take_stale(page)), "every panel drawn again");
 }
 
 #[test]

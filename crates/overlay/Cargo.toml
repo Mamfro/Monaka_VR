@@ -11,6 +11,14 @@ monaka_contract.workspace = true
 monaka_core.workspace = true
 monaka_channel.workspace = true
 egui = { version = "0.36", default-features = false, features = ["default_fonts"] }
+# The home scene's files: its colour images (PNG) and depth images (OpenEXR).
+exr = { version = "1.74", default-features = false }
+png = "0.18"
+# Packed rooms (`.monakaroom`): their images as JPEG, their depth deflated.
+jpeg-encoder = "0.7"
+zune-jpeg = "0.5"
+zune-core = "0.5"
+miniz_oxide = "0.8"
 
 [dependencies.windows]
 workspace = true
@@ -25,6 +33,7 @@ features = [
     "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
+    "Win32_System_SystemInformation",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",

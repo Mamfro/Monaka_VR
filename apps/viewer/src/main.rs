@@ -55,6 +55,7 @@ mod panel;
 mod pointer;
 mod recorder;
 mod ring;
+mod scene;
 mod smooth;
 mod tunnel;
 mod view_commands;
@@ -93,6 +94,8 @@ const RECENTRE_STEP: f32 = 0.3;
 /// How often the home's viewer reads the window's files again (what it shows, and the game linked).
 const HOME_SYNC_EVERY: Duration = Duration::from_millis(250);
 const RELINK_PATIENCE: Duration = Duration::from_secs(20);
+/// The plain dark under the panels is let go once the background has shown this long unbroken.
+const BACKDROP_IDLE: Duration = Duration::from_secs(3);
 
 /// The producer's channel once it is made (with its first frame), waiting up to `seconds`; a stop
 /// asked for meanwhile (the game gone, the player) ends the wait.
@@ -123,6 +126,7 @@ enum Live {
     Proxy,
     Frosted,
     Tunnel,
+    HomeScene,
 }
 
 /// The viewer's part in live option `id`, if it has one.
@@ -141,7 +145,7 @@ fn note_display_period(period: i64) {
 }
 
 fn live_setting(id: &str) -> Option<Live> {
-    use monaka_contract::manifest::{CONTROLLER_PROXY, CONTROLLER_SMOOTHING, FROSTED_PANELS, MENU_REACH_DEPTH, TUNNEL_VISION, menu_reach};
+    use monaka_contract::manifest::{BACKGROUND, BACKGROUND_FLAT, CONTROLLER_PROXY, CONTROLLER_SMOOTHING, FROSTED_PANELS, MENU_REACH_DEPTH, SCENE_TIME, SCENE_VOLUME, TUNNEL_VISION, menu_reach};
     [
         (CONTROLLER_SMOOTHING.id, Live::Smoothing),
         (menu_reach("").id, Live::Reach),
@@ -149,6 +153,10 @@ fn live_setting(id: &str) -> Option<Live> {
         (CONTROLLER_PROXY.id, Live::Proxy),
         (FROSTED_PANELS.id, Live::Frosted),
         (TUNNEL_VISION.id, Live::Tunnel),
+        (BACKGROUND.id, Live::HomeScene),
+        (BACKGROUND_FLAT.id, Live::HomeScene),
+        (SCENE_TIME.id, Live::HomeScene),
+        (SCENE_VOLUME.id, Live::HomeScene),
     ]
         .into_iter()
         .find_map(|(live, what)| (live == id).then_some(what))
@@ -498,7 +506,7 @@ fn home_format(offered: &[i64]) -> Option<u32> {
     [R8G8B8A8_UNORM, R8G8B8A8_UNORM_SRGB].into_iter().find(|&f| offered.contains(&(f as i64)))
 }
 
-fn fov_angles(f: Fovf) -> [f32; 4] {
+pub(crate) fn fov_angles(f: Fovf) -> [f32; 4] {
     [f.angleLeft, f.angleRight, f.angleUp, f.angleDown]
 }
 
@@ -807,20 +815,26 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
     // EXPERIMENT (blurry while it has focus): frames of quads alone, no eye images (the home with
     // no game linked, the game's flat screen), came out blurry; SteamVR may treat such frames
     // differently. A dark eye image under them, filled once: a layer keeps showing the last image
-    // released.
-    let backdrop = match eye_size {
-        Some((width, height)) => {
-            let dark = d3d::create_texture_with(&device, &simple_texture_desc(width, height, DXGI_FORMAT(format as i32)), &[12, 12, 16, 255].repeat((width * height) as usize))?;
-            let made = [session.create_swapchain(format as i64, width, height)?, session.create_swapchain(format as i64, width, height)?];
-            for swapchain in &made {
-                swapchain.fill(|target| d3d::copy_texture(&context, target, &dark))?;
-            }
-            d3d::flush(&context);
-            Some(made)
+    // released. Made when first needed, and let go while the background has been showing a while
+    // ([`BACKDROP_IDLE`]): its images take the GPU's memory for nothing then.
+    let make_backdrop = || -> Result<Option<[monaka_openxr::Swapchain<'_>; 2]>, Box<dyn Error>> {
+        let Some((width, height)) = eye_size else { return Ok(None) };
+        let dark = d3d::create_texture_with(&device, &simple_texture_desc(width, height, DXGI_FORMAT(format as i32)), &[12, 12, 16, 255].repeat((width * height) as usize))?;
+        let made = [session.create_swapchain(format as i64, width, height)?, session.create_swapchain(format as i64, width, height)?];
+        for swapchain in &made {
+            swapchain.fill(|target| d3d::copy_texture(&context, target, &dark))?;
         }
-        _ => None,
+        d3d::flush(&context);
+        Ok(Some(made))
     };
+    let mut backdrop = make_backdrop()?;
+    let (mut backdrop_failed, mut background_since): (bool, Option<Instant>) = (false, None);
     let mut backdrop_views: Option<[sys::View; 2]> = None;
+    // The background ([`scene`], `background`): in place of the dark while no game shows, and
+    // round a game's flat screen when the player asks (`background_flat`). Made the first time
+    // it is wanted (a run that never wants it pays nothing), once.
+    let mut home_scene: Option<scene::HomeScene<'_>> = None;
+    let mut home_scene_made = false;
     // Tunnel vision's ring ([`tunnel`]), made the first time it is on.
     let mut tunnel: Option<tunnel::Tunnel> = None;
     if pad_actions.is_some() {
@@ -991,6 +1005,9 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                 }
             }
             home.recenter();
+            if let Some(scene) = home_scene.as_mut() {
+                scene.recentred();
+            }
             if let Some(link) = link.as_mut() {
                 link.screen = None;
             }
@@ -1085,6 +1102,8 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                             home.set_frosted(args.frosted_panels);
                         }
                         Live::Tunnel => args.tunnel_vision = monaka_contract::manifest::parse_switch(&value).unwrap_or(args.tunnel_vision),
+                        // The home's values have it already, and the scene reads them each frame.
+                        Live::HomeScene => {}
                     }
                 }
                 // The home's viewer stays: the window stops the game's run.
@@ -1133,6 +1152,16 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                     capture::start(capture.as_mut());
                 }
                 let menu_has_pad = home.is_open() || link.as_ref().is_some_and(|l| l.debug_views.menu_open());
+                // No game and no menu: the right stick turns the player in the home scene, and the
+                // triggers sweep the time of day in the captured room.
+                let in_scene = !menu_has_pad && link.is_none();
+                if let Some(scene) = home_scene.as_mut() {
+                    if in_scene && home.background().is_some() {
+                        scene.turn(gamepad.thumb_rx, head.map(|(_, position)| position));
+                    }
+                    let sweeping = in_scene && home.background() == Some(scene::Background::Home);
+                    scene.sweep(if sweeping { gamepad.left_trigger } else { 0 }, if sweeping { gamepad.right_trigger } else { 0 });
+                }
                 stick_moving = if menu_has_pad { 0.0 } else { tunnel::moving(&gamepad, args.snap_turn) };
                 let chorded = if menu_has_pad { chord.step_held(held, Instant::now()) } else { chord.step(&mut gamepad, Instant::now()) };
                 if chorded && capture::start(capture.as_mut()) {
@@ -1242,6 +1271,8 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
                 console::request_stop();
             }
         }
+        // No game shows this frame: the home scene may.
+        let no_game = link.is_none();
         let mut layers = Vec::new();
         // Where the tunnel goes among the layers: over the game in 3D, under what hangs in front.
         let mut tunnel_at: Option<usize> = None;
@@ -1401,7 +1432,43 @@ fn run(mut args: Args) -> Result<i32, Box<dyn Error>> {
             layers.insert(at, layer);
         }
         let projected = layers.iter().any(|layer| matches!(layer, Layer::Projection { .. }));
-        if let (true, Some(chains), Some(views)) = (frame.should_render && !projected, &backdrop, &backdrop_views) {
+        let background = home.background();
+        // While no game shows, or round a game's flat screen (its menus, loading, cutscenes) when
+        // the player asks: never over a game in 3D.
+        let scene_wanted = background.is_some() && frame.should_render && !projected && (no_game || home.background_flat());
+        if scene_wanted && !std::mem::replace(&mut home_scene_made, true) {
+            home_scene = scene::HomeScene::new(&session, &device, &offered_formats, eye_size);
+        }
+        let scene_drawn = match (background, home_scene.as_mut()) {
+            (Some(shown), Some(scene)) if scene_wanted => scene.draw(&session, &device, &context, &local, frame.display_time, shown, home.scene_hour(), &mut home),
+            _ => false,
+        };
+        // The room's sound goes with it, while no game runs (a game's own sound has the player's
+        // ears then): heard from the head, fading as the room comes and goes.
+        if let Some(scene) = home_scene.as_mut() {
+            let room_heard = scene_drawn && no_game && background == Some(scene::Background::Home);
+            scene.hear(room_heard, home.scene_volume(), last_head.as_ref().map(|h| (h.orientation, h.position)));
+        }
+        // The plain dark under what floats, when nothing else is: made again when needed, let go
+        // while the background has shown a while.
+        let dark_wanted = frame.should_render && !projected && !scene_drawn;
+        if dark_wanted {
+            background_since = None;
+            if backdrop.is_none() && !backdrop_failed {
+                match make_backdrop() {
+                    Ok(made) => backdrop = made,
+                    Err(e) => {
+                        println!("The dark under the panels could not be made ({e}); none from now on");
+                        backdrop_failed = true;
+                    }
+                }
+            }
+        } else if scene_drawn && background_since.get_or_insert_with(Instant::now).elapsed() >= BACKDROP_IDLE {
+            backdrop = None;
+        }
+        if let Some(layer) = home_scene.as_ref().filter(|_| scene_drawn).and_then(|scene| scene.layer(&local)) {
+            layers.insert(0, layer);
+        } else if let (true, Some(chains), Some(views)) = (dark_wanted, &backdrop, &backdrop_views) {
             let view = |eye: usize| ProjectionView { pose: views[eye].pose, fov: views[eye].fov, swapchain: &chains[eye], depth: None };
             layers.insert(0, Layer::Projection { space: &local, views: [view(0), view(1)] });
         }
